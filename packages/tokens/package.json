@@ -1,0 +1,21 @@
+{
+  "name": "@zoey/tokens",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Design tokens shared by Zoey Console and Zoey Orb. SHARED — see CONTRACT.md §7 before editing.",
+  "type": "module",
+  "main": "./tokens.json",
+  "exports": {
+    ".": "./tokens.json",
+    "./css": "./dist/tokens.css",
+    "./dist/tokens.css": "./dist/tokens.css"
+  },
+  "files": [
+    "tokens.json",
+    "dist"
+  ],
+  "scripts": {
+    "build": "node build.mjs",
+    "prepare": "node build.mjs"
+  }
+}

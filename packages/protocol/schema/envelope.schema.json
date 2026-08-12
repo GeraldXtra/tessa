@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://zoey.local/schema/envelope.schema.json",
+  "title": "Zoey message envelope",
+  "description": "CONTRACT.md §3. Every WebSocket frame, both directions, is exactly this shape. One JSON object per text frame, UTF-8, max 1 MiB.",
+  "type": "object",
+  "required": ["v", "id", "ts", "type", "payload"],
+  "properties": {
+    "v": {
+      "type": "integer",
+      "const": 1,
+      "description": "PROTOCOL_VERSION. Mismatch closes the connection with 4409."
+    },
+    "id": {
+      "type": "string",
+      "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+      "description": "ULID, unique per message. Commands are idempotent by this id (CONTRACT §3.3)."
+    },
+    "ts": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$",
+      "description": "ISO-8601 UTC with exactly milliseconds precision."
+    },
+    "type": {
+      "type": "string",
+      "pattern": "^(cmd|res|err|evt)\\.[a-z][a-zA-Z0-9]*(\\.[a-z][a-zA-Z0-9]*)*$",
+      "description": "Namespaced type. CONTRACT §3.1. Unknown types MUST be ignored, never error (§3.2)."
+    },
+    "corr": {
+      "type": ["string", "null"],
+      "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+      "description": "The `id` this message responds to. null for unsolicited events."
+    },
+    "payload": {
+      "type": "object",
+      "description": "Type-specific. May be empty. Unknown FIELDS inside a known payload MUST be ignored (§3.2)."
+    }
+  },
+  "additionalProperties": false,
+
+  "$comment": "additionalProperties:false applies to the ENVELOPE only. Payloads are deliberately open so that additive changes do not bump PROTOCOL_VERSION (CONTRACT §7.2)."
+}

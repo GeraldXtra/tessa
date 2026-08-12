@@ -1,0 +1,33 @@
+{
+  "name": "zoey",
+  "version": "0.1.0",
+  "private": true,
+  "description": "ZOEY_OS monorepo — one Python daemon, two surfaces (Console + Orb).",
+  "workspaces": [
+    "packages/*",
+    "apps/console"
+  ],
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "scripts": {
+    "tokens": "node packages/tokens/build.mjs",
+    "protocol:check": "tsc -p packages/protocol/tsconfig.json --noEmit",
+    "protocol:test": "node --experimental-strip-types packages/protocol/test/smoke.ts",
+    "test": "npm run protocol:test",
+    "bootstrap": "npm run tokens && npm run protocol:test",
+    "console:dev": "npm run -w @zoey/console dev",
+    "console:build": "npm run -w @zoey/console build",
+    "core:dev": "python core/server.py --dev"
+  },
+  "devDependencies": {
+    "typescript": "5.9.3"
+  },
+  "$comment": [
+    "apps/orb is deliberately NOT in workspaces — it is owned by a separate Claude Code session",
+    "and is added by that session when it lands. Adding it here would install its deps into the",
+    "shared node_modules before it exists.",
+    "",
+    "Disk budget: the owner's C: has ~14.5 GB free. Keep the dependency set small and prune builds."
+  ]
+}

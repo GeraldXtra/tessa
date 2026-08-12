@@ -1,0 +1,48 @@
+# ── dependencies ────────────────────────────────────────────────────────────
+node_modules/
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+
+# ── generated (regenerate with `npm run tokens`) ─────────────────────────────
+packages/tokens/dist/
+packages/protocol/gen/
+
+# ── build output ────────────────────────────────────────────────────────────
+dist/
+out/
+build/
+release/
+*.tsbuildinfo
+
+# ── Electron / native ───────────────────────────────────────────────────────
+.electron-cache/
+.cache/
+*.node
+
+# ── runtime data — NEVER commit: contains the auth token (CONTRACT §2) ──────
+data/
+*.db
+*.db-wal
+*.db-shm
+runtime.json
+
+# ── secrets ─────────────────────────────────────────────────────────────────
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# ── logs ────────────────────────────────────────────────────────────────────
+logs/
+*.log
+npm-debug.log*
+
+# ── editors / OS ────────────────────────────────────────────────────────────
+.vscode/*
+!.vscode/extensions.json
+.idea/
+Thumbs.db
+desktop.ini
