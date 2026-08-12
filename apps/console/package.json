@@ -1,0 +1,58 @@
+{
+  "name": "@zoey/console",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Zoey Console \u2014 the terminal surface. ConPTY under xterm, one WebSocket in the main process.",
+  "main": "./out/main/index.js",
+  "scripts": {
+    "smoke:pty": "node scripts/smoke-pty.mjs",
+    "dev": "electron-vite dev",
+    "build": "electron-vite build",
+    "preview": "electron-vite preview",
+    "typecheck": "tsc -p tsconfig.node.json --noEmit && tsc -p tsconfig.preload.json --noEmit && tsc -p tsconfig.web.json --noEmit"
+  },
+  "dependencies": {
+    "@lydell/node-pty": "1.1.0",
+    "@xterm/addon-fit": "0.11.0",
+    "@xterm/addon-webgl": "0.19.0",
+    "@xterm/xterm": "6.0.0",
+    "react": "19.2.8",
+    "react-dom": "19.2.8",
+    "ws": "8.21.3"
+  },
+  "devDependencies": {
+    "@types/react": "19.2.18",
+    "@types/react-dom": "19.2.4",
+    "@types/ws": "8.18.1",
+    "@vitejs/plugin-react": "5.2.0",
+    "@zoey/protocol": "1.0.0",
+    "@zoey/tokens": "1.0.0",
+    "electron": "43.4.0",
+    "electron-vite": "5.0.0",
+    "vite": "7.3.6"
+  },
+  "$comment": [
+    "NO \"type\": \"module\" \u2014 deliberate, same as apps/orb. A sandboxed Electron preload CANNOT be an",
+    "ES module; declaring the package ESM makes electron-vite emit ESM for main AND preload, and the",
+    "preload then fails to load at runtime. Source is ESM TypeScript either way; electron-vite",
+    "transpiles main/preload to CJS and the renderer stays ESM via Vite.",
+    "",
+    "DEPENDENCY CLASS IS THE EXTERNALIZATION SWITCH. electron-vite externalizes `dependencies` and",
+    "bundles `devDependencies`:",
+    "  - @lydell/node-pty and ws are in `dependencies` \u2014 externalized, required at runtime. node-pty",
+    "    resolves its binary via a runtime dynamic require plus an on-disk package.json read, so",
+    "    bundling it is fatal. Bundling ws would drag in its optional native deps (bufferutil,",
+    "    utf-8-validate) as unresolvable imports.",
+    "  - @zoey/protocol and @zoey/tokens are devDependencies ON PURPOSE. @zoey/protocol's entry is raw",
+    "    TypeScript (src/index.ts, importing ./enums.generated.ts). Externalized, that becomes a",
+    "    runtime require() of a .ts file and main crashes on launch. As devDeps they are bundled.",
+    "  - react/react-dom/@xterm/* are renderer-only; Vite bundles the renderer regardless of class.",
+    "",
+    "vite is pinned to 7.3.6, NOT 8.x. electron-vite 5.0.0 peer-deps vite ^5||^6||^7; supporting vite 8",
+    "required a new MAJOR (electron-vite 6.0.0-beta.1, peer ^6||^7||^8). Vite 8 swaps Rollup+esbuild",
+    "for Rolldown with documented CJS-interop changes \u2014 and CJS main/preload emission is exactly what",
+    "the sandboxed-preload strategy above depends on. Matches apps/orb, which resolved to 7.3.6 too.",
+    "",
+    "Versions pinned exactly, never caret ranges \u2014 same rule apps/orb applies."
+  ]
+}

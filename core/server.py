@@ -34,15 +34,27 @@ import websockets
 from websockets.asyncio.server import ServerConnection, serve
 from websockets.http11 import Request, Response
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+ROOT_DIR = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT_DIR))
+# Generated from packages/protocol/schema/enums.json — the single source of
+# truth shared with TypeScript. Never hand-maintain a second copy here.
+sys.path.insert(0, str(ROOT_DIR / "packages" / "protocol" / "gen" / "python"))
 
+from zoey_protocol import (  # noqa: E402
+    PROTOCOL_VERSION,
+    PTY_REPORT_EVENTS,
+    SURFACES,
+    CLOSE_UNAUTHORIZED,
+    CLOSE_HANDSHAKE_TIMEOUT,
+    CLOSE_PROTOCOL_MISMATCH,
+    CLOSE_RATE_LIMITED,
+)
 from core.security.audit import AuditLog  # noqa: E402
 from core.security.guard import Guard, Verdict  # noqa: E402
 from core.security import runtime as rt  # noqa: E402
 
 # ── constants from CONTRACT ───────────────────────────────────────────────────
 
-PROTOCOL_VERSION = 1
 DAEMON_VERSION = "0.1.0"
 PREFERRED_PORT = 47600
 PORT_SCAN_LIMIT = 20
@@ -50,11 +62,6 @@ WS_PATH = "/v1"
 ALLOWED_ORIGINS = frozenset({"zoey://console", "zoey://orb"})
 HANDSHAKE_DEADLINE_S = 3.0
 MAX_FRAME_BYTES = 1024 * 1024
-
-CLOSE_UNAUTHORIZED = 4401
-CLOSE_HANDSHAKE_TIMEOUT = 4408
-CLOSE_PROTOCOL_MISMATCH = 4409
-CLOSE_RATE_LIMITED = 4429
 
 FAILURE_WINDOW_S = 60.0
 FAILURE_LIMIT = 5
@@ -284,7 +291,7 @@ class ZoeyDaemon:
             return False
 
         surface = payload.get("surface")
-        if surface not in ("console", "orb"):
+        if surface not in SURFACES:
             await ws.close(CLOSE_UNAUTHORIZED, "unknown surface")
             self.record_failure()
             return False
@@ -451,7 +458,7 @@ class ZoeyDaemon:
         daemon never sees the byte stream (CONTRACT §4.2)."""
         session_id = payload.get("sessionId")
         event = payload.get("event")
-        if event not in ("started", "exited", "cwdChanged", "titleChanged", "killed"):
+        if event not in PTY_REPORT_EVENTS:
             await ws.send(envelope("err.protocol.badEnvelope", {
                 "code": "protocol.badEnvelope", "message": f"bad report event {event!r}",
                 "retryable": False,

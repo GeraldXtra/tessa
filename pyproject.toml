@@ -1,0 +1,50 @@
+[project]
+name = "zoey-core"
+version = "0.1.0"
+description = "ZOEY_OS Core — the Python daemon both surfaces talk to"
+requires-python = ">=3.12"
+license = { text = "Proprietary — see COPYRIGHT.md" }
+authors = [{ name = "Gerald", email = "" }]
+
+# Pinned deliberately. Before this file existed, core/ imported websockets from
+# global Python with nothing recorded — it ran on exactly one machine, and a
+# Python reinstall would have taken the daemon with it.
+dependencies = [
+    "websockets==17.0.1",
+    "PyYAML==6.0.3",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest==8.3.4",
+    "pytest-asyncio==0.25.2",
+]
+
+[project.scripts]
+zoey-core = "core.server:run"
+
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["core", "core.security"]
+
+[tool.pytest.ini_options]
+testpaths = ["core/tests"]
+asyncio_mode = "auto"
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "S"]
+ignore = [
+    "S101",  # assert — used throughout the test suites
+    "S603",  # subprocess call — icacls/tasklist are invoked with fixed argv, never a shell
+    "S607",  # partial executable path — icacls/tasklist resolve from System32
+]
+
+[tool.ruff.lint.per-file-ignores]
+"core/tests/*" = ["S105", "S106"]  # hard-coded dummy tokens are the point of an auth test

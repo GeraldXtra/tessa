@@ -1,0 +1,18 @@
+{
+  "$comment": [
+    "Solution file. The Orb has two genuinely different type environments and they must not",
+    "bleed into each other:",
+    "",
+    "  tsconfig.node.json  main + preload + shared   — Node globals, the ONLY place `ws` exists",
+    "  tsconfig.web.json   renderer                  — DOM only, `types: []` so `process`,",
+    "                                                  `Buffer` and `require` are not even",
+    "                                                  nameable. CONTRACT §2.3 says the renderer",
+    "                                                  never opens a socket; this makes the",
+    "                                                  compiler agree."
+  ],
+  "files": [],
+  "references": [
+    { "path": "./tsconfig.node.json" },
+    { "path": "./tsconfig.web.json" }
+  ]
+}

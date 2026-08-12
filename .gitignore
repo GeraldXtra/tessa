@@ -5,9 +5,19 @@ venv/
 __pycache__/
 *.py[cod]
 
-# ── generated (regenerate with `npm run tokens`) ─────────────────────────────
+# ── generated (regenerate with `npm run tokens` / `npm run enums`) ───────────
 packages/tokens/dist/
-packages/protocol/gen/
+
+# NOTE: the generated PROTOCOL output is deliberately NOT ignored —
+# neither packages/protocol/gen/python/ nor src/enums.generated.ts.
+# Both are imported by code that must run from a fresh clone: core/ imports the
+# Python at daemon startup, and index.ts re-exports the TypeScript for both
+# surfaces. Ignoring them would make "clone and run the daemon" depend on a Node
+# build step first — a hard cross-language coupling for no benefit.
+# They are committed, and scripts/check-contract.mjs fails the build if either
+# drifts from schema/enums.json.
+# (Deviates from docs/STRUCTURE.md line 71, which marks gen/ ignored — flagged
+#  to Gerald for a ruling.)
 
 # ── build output ────────────────────────────────────────────────────────────
 dist/

@@ -1,0 +1,226 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://zoey.local/schema/enums.json",
+  "title": "Zoey closed enums — SINGLE SOURCE OF TRUTH",
+  "description": "CONTRACT.md §7.4. These were previously hand-maintained in four places (CONTRACT.md, index.ts, core/*.py, tests) and would have drifted. TypeScript and Python are now GENERATED from this file by build-enums.mjs. Adding a value to any set marked closed:true is a BREAKING change requiring a PROTOCOL_VERSION bump.",
+
+  "meta": {
+    "protocolVersion": 1,
+    "naming": "camelCase for multi-word values on the wire, matching the existing cloudOnly / cwdChanged / titleChanged. The DB may use snake_case internally (spec §6 calls its trigger_type column 'INTERNAL, richer') — the wire and the schema are not the same thing."
+  },
+
+  "enums": {
+    "AgentState": {
+      "closed": true,
+      "tsConst": "AGENT_STATES",
+      "pyName": "AGENT_STATES",
+      "description": "CONTRACT §4.1 evt.agent.state. Orb drives the sphere from this; Console drives its status bar.",
+      "values": [
+        { "value": "idle", "note": "nothing in flight" },
+        { "value": "listening", "note": "capturing audio (Orb)" },
+        { "value": "thinking", "note": "model call in flight" },
+        { "value": "speaking", "note": "TTS playing (Orb)" },
+        { "value": "working", "note": "executing tools, making progress unattended" },
+        { "value": "blocked", "note": "ADDED pre-approval. Waiting on the owner's approval. Distinct from `working`: at 2am you need to tell 'busy' from 'stuck waiting for you' at a glance. Orb renders amber and static; Console shows it in the status bar." }
+      ]
+    },
+
+    "JobStatus": {
+      "closed": true,
+      "tsConst": "JOB_STATUSES",
+      "pyName": "JOB_STATUSES",
+      "description": "CONTRACT §4.1 evt.job.updated / evt.job.completed.",
+      "values": [
+        { "value": "queued" },
+        { "value": "running" },
+        { "value": "blocked", "note": "approval outstanding, still live" },
+        { "value": "succeeded", "note": "spec v3.0 called this `done`; renamed to pair with `failed`" },
+        { "value": "failed" },
+        { "value": "cancelled" },
+        { "value": "needsReview", "note": "ADDED pre-approval. An approval expired unanswered after 30 minutes (spec §5 rule 5). Deliberately not `failed` (nothing broke) and not `cancelled` (nobody cancelled). Distinct from `blocked`: blocked is still waiting, needsReview means the window closed." }
+      ]
+    },
+
+    "CreatedBy": {
+      "closed": true,
+      "tsConst": "CREATED_BY",
+      "pyName": "CREATED_BY",
+      "description": "CONTRACT §4.1 evt.job.created. What caused this job to exist.",
+      "values": [
+        { "value": "user" },
+        { "value": "agent" },
+        { "value": "schedule", "note": "cron / time trigger" },
+        { "value": "fileWatch", "note": "ADDED pre-approval. Phase 5 file-watch trigger." },
+        { "value": "email", "note": "ADDED pre-approval. Phase 5 inbound mail trigger." },
+        { "value": "webhook", "note": "ADDED pre-approval. Phase 5 webhook trigger." },
+        { "value": "systemEvent", "note": "ADDED pre-approval, NOT in the owner's list. Spec §3.4/line 396 lists five trigger types: time, file-watch, email, webhook, AND system event. Omitting it would have forced a version bump the first time a job fires on battery-low, lock, or device-connect — exactly the unattended triggers this agent is for." }
+      ]
+    },
+
+    "PtyReportEvent": {
+      "closed": true,
+      "tsConst": "PTY_REPORT_EVENTS",
+      "pyName": "PTY_REPORT_EVENTS",
+      "description": "CONTRACT §6.5 cmd.pty.report. Keeps the audit trail complete even though the daemon never sees the byte stream.",
+      "values": [
+        { "value": "started" },
+        { "value": "exited" },
+        { "value": "cwdChanged" },
+        { "value": "titleChanged" },
+        { "value": "killed" },
+        { "value": "startFailed", "note": "ADDED pre-approval. Without it, a node-pty spawn failure leaves an issued grant with no terminal event: dangling grant, broken audit trail. With a beta native module and no MSVC on this machine, that is a realistic path, not a theoretical one. The daemon reclaims the grant on receipt." }
+      ]
+    },
+
+    "Surface": {
+      "closed": true,
+      "tsConst": "SURFACES",
+      "pyName": "SURFACES",
+      "description": "CONTRACT §2.2 cmd.hello. Deliberately NOT extended with `mobile` — see the rationale in the report and CONTRACT §2.4.",
+      "values": [
+        { "value": "console" },
+        { "value": "orb" }
+      ]
+    },
+
+    "Tier": {
+      "closed": true,
+      "tsConst": "TIERS",
+      "pyName": "TIERS",
+      "description": "CONTRACT §6.4. Defined once in core/config/permissions.yaml. Unchanged — spec §6 defines exactly three and no fourth is implied through Phase 8.",
+      "values": [
+        { "value": "green" },
+        { "value": "amber" },
+        { "value": "red" }
+      ]
+    },
+
+    "Provenance": {
+      "closed": true,
+      "tsConst": "PROVENANCE",
+      "pyName": "PROVENANCE",
+      "description": "CONTRACT §6.2. Where a byte, an action, or a piece of context came from. This is the prompt-injection boundary: everything except `human` is untrusted.",
+      "values": [
+        { "value": "human", "note": "the owner typed or clicked it — the only trusted source" },
+        { "value": "program", "note": "process stdout/stderr on this machine" },
+        { "value": "agent", "note": "model-proposed" },
+        { "value": "schedule", "note": "an unattended trigger" },
+        { "value": "external", "note": "ADDED pre-approval. Content fetched from off this machine: email bodies, web pages, remote READMEs. §6.1 makes all of it untrusted data, but with only `program` available there was no way to TAG it as such. Phase 3 adds browser and Phase 5 adds mail; without this the provenance chain silently mislabels the highest-risk category." },
+        { "value": "system", "note": "ADDED pre-approval. The daemon's own actions (daemon.start, auth.lockout). core/security/audit.py already writes actor='system' — this aligns the wire enum with what the audit log has been emitting since commit one." }
+      ]
+    },
+
+    "SpawnMode": {
+      "closed": true,
+      "tsConst": "SPAWN_MODES",
+      "pyName": "SPAWN_MODES",
+      "description": "CONTRACT §5.2 cmd.window.spawnAt and §6.6 deep links.",
+      "values": [
+        { "value": "window" },
+        { "value": "tab" },
+        { "value": "pane" },
+        { "value": "cdCurrent", "note": "ADDED pre-approval. Change directory in the focused terminal instead of spawning a new one. This is what VS Code's tree does and the most commonly wanted default in a terminal with a file tree — the owner may well prefer it to a new window after a week of use. Note it must NOT be reachable from a deep link (§6.6), because it mutates an existing session's state." }
+      ]
+    },
+
+    "FsChangeKind": {
+      "closed": true,
+      "tsConst": "FS_CHANGE_KINDS",
+      "pyName": "FS_CHANGE_KINDS",
+      "description": "CONTRACT §4.2 evt.fs.changed.",
+      "values": [
+        { "value": "created" },
+        { "value": "modified" },
+        { "value": "deleted" },
+        { "value": "renamed" },
+        { "value": "hydrationChanged", "note": "ADDED pre-approval. A OneDrive file switching between cloud-only and local is not create/modify/delete/rename — the content is unchanged, only its cloud state moved. With 17,340 reparse points and the Hydration Firewall as a headline feature, the tree needs to repaint the cost badge on this event and has no other way to hear about it." }
+      ]
+    },
+
+    "CloudState": {
+      "closed": true,
+      "tsConst": "CLOUD_STATES",
+      "pyName": "CLOUD_STATES",
+      "description": "CONTRACT §4.2 FsEntry.cloudState, derived from attributes alone — never by opening the file.",
+      "values": [
+        { "value": "local" },
+        { "value": "cloudOnly" },
+        { "value": "pinned" },
+        { "value": "partial" },
+        { "value": "unknown", "note": "ADDED pre-approval. Microsoft documents FILE_ATTRIBUTE_UNPINNED as 'internal use only', and Dropbox/Google Drive use different reparse tags. Without `unknown` the enumerator must guess, and a wrong guess in the Hydration Firewall either blocks a local file or lets a metered download through silently. Failing honestly is the safer default." }
+      ]
+    },
+
+    "Decision": {
+      "closed": true,
+      "tsConst": "DECISIONS",
+      "pyName": "DECISIONS",
+      "description": "CONTRACT §4.1 evt.permission.resolved and §5.1 cmd.permission.respond. NOTE the asymmetry: a surface may only SEND approve|deny. `expired` is daemon-emitted only.",
+      "values": [
+        { "value": "approve", "sendable": true },
+        { "value": "deny", "sendable": true },
+        { "value": "expired", "sendable": false, "note": "ADDED pre-approval, and a direct consequence of accepting needsReview. evt.permission.request carries expiresAt; when 30 minutes pass unanswered the daemon must broadcast a resolution so the OTHER surface dismisses its approval card. With only approve|deny it could not, and a stale card would hang on the Orb forever. A surface sending `expired` is a contract violation." }
+      ]
+    },
+
+    "Role": {
+      "closed": true,
+      "tsConst": "ROLES",
+      "pyName": "ROLES",
+      "description": "CONTRACT §4.1 transcript messages. Unchanged — covers the full tool-use loop through Phase 8.",
+      "values": [
+        { "value": "user" },
+        { "value": "assistant" },
+        { "value": "system" },
+        { "value": "tool" }
+      ]
+    },
+
+    "NotificationLevel": {
+      "closed": true,
+      "tsConst": "NOTIFICATION_LEVELS",
+      "pyName": "NOTIFICATION_LEVELS",
+      "description": "CONTRACT §4.1 evt.notification. Unchanged — severity, not category. Job outcomes ride evt.job.completed, not this.",
+      "values": [
+        { "value": "info" },
+        { "value": "warn" },
+        { "value": "error" }
+      ]
+    },
+
+    "ErrorCode": {
+      "closed": false,
+      "tsConst": "ERROR_CODES",
+      "pyName": "ERROR_CODES",
+      "description": "CONTRACT §5.4. DELIBERATELY OPEN — see §7.4. Consumers MUST have a default branch. Diagnostic codes will keep accruing through Phase 8, and making every new one a breaking change would be absurd.",
+      "values": [
+        { "value": "protocol.unknownType" },
+        { "value": "protocol.badEnvelope" },
+        { "value": "auth.required" },
+        { "value": "permission.denied" },
+        { "value": "permission.pending" },
+        { "value": "permission.expired", "note": "ADDED. Pairs with Decision.expired." },
+        { "value": "notFound" },
+        { "value": "busy" },
+        { "value": "rateLimited", "note": "ADDED. CloseCode 4429 existed with no in-band equivalent for a request refused without closing the socket." },
+        { "value": "budgetExceeded", "note": "ADDED. Spec §6 mandates a hard nightly budget cap. A job refused on budget is not permission.denied — the owner never denied anything." },
+        { "value": "unavailable", "note": "ADDED. Spec §3.9 requires graceful degradation when the Claude API is unreachable: queue, don't crash. The surface must be able to tell 'offline' from 'broken'." },
+        { "value": "internal" }
+      ]
+    },
+
+    "CloseCode": {
+      "closed": false,
+      "numeric": true,
+      "tsConst": "CLOSE_CODES",
+      "pyName": "CLOSE_CODES",
+      "description": "CONTRACT §2.2. DELIBERATELY OPEN. Standard RFC 6455 codes (1001 going away, 1009 message too big) are used unchanged and are not re-declared here.",
+      "values": [
+        { "value": 4401, "name": "Unauthorized" },
+        { "value": 4408, "name": "HandshakeTimeout" },
+        { "value": 4409, "name": "ProtocolMismatch" },
+        { "value": 4429, "name": "RateLimited" }
+      ]
+    }
+  }
+}

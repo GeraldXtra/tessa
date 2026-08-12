@@ -1,0 +1,38 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2022"],
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "noImplicitOverride": true,
+    "noFallthroughCasesInSwitch": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+
+    "isolatedModules": true,
+    "verbatimModuleSyntax": true,
+    "forceConsistentCasingInFileNames": true,
+    "skipLibCheck": true,
+    "resolveJsonModule": true,
+
+    "composite": true,
+    "noEmit": true,
+
+    "allowImportingTsExtensions": true
+  },
+  "include": [
+    "src/main/**/*.ts",
+    "src/preload/**/*.ts",
+    "src/shared/**/*.ts",
+    "electron.vite.config.ts"
+  ],
+  "$comment": [
+    "allowImportingTsExtensions is REQUIRED, not stylistic. @zoey/protocol's entry point is raw",
+    "TypeScript (packages/protocol/src/index.ts) and it imports './enums.generated.ts' with the",
+    "extension spelled out. Without this flag tsc refuses to follow that import. It forces",
+    "noEmit: true, which is fine — electron-vite does the emitting."
+  ]
+}

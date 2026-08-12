@@ -99,6 +99,14 @@ Close codes:
 - Failed auth → close immediately, audit-log, apply 1 s per-source backoff. **Five failures within 60 s disables the listener** until the daemon is restarted.
 - The daemon **never** logs the token value, in any log level.
 
+### 2.4 Why there is no `mobile` surface
+
+`Surface` is `console | orb` and deliberately excludes `mobile`.
+
+A phone is a different device. It cannot read `%LOCALAPPDATA%\Zoey\runtime.json`, and it cannot reach `127.0.0.1`. Every control in §2 — the token file, the loopback bind, the `zoey://` Origin allowlist — is local-only *by construction*. Adding a `mobile` value would declare a capability that no part of this contract can serve.
+
+Remote access is a different design (relay or push service, a different auth model, a different threat model) and will require its own contract revision regardless. Reserving the enum value now buys nothing and implies something untrue. The spec's answer for "check on jobs while away" is an **outbound bridge** — push notification, Telegram/WhatsApp — which is not a surface and needs no value here.
+
 ---
 
 ## 3. Message envelope
@@ -142,7 +150,7 @@ This single rule is what allows one surface to ship a new feature without breaki
 
 ### 3.3 Ordering and idempotency
 
-- `evt.pty.data` and `evt.transcript.delta` carry a **monotonic `seq`** scoped to their `sessionId`/`messageId`. Consumers reassemble by `seq` and must tolerate out-of-order arrival.
+- `evt.transcript.delta` carries a **monotonic `seq`** scoped to its `messageId`. Consumers reassemble by `seq` and must tolerate out-of-order arrival. (The PTY byte stream also carries a `seq`, but it never crosses this protocol — see §4.2.)
 - All `cmd.*` are **idempotent by `id`**. A retried command with the same `id` must not execute twice.
 
 ---
@@ -153,17 +161,17 @@ This single rule is what allows one surface to ship a new feature without breaki
 
 | Type | Payload | Notes |
 |---|---|---|
-| `evt.agent.state` | `{ companionId, state, detail? }` | `state` ∈ `idle` \| `listening` \| `thinking` \| `speaking` \| `working`. Orb drives the sphere from this; Console drives its status bar from the same event. |
+| `evt.agent.state` | `{ companionId, state, detail? }` | `state` ∈ `idle` \| `listening` \| `thinking` \| `speaking` \| `working` \| `blocked`. Orb drives the sphere from this; Console drives its status bar from the same event. **`blocked` = waiting on your approval** — deliberately distinct from `working`, so that walking past the machine at 2am tells you "busy" from "stuck waiting for you". Orb renders it amber and static. |
 | `evt.companion.roster` | `{ companions: [{ companionId, name, voice, tools[], scope }] }` | Full snapshot, sent on subscribe. |
 | `evt.companion.status` | `{ companionId, name, state, busy, tools[], scope }` | Per-companion change. |
 | `evt.transcript.delta` | `{ companionId, messageId, role, seq, delta, done }` | Streaming text. `role` ∈ `user` \| `assistant` \| `system` \| `tool`. `done:true` closes the message. |
 | `evt.transcript.message` | `{ companionId, message: { messageId, role, text, toolCalls?, ts } }` | A complete, non-streamed message. |
-| `evt.job.created` | `{ jobId, kind, title, tier, createdBy, steps: [{ index, title, status }] }` | `createdBy` ∈ `user` \| `agent` \| `schedule`. |
+| `evt.job.created` | `{ jobId, kind, title, tier, createdBy, steps: [{ index, title, status }] }` | `createdBy` ∈ `user` \| `agent` \| `schedule` \| `fileWatch` \| `email` \| `webhook` \| `systemEvent`. The last four are the Phase 5 trigger types (spec §3.4); they are neither `agent` nor `schedule`. |
 | `evt.job.progress` | `{ jobId, stepIndex, pct?, note? }` | |
-| `evt.job.updated` | `{ jobId, status, stepIndex? }` | `status` ∈ `queued` \| `running` \| `blocked` \| `succeeded` \| `failed` \| `cancelled`. |
+| `evt.job.updated` | `{ jobId, status, stepIndex? }` | `status` ∈ `queued` \| `running` \| `blocked` \| `succeeded` \| `failed` \| `cancelled` \| `needsReview`. **`blocked`** = approval outstanding, still live. **`needsReview`** = the approval window lapsed unanswered after 30 min (spec §5 rule 5) — not `failed` (nothing broke), not `cancelled` (nobody cancelled). |
 | `evt.job.completed` | `{ jobId, status, result?, error? }` | Terminal event for a job. |
 | `evt.permission.request` | `{ requestId, tier, tool, args, provenance, expiresAt }` | `tier` ∈ `green` \| `amber` \| `red`. **`provenance` REQUIRED** — see §6. Either surface may render the approval card. |
-| `evt.permission.resolved` | `{ requestId, decision, decidedBy, remembered }` | Broadcast so the *other* surface dismisses its card. |
+| `evt.permission.resolved` | `{ requestId, decision, decidedBy, remembered }` | `decision` ∈ `approve` \| `deny` \| `expired`. Broadcast so the *other* surface dismisses its card. **`expired` is daemon-emitted only** — see §5.1. |
 | `evt.audit.appended` | `{ entryId, actor, tool, tier, summary, ts }` | Live audit viewer. |
 | `evt.daemon.health` | `{ uptimeS, cpuPct, memMB, apiReachable, budgetSpent, budgetCap }` | Heartbeat every 5 s. |
 | `evt.daemon.shutdown` | `{ reason, restarting }` | Surfaces show a reconnect state. |
@@ -184,7 +192,7 @@ This single rule is what allows one surface to ship a new feature without breaki
 | `evt.pty.sessions` | `{ sessions: [{ sessionId, profileId, cwd, title, startedAt, busy }] }` — roster the daemon assembles from Console reports. **The Orb may subscribe** to show terminal activity. |
 | `evt.pty.revoke` | `{ sessionId, reason }` — the daemon orders a session killed. The Console **must** comply and report back. |
 | `evt.fs.children` | `{ requestId, path, entries[], truncated, complete }` — may span multiple frames |
-| `evt.fs.changed` | `{ path, kind }` — `kind` ∈ `created` \| `modified` \| `deleted` \| `renamed` |
+| `evt.fs.changed` | `{ path, kind }` — `kind` ∈ `created` \| `modified` \| `deleted` \| `renamed` \| `hydrationChanged`. The last means a file moved between cloud-only and local: content unchanged, cost badge changed. |
 | `evt.fs.hydrationWarning` | `{ path, bytesToDownload, estimatedCostNGN }` — see §6.3 |
 
 `entries[]` element shape:
@@ -198,7 +206,7 @@ This single rule is what allows one surface to ship a new feature without breaki
   "mtime": "2026-07-02T11:04:55.000Z",
   "attrs": 32,               // raw Win32 FILE_ATTRIBUTE_* bitfield
   "reparseTag": 0,           // 0 = not a reparse point
-  "cloudState": "local"      // "local" | "cloudOnly" | "pinned" | "partial"
+  "cloudState": "local"      // "local" | "cloudOnly" | "pinned" | "partial" | "unknown"
 }
 ```
 
@@ -224,7 +232,7 @@ Listed so the Console never claims these names:
 | `cmd.job.create` | `{ kind, title, args, tier }` | `res.job.created { jobId }` |
 | `cmd.job.cancel` | `{ jobId }` | `res.ok` |
 | `cmd.job.retry` | `{ jobId }` | `res.ok` |
-| `cmd.permission.respond` | `{ requestId, decision, remember? }` — `decision` ∈ `approve` \| `deny` | `res.ok` |
+| `cmd.permission.respond` | `{ requestId, decision, remember? }` — `decision` ∈ `approve` \| `deny` **only**. A surface may never send `expired`; that value exists solely so the daemon can resolve a lapsed request and clear the other surface's card. | `res.ok` |
 | `cmd.config.get` | `{ key }` | `res.config { key, value }` |
 | `cmd.config.set` | `{ key, value }` | `res.config` |
 | `cmd.audit.query` | `{ since?, limit, filter? }` | `res.audit { entries[] }` |
@@ -240,7 +248,7 @@ Listed so the Console never claims these names:
 | `cmd.fs.watch` | `{ path }` | `res.ok` |
 | `cmd.fs.unwatch` | `{ path }` | `res.ok` |
 | `cmd.fs.reveal` | `{ path }` | `res.ok` — opens Windows Explorer |
-| `cmd.window.spawnAt` | `{ path, mode }` — `mode` ∈ `window` \| `tab` \| `pane` | `res.ok` |
+| `cmd.window.spawnAt` | `{ path, mode }` — `mode` ∈ `window` \| `tab` \| `pane` \| `cdCurrent`. `cdCurrent` changes directory in the focused terminal instead of spawning. **Not reachable from a deep link** — see §6.6. | `res.ok` |
 
 ### 5.3 Orb-only commands
 
@@ -277,12 +285,14 @@ These are not Console-specific. **Both surfaces are bound by them.**
 
 Every captured byte and every action carries a provenance tag:
 
-| Tag | Meaning |
-|---|---|
-| `human` | The owner typed it |
-| `program` | Process stdout/stderr |
-| `agent` | Model-proposed |
-| `schedule` | Triggered by a scheduled job |
+| Tag | Meaning | Trusted? |
+|---|---|---|
+| `human` | The owner typed or clicked it | **Yes — the only trusted source** |
+| `program` | Process stdout/stderr on this machine | No |
+| `agent` | Model-proposed | No |
+| `schedule` | Triggered by a scheduled job | No |
+| `external` | Fetched from off this machine: email bodies, web pages, remote READMEs | **No — highest risk** |
+| `system` | The daemon's own actions (`daemon.start`, `auth.lockout`) | n/a |
 
 - Provenance is carried **out of band**, over this WebSocket, keyed to `(sessionId, byteOffset)`. It **never travels inside the PTY byte stream**.
 - Any provenance-shaped escape sequence arriving *from* a PTY is **stripped before parsing**, so a hostile `npm postinstall` cannot paint its own output as agent-approved or human-typed.
@@ -320,6 +330,8 @@ Any webpage can trigger a registered protocol handler. Therefore:
 zoey://open?path=<url-encoded-absolute-path>&mode=window|tab|pane
 ```
 
+- **`mode` is a strict subset of `SpawnMode`.** `cdCurrent` is deliberately NOT reachable from a deep link: it mutates an already-open terminal rather than creating one, so a hostile page reaching it could silently change the working directory of a session you are actively typing into — and the next `rm -rf .` or `git clean -fd` would land somewhere you did not intend. **Deep links may only ever CREATE.**
+
 Adding any parameter to this grammar is a **breaking change** under §7.3.
 
 ---
@@ -335,7 +347,35 @@ Adding any parameter to this grammar is a **breaking change** under §7.3.
    - both surface sessions updating together,
    - the daemon rejecting mismatched clients with close code `4409`.
 
-4. **Enum values are closed sets.** `state`, `status`, `tier`, `role`, `kind`, `cloudState`, `decision`, `createdBy`, `mode`, and `level` are exhaustively switched on by consumers. Adding a value is **breaking**.
+4. **Enums are defined once, in `packages/protocol/schema/enums.json`**, and TypeScript and Python are **generated** from it. Never hand-maintain a copy — that file is the authority, and `scripts/check-contract.mjs` fails the build if the generated output drifts from it.
+
+   **CLOSED sets** — consumers switch on these exhaustively, so adding a value is a **breaking** change:
+
+   | Enum | Values |
+   |---|---|
+   | `AgentState` | `idle` `listening` `thinking` `speaking` `working` `blocked` |
+   | `JobStatus` | `queued` `running` `blocked` `succeeded` `failed` `cancelled` `needsReview` |
+   | `Tier` | `green` `amber` `red` |
+   | `Provenance` | `human` `program` `agent` `schedule` `external` `system` |
+   | `CreatedBy` | `user` `agent` `schedule` `fileWatch` `email` `webhook` `systemEvent` |
+   | `Role` | `user` `assistant` `system` `tool` |
+   | `CloudState` | `local` `cloudOnly` `pinned` `partial` `unknown` |
+   | `FsChangeKind` | `created` `modified` `deleted` `renamed` `hydrationChanged` |
+   | `SpawnMode` | `window` `tab` `pane` `cdCurrent` |
+   | `DeepLinkMode` | `window` `tab` `pane` — strict subset of `SpawnMode`, see §6.6 |
+   | `Decision` | `approve` `deny` `expired` — a surface may only SEND `approve`/`deny` |
+   | `PtyReportEvent` | `started` `exited` `cwdChanged` `titleChanged` `killed` `startFailed` |
+   | `NotificationLevel` | `info` `warn` `error` |
+   | `Surface` | `console` `orb` — see §2.4 |
+
+   **OPEN sets** — new values may be added at any time **without** a version bump. Consumers **MUST** have a default branch:
+
+   | Enum | Why open |
+   |---|---|
+   | `ErrorCode` | Diagnostic codes accrue continuously; making each one breaking would be absurd. |
+   | `CloseCode` | Ditto, plus standard RFC 6455 codes (`1001`, `1009`) are used unchanged. |
+
+   **Naming:** multi-word values are **camelCase** on the wire (`needsReview`, `fileWatch`, `cloudOnly`). The database may use `snake_case` internally — the wire and the schema are not the same thing.
 
 5. **Neither surface session edits this file.** Propose a diff with rationale to the owner; the owner applies it.
 
@@ -348,6 +388,7 @@ Adding any parameter to this grammar is a **breaking change** under §7.3.
 | Version | Date | Change |
 |---|---|---|
 | 1 | 2026-08-12 | Initial contract. Awaiting owner approval. |
+| 1 *(pre-approval revision 2)* | 2026-08-12 | **Enum audit — the last cheap moment before §7.3 makes additions breaking.** Added `AgentState.blocked`; `JobStatus.needsReview`; `CreatedBy.fileWatch/email/webhook/systemEvent`; `PtyReportEvent.startFailed`; `Provenance.external/system`; `SpawnMode.cdCurrent`; `CloudState.unknown`; `FsChangeKind.hydrationChanged`; `Decision.expired` (daemon-emitted only); `ErrorCode.permission.expired/rateLimited/budgetExceeded/unavailable`. Declared `ErrorCode` and `CloseCode` **open** sets. Added §2.4 (no `mobile` surface) and `DeepLinkMode` as a strict subset of `SpawnMode` (§6.6). Enums moved to `packages/protocol/schema/enums.json` as the single generated source of truth. `PROTOCOL_VERSION` stays 1 — pre-approval. |
 | 1 *(pre-approval revision)* | 2026-08-12 | **Removed the PTY byte stream from the protocol.** The first draft carried `evt.pty.data` (base64 terminal output), `cmd.pty.write`, `cmd.pty.resize`, and `cmd.pty.kill` through the daemon. On a 2-core machine that put megabytes of `npm install` output through Python with ~33% base64 inflation plus JSON escaping — the hottest path in the app, in the process with the least reason to see it. Replaced with `cmd.pty.requestSpawn` / `cmd.pty.report` / `evt.pty.revoke` / `evt.pty.sessions`: the daemon **authorizes, audits, and revokes**; the Console owns the bytes (§4.2, §6.5). Added §6.6 deep-link safety. Revised **before** approval, so `PROTOCOL_VERSION` stays 1. |
 
 ---

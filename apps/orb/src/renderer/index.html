@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <!--
+      The build injects the production Content-Security-Policy here (see
+      cspMetaPlugin in electron.vite.config.ts). It is left as a comment under
+      the dev server, where Vite's HMR needs an inline bootstrap and a socket;
+      main/index.ts applies the development policy over HTTP instead.
+
+      A <meta> tag rather than only a header because the production renderer
+      loads from file://, which has no response headers to attach a policy to.
+    -->
+    <!--%CSP%-->
+    <title>Zoey Orb</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="./main.tsx"></script>
+  </body>
+</html>

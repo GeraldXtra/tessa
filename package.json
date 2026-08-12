@@ -5,17 +5,23 @@
   "description": "ZOEY_OS monorepo — one Python daemon, two surfaces (Console + Orb).",
   "workspaces": [
     "packages/*",
-    "apps/console"
+    "apps/console",
+    "apps/orb"
   ],
   "engines": {
     "node": ">=22.12.0"
   },
   "scripts": {
     "tokens": "node packages/tokens/build.mjs",
+    "enums": "node packages/protocol/build-enums.mjs",
+    "generate": "npm run tokens && npm run enums",
     "protocol:check": "tsc -p packages/protocol/tsconfig.json --noEmit",
     "protocol:test": "node --experimental-strip-types packages/protocol/test/smoke.ts",
-    "test": "npm run protocol:test",
-    "bootstrap": "npm run tokens && npm run protocol:test",
+    "contract:check": "node scripts/check-contract.mjs",
+    "core:test": "python core/tests/test_contract_sync.py",
+    "core:test:auth": "python core/test_auth.py",
+    "test": "npm run generate && npm run contract:check && npm run protocol:test && npm run core:test",
+    "bootstrap": "npm run generate && npm run test",
     "console:dev": "npm run -w @zoey/console dev",
     "console:build": "npm run -w @zoey/console build",
     "core:dev": "python core/server.py --dev"
@@ -24,9 +30,9 @@
     "typescript": "5.9.3"
   },
   "$comment": [
-    "apps/orb is deliberately NOT in workspaces — it is owned by a separate Claude Code session",
-    "and is added by that session when it lands. Adding it here would install its deps into the",
-    "shared node_modules before it exists.",
+    "apps/orb is owned by a separate Claude Code session. It was deliberately absent from this",
+    "list until that session landed it; the Orb session added it on 2026-08-12, exactly as the",
+    "note previously here anticipated. Both surfaces now hoist to one shared node_modules.",
     "",
     "Disk budget: the owner's C: has ~14.5 GB free. Keep the dependency set small and prune builds."
   ]

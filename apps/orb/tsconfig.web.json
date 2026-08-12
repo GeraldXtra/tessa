@@ -1,0 +1,45 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+
+    "strict": true,
+    "noImplicitOverride": true,
+    "noFallthroughCasesInSwitch": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+
+    "isolatedModules": true,
+    "verbatimModuleSyntax": true,
+    "forceConsistentCasingInFileNames": true,
+    "skipLibCheck": true,
+
+    "jsx": "react-jsx",
+
+    "composite": true,
+    "noEmit": true,
+
+    "allowImportingTsExtensions": true,
+
+    "types": ["vite/client"]
+  },
+  "include": [
+    "src/renderer/**/*.ts",
+    "src/renderer/**/*.tsx",
+    "src/shared/**/*.ts"
+  ],
+  "$comment": [
+    "`types: [\"vite/client\"]` and no \"node\" is deliberate. It removes the Node globals from the",
+    "renderer's scope entirely — `process`, `Buffer`, `require`, `__dirname` are not nameable, so",
+    "renderer code cannot reach for them by accident. CONTRACT §2.3 keeps the socket and the",
+    "token in main; this is the compile-time half of that guarantee, with the production CSP",
+    "(connect-src 'none') as the runtime half.",
+    "",
+    "noUncheckedIndexedAccess is deliberately NOT set here. The sphere writes into Float32Array",
+    "buffers in its hot loop, and the flag turns every typed-array read into `number | undefined`",
+    "— pure noise on a path that is bounds-checked by construction. It IS set for main/preload,",
+    "where the indexing is over parsed protocol data and the flag earns its keep."
+  ]
+}

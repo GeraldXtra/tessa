@@ -1,0 +1,124 @@
+/*
+ * Design tokens come from packages/tokens — the SHARED source of truth that
+ * apps/orb also consumes. No hex value may appear in this file or any other
+ * file under src/renderer: scripts/check-contract.mjs fails the build on one.
+ */
+@import '@zoey/tokens/dist/tokens.css';
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--bg-void);
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: var(--fs-base);
+  line-height: var(--lh-base);
+  -webkit-font-smoothing: antialiased;
+  /* The renderer is untrusted content; never let it feel like a web page. */
+  user-select: none;
+  cursor: default;
+  overflow: hidden;
+}
+
+.shell {
+  padding: var(--sp-6);
+  max-width: 720px;
+}
+
+.brand {
+  margin: 0;
+  font-size: var(--fs-xl);
+  font-weight: 500;
+  letter-spacing: var(--label-tracking);
+  color: var(--accent);
+}
+
+.phase {
+  margin: var(--sp-1) 0 var(--sp-6);
+  font-size: var(--fs-label);
+  text-transform: var(--label-transform);
+  letter-spacing: var(--label-tracking);
+  color: var(--text-muted);
+}
+
+.facts {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: var(--sp-2) var(--sp-5);
+  margin: 0;
+  padding: var(--sp-4);
+  background: var(--panel);
+  border: 1px solid var(--panel-border);
+  border-radius: var(--panel-radius);
+}
+
+.facts dt {
+  font-size: var(--fs-label);
+  text-transform: var(--label-transform);
+  letter-spacing: var(--label-tracking);
+  color: var(--text-muted);
+  align-self: center;
+}
+
+.facts dd {
+  margin: 0;
+  user-select: text;
+}
+
+.facts dd[data-state='ok'] {
+  color: var(--status-active);
+}
+.facts dd[data-state='checking'] {
+  color: var(--status-warn);
+}
+.facts dd[data-state='failed'] {
+  color: var(--status-error);
+  font-weight: 700;
+}
+
+.next {
+  margin-top: var(--sp-5);
+  font-size: var(--fs-sm);
+  color: var(--text-muted);
+}
+
+.row {
+  display: flex;
+  gap: var(--sp-2);
+  margin: var(--sp-4) 0;
+}
+
+.row button {
+  font-family: var(--font-mono);
+  font-size: var(--fs-label);
+  text-transform: var(--label-transform);
+  letter-spacing: var(--label-tracking);
+  color: var(--text);
+  background: var(--panel);
+  border: 1px solid var(--panel-border);
+  border-radius: var(--radius-sm);
+  padding: var(--sp-2) var(--sp-3);
+  cursor: pointer;
+}
+
+.row button:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.out {
+  margin: 0;
+  padding: var(--sp-3);
+  height: 260px;
+  overflow: auto;
+  background: var(--bg-ambient);
+  border: 1px solid var(--panel-border);
+  border-radius: var(--radius-sm);
+  font-size: var(--fs-sm);
+  white-space: pre-wrap;
+  word-break: break-all;
+  user-select: text;
+}

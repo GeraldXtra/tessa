@@ -1,0 +1,61 @@
+{
+  "name": "@zoey/orb",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Zoey Orb — the voice surface. Particle sphere, collapsed layout, one WebSocket in the main process.",
+  "main": "./out/main/index.js",
+  "scripts": {
+    "predev": "node scripts/check-tokens.mjs",
+    "dev": "electron-vite dev",
+    "prebuild": "node scripts/check-tokens.mjs && npm run typecheck",
+    "build": "electron-vite build",
+    "preview": "electron-vite preview",
+    "typecheck": "tsc -p tsconfig.node.json --noEmit && tsc -p tsconfig.web.json --noEmit"
+  },
+  "dependencies": {
+    "react": "19.2.8",
+    "react-dom": "19.2.8",
+    "three": "0.185.1",
+    "ws": "8.21.3"
+  },
+  "devDependencies": {
+    "@types/react": "19.2.18",
+    "@types/react-dom": "19.2.4",
+    "@types/ws": "8.18.1",
+    "@vitejs/plugin-react": "5.2.0",
+    "@zoey/protocol": "1.0.0",
+    "@zoey/tokens": "1.0.0",
+    "electron": "43.4.0",
+    "electron-vite": "5.0.0",
+    "vite": "7.3.6"
+  },
+  "$comment": [
+    "NO \"type\": \"module\" — deliberate. CONTRACT §2.3 puts the WebSocket in main, and this app",
+    "runs with sandbox: true. A sandboxed Electron preload CANNOT be an ES module; it must be",
+    "CommonJS. Declaring the package as ESM makes electron-vite emit ESM for main AND preload,",
+    "and the preload then fails to load at runtime. Source is written as ESM TypeScript either",
+    "way; electron-vite transpiles main/preload to CJS and the renderer stays ESM via Vite.",
+    "",
+    "@zoey/protocol and @zoey/tokens are devDependencies ON PURPOSE. electron-vite's",
+    "`build.externalizeDeps` (on by default for main and preload) externalises everything in",
+    "`dependencies`, and @zoey/protocol's entry is raw TypeScript (src/index.ts, which imports",
+    "./enums.generated.ts). Externalised, that becomes a runtime require() of a .ts file and main",
+    "crashes on launch. In devDependencies they are bundled, which is what we want.",
+    "",
+    "The option is `build.externalizeDeps`, NOT the `externalizeDepsPlugin()` helper — that helper",
+    "is deprecated in electron-vite 5. It is still exported and still functional, so calling it",
+    "produces no warning and no failure; only the docs and the types say it is the old form.",
+    "",
+    "`ws` stays a real dependency: it is externalised and required at runtime. Bundling it would",
+    "drag in its optional native deps (bufferutil, utf-8-validate) as unresolvable imports.",
+    "",
+    "Versions are pinned exactly, never caret ranges — same rule the Console applies to xterm 6.",
+    "",
+    "vite is 7.3.6, NOT the latest 8.2.1, and @vitejs/plugin-react is 5.2.0, NOT the latest 6.0.5.",
+    "This is a real peer-dependency ceiling, not caution: electron-vite@5.0.0 peers on",
+    "vite ^5 || ^6 || ^7, while plugin-react@6 peers on vite ^8 and drags in @rolldown/plugin-babel",
+    "and babel-plugin-react-compiler. plugin-react@5.2.0 peers on ^4 || ^5 || ^6 || ^7 || ^8 with no",
+    "extra peers, so 7.3.6 + 5.2.0 is the newest combination that resolves cleanly. Revisit when",
+    "electron-vite ships vite 8 support."
+  ]
+}

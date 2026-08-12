@@ -1,0 +1,16 @@
+# GENERATED — daemon dependency lock for core/
+#
+# Install exactly:  pip install --require-hashes -r requirements.lock
+# Regenerate:       python scripts/lock-python.py
+#
+# Pinned because core/ is ~1,200 lines that previously imported websockets from
+# global Python with nothing recorded — it ran on exactly one machine.
+#
+# NOTE: these are win_amd64 cp312 wheels, matching the owner's Python 3.12.7 on
+# Windows 11 x64. Building on another platform needs a regenerated lock.
+
+websockets==17.0.1 \
+    --hash=sha256:2b3f3020171202b135ca078e20434977c6b2b02af647130d6980c9e39b9462e3
+
+PyYAML==6.0.3 \
+    --hash=sha256:5fcd34e47f6e0b794d17de1b4ff496c00986e1c83f7ab2fb8fcfe9616ff7477b

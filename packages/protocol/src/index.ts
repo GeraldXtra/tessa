@@ -13,7 +13,31 @@
 
 /* ══════════════════════════════════════════════════════════ version & wire */
 
-export const PROTOCOL_VERSION = 1 as const;
+/**
+ * Closed enums and PROTOCOL_VERSION are GENERATED from schema/enums.json.
+ * They were previously hand-written here and in core/*.py; two hand-maintained
+ * copies of one contract drift. Regenerate: node packages/protocol/build-enums.mjs
+ */
+export * from './enums.generated.ts';
+
+import {
+  PROTOCOL_VERSION,
+  SPAWN_MODES,
+  type Provenance,
+  type SpawnMode,
+  type Surface,
+  type Tier,
+  type AgentState,
+  type JobStatus,
+  type CreatedBy,
+  type PtyReportEvent,
+  type CloudState,
+  type Decision,
+  type SendableDecision,
+  type Role,
+  type NotificationLevel,
+  type FsChangeKind,
+} from './enums.generated.ts';
 
 /** CONTRACT §1 — preferred port; the daemon walks upward if occupied. */
 export const PREFERRED_PORT = 47600 as const;
@@ -31,70 +55,6 @@ export const HANDSHAKE_DEADLINE_MS = 3000 as const;
 /** CONTRACT §1 — anything larger uses chunked transfer, never one frame. */
 export const MAX_FRAME_BYTES = 1024 * 1024;
 
-/** CONTRACT §2.2 */
-export const CloseCode = {
-  Unauthorized: 4401,
-  HandshakeTimeout: 4408,
-  ProtocolMismatch: 4409,
-  RateLimited: 4429,
-} as const;
-export type CloseCode = (typeof CloseCode)[keyof typeof CloseCode];
-
-/** CONTRACT §5.4 */
-export const ErrorCode = {
-  UnknownType: 'protocol.unknownType',
-  BadEnvelope: 'protocol.badEnvelope',
-  AuthRequired: 'auth.required',
-  PermissionDenied: 'permission.denied',
-  PermissionPending: 'permission.pending',
-  NotFound: 'notFound',
-  Busy: 'busy',
-  Internal: 'internal',
-} as const;
-export type ErrorCode = (typeof ErrorCode)[keyof typeof ErrorCode];
-
-/* ════════════════════════════════════════════════ closed enums — CONTRACT §7.4 */
-
-export const AGENT_STATES = ['idle', 'listening', 'thinking', 'speaking', 'working'] as const;
-export type AgentState = (typeof AGENT_STATES)[number];
-
-export const JOB_STATUSES = ['queued', 'running', 'blocked', 'succeeded', 'failed', 'cancelled'] as const;
-export type JobStatus = (typeof JOB_STATUSES)[number];
-
-export const TIERS = ['green', 'amber', 'red'] as const;
-export type Tier = (typeof TIERS)[number];
-
-export const ROLES = ['user', 'assistant', 'system', 'tool'] as const;
-export type Role = (typeof ROLES)[number];
-
-export const CREATED_BY = ['user', 'agent', 'schedule'] as const;
-export type CreatedBy = (typeof CREATED_BY)[number];
-
-/** CONTRACT §6.2 — provenance. `schedule` included so scheduled jobs are attributable. */
-export const PROVENANCE = ['human', 'program', 'agent', 'schedule'] as const;
-export type Provenance = (typeof PROVENANCE)[number];
-
-export const CLOUD_STATES = ['local', 'cloudOnly', 'pinned', 'partial'] as const;
-export type CloudState = (typeof CLOUD_STATES)[number];
-
-export const DECISIONS = ['approve', 'deny'] as const;
-export type Decision = (typeof DECISIONS)[number];
-
-export const SPAWN_MODES = ['window', 'tab', 'pane'] as const;
-export type SpawnMode = (typeof SPAWN_MODES)[number];
-
-export const FS_CHANGE_KINDS = ['created', 'modified', 'deleted', 'renamed'] as const;
-export type FsChangeKind = (typeof FS_CHANGE_KINDS)[number];
-
-export const NOTIFICATION_LEVELS = ['info', 'warn', 'error'] as const;
-export type NotificationLevel = (typeof NOTIFICATION_LEVELS)[number];
-
-export const SURFACES = ['console', 'orb'] as const;
-export type Surface = (typeof SURFACES)[number];
-
-/** CONTRACT §6.5 — session lifecycle reported for audit, since the daemon never sees the bytes. */
-export const PTY_REPORT_EVENTS = ['started', 'exited', 'cwdChanged', 'titleChanged', 'killed'] as const;
-export type PtyReportEvent = (typeof PTY_REPORT_EVENTS)[number];
 
 /* ═══════════════════════════════════════════════════════ envelope — §3 */
 
@@ -190,7 +150,9 @@ export interface EvtPermissionResolved {
 
 export interface EvtAuditAppended {
   entryId: string;
-  actor: CreatedBy;
+  /** Provenance, not CreatedBy — the audit log records `program` and `system`
+   *  actions (daemon.start, auth.lockout) that are not job triggers. */
+  actor: Provenance;
   tool: string;
   tier: Tier;
   summary: string;
@@ -294,7 +256,17 @@ export interface CmdAgentCancel { companionId: string; messageId?: string }
 export interface CmdCompanionSwitch { companionId: string }
 export interface CmdJobCreate { kind: string; title: string; args: Record<string, unknown>; tier: Tier }
 export interface CmdJobRef { jobId: string }
-export interface CmdPermissionRespond { requestId: string; decision: Decision; remember?: boolean }
+/**
+ * NOTE the type is `SendableDecision`, not `Decision`. A surface may only send
+ * approve|deny. `expired` exists on `evt.permission.resolved` so the daemon can
+ * tell the OTHER surface to dismiss a card whose 30-minute window lapsed — a
+ * surface sending it would be a contract violation, so the type forbids it.
+ */
+export interface CmdPermissionRespond {
+  requestId: string;
+  decision: SendableDecision;
+  remember?: boolean;
+}
 export interface CmdConfigGet { key: string }
 export interface CmdConfigSet { key: string; value: unknown }
 export interface CmdAuditQuery { since?: string; limit: number; filter?: string }
@@ -552,7 +524,19 @@ export function hydrationBytes(entry: Pick<FsEntry, 'size' | 'allocSize'>): numb
 
 export const DEEP_LINK_SCHEME = 'zoey' as const;
 
-export interface DeepLink { path: string; mode: SpawnMode }
+/**
+ * Modes reachable from a deep link — a STRICT SUBSET of SPAWN_MODES.
+ *
+ * `cdCurrent` is excluded on purpose: it mutates the state of an already-open
+ * terminal rather than creating a fresh one. A hostile page that could reach it
+ * would be able to silently change the working directory of a session the owner
+ * is actively typing into — the next `rm -rf .` or `git clean -fd` would land
+ * somewhere they did not intend. Deep links may only ever CREATE.
+ */
+export const DEEP_LINK_MODES = ['window', 'tab', 'pane'] as const;
+export type DeepLinkMode = (typeof DEEP_LINK_MODES)[number];
+
+export interface DeepLink { path: string; mode: DeepLinkMode }
 
 /**
  * Parse a `zoey://` deep link.
@@ -589,9 +573,9 @@ export function parseDeepLink(raw: string): DeepLink | null {
   if (!path) return null;
 
   const mode = url.searchParams.get('mode') ?? 'window';
-  if (!(SPAWN_MODES as readonly string[]).includes(mode)) return null;
+  if (!(DEEP_LINK_MODES as readonly string[]).includes(mode)) return null;
 
-  return { path, mode: mode as SpawnMode };
+  return { path, mode: mode as DeepLinkMode };
 }
 
 export function buildDeepLink(link: DeepLink): string {

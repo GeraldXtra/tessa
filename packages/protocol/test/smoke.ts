@@ -14,8 +14,9 @@
 
 import assert from 'node:assert/strict';
 import {
-  PROTOCOL_VERSION, ALLOWED_ORIGINS, HANDSHAKE_DEADLINE_MS, CloseCode, ErrorCode,
+  PROTOCOL_VERSION, ALLOWED_ORIGINS, HANDSHAKE_DEADLINE_MS, CLOSE_CODES, ERROR_CODES,
   AGENT_STATES, TIERS, PROVENANCE, CLOUD_STATES, PTY_REPORT_EVENTS,
+  JOB_STATUSES, CREATED_BY, SURFACES, SPAWN_MODES, FS_CHANGE_KINDS, DECISIONS, DECISIONS_SENDABLE,
   makeEnvelope, isEnvelope, isKnownType, isAllowedOrigin, hydrationBytes, ulid,
   parseDeepLink, buildDeepLink,
   ALL_KNOWN_TYPES, SHARED_EVENTS, CONSOLE_EVENTS, ORB_EVENTS,
@@ -42,10 +43,10 @@ ok('handshake deadline is 3000ms (CONTRACT §2.1)', () => {
 });
 
 ok('close codes match CONTRACT §2.2', () => {
-  assert.equal(CloseCode.Unauthorized, 4401);
-  assert.equal(CloseCode.HandshakeTimeout, 4408);
-  assert.equal(CloseCode.ProtocolMismatch, 4409);
-  assert.equal(CloseCode.RateLimited, 4429);
+  assert.equal(CLOSE_CODES.Unauthorized, 4401);
+  assert.equal(CLOSE_CODES.HandshakeTimeout, 4408);
+  assert.equal(CLOSE_CODES.ProtocolMismatch, 4409);
+  assert.equal(CLOSE_CODES.RateLimited, 4429);
 });
 
 /* ── §2.1 Origin allowlist ───────────────────────────────────────────────── */
@@ -143,10 +144,46 @@ ok('Console never claims an Orb namespace and vice versa', () => {
 /* ── §7.4 closed enums ───────────────────────────────────────────────────── */
 
 ok('closed enums match the contract exactly (§7.4)', () => {
-  assert.deepEqual([...AGENT_STATES], ['idle', 'listening', 'thinking', 'speaking', 'working']);
+  assert.deepEqual([...AGENT_STATES],
+    ['idle', 'listening', 'thinking', 'speaking', 'working', 'blocked']);
   assert.deepEqual([...TIERS], ['green', 'amber', 'red']);
-  assert.deepEqual([...PROVENANCE], ['human', 'program', 'agent', 'schedule']);
-  assert.deepEqual([...CLOUD_STATES], ['local', 'cloudOnly', 'pinned', 'partial']);
+  assert.deepEqual([...PROVENANCE],
+    ['human', 'program', 'agent', 'schedule', 'external', 'system']);
+  assert.deepEqual([...CLOUD_STATES],
+    ['local', 'cloudOnly', 'pinned', 'partial', 'unknown']);
+  assert.deepEqual([...JOB_STATUSES],
+    ['queued', 'running', 'blocked', 'succeeded', 'failed', 'cancelled', 'needsReview']);
+  assert.deepEqual([...CREATED_BY],
+    ['user', 'agent', 'schedule', 'fileWatch', 'email', 'webhook', 'systemEvent']);
+  assert.deepEqual([...SPAWN_MODES], ['window', 'tab', 'pane', 'cdCurrent']);
+  assert.deepEqual([...FS_CHANGE_KINDS],
+    ['created', 'modified', 'deleted', 'renamed', 'hydrationChanged']);
+  assert.deepEqual([...DECISIONS], ['approve', 'deny', 'expired']);
+});
+
+ok('SURFACES stays console|orb — `mobile` deliberately excluded', () => {
+  // A phone cannot read %LOCALAPPDATA%\Zoey\runtime.json and cannot reach
+  // 127.0.0.1. Adding the value would promise a capability §1/§2 cannot serve.
+  assert.deepEqual([...SURFACES], ['console', 'orb']);
+});
+
+ok('a surface may send approve|deny but NOT expired (§4.1)', () => {
+  assert.deepEqual([...DECISIONS_SENDABLE], ['approve', 'deny']);
+  assert.ok(!(DECISIONS_SENDABLE as readonly string[]).includes('expired'),
+    'expired is daemon-emitted only — a surface sending it is a contract violation');
+});
+
+ok('`blocked` and `needsReview` are distinct job states', () => {
+  // blocked = approval outstanding, still live.
+  // needsReview = the 30-minute window lapsed unanswered (spec §5 rule 5).
+  const s = JOB_STATUSES as readonly string[];
+  assert.ok(s.includes('blocked') && s.includes('needsReview'));
+});
+
+ok('deep links cannot reach cdCurrent — it mutates an existing session', () => {
+  assert.equal(parseDeepLink('zoey://open?path=C%3A%5Cdev&mode=cdCurrent'), null);
+  // ...but it IS a valid spawnAt mode from inside the app.
+  assert.ok((SPAWN_MODES as readonly string[]).includes('cdCurrent'));
 });
 
 /* ── §3.3 ULID monotonicity ──────────────────────────────────────────────── */
@@ -193,7 +230,7 @@ ok('PTY byte stream is absent from the contract (§4.2)', () => {
 
 ok('pty lifecycle report events are a closed set (§6.5)', () => {
   assert.deepEqual([...PTY_REPORT_EVENTS],
-    ['started', 'exited', 'cwdChanged', 'titleChanged', 'killed']);
+    ['started', 'exited', 'cwdChanged', 'titleChanged', 'killed', 'startFailed']);
 });
 
 /* ── §6.6 deep-link safety ───────────────────────────────────────────────── */
@@ -236,7 +273,7 @@ ok('buildDeepLink round-trips through parseDeepLink', () => {
 /* ── error codes ─────────────────────────────────────────────────────────── */
 
 ok('unknown-type error keeps the connection open (§7.6 contract intent)', () => {
-  assert.equal(ErrorCode.UnknownType, 'protocol.unknownType');
+  assert.ok((ERROR_CODES as readonly string[]).includes('protocol.unknownType'));
 });
 
 console.log(`\n${passed} passed\n`);

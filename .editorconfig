@@ -1,0 +1,31 @@
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+indent_style = space
+indent_size = 2
+
+[*.py]
+indent_size = 4
+max_line_length = 100
+
+# Windows shells require CRLF. This mirrors .gitattributes — if these two ever
+# disagree, git will rewrite line endings on checkout and silently break the
+# OSC 133 prompt snippets in Phase 2.
+[*.{ps1,psm1,psd1,cmd,bat}]
+end_of_line = crlf
+
+[*.sh]
+end_of_line = lf
+
+[*.md]
+trim_trailing_whitespace = false  # two trailing spaces is a hard line break
+
+[*.{yml,yaml}]
+indent_size = 2
+
+[Makefile]
+indent_style = tab

@@ -29,7 +29,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator, Literal
 
-Actor = Literal["human", "agent", "schedule", "program", "system"]
+# Audit actors are exactly CONTRACT §6.2 Provenance — human | program | agent |
+# schedule | external | system. Kept as a Literal here rather than imported so
+# audit.py has no import-path dependency; core/tests asserts the two match.
+Actor = Literal["human", "program", "agent", "schedule", "external", "system"]
 Tier = Literal["green", "amber", "red", "none"]
 
 GENESIS = "0" * 64

@@ -1,7 +1,7 @@
 # ZOEY_OS — Canonical Repository Structure
-### v2.1 · Phase 0 complete and verified
+### v2.2 · Phase 0 complete · generated-output ruling corrected
 
-> Companion to `docs/ZOEY_OS-spec.md` (v3.1). Replaces spec §3.
+> Companion to `docs/ZOEY_OS-spec.md` (v3.2). Replaces spec §3.
 > **CONTRACT.md outranks both.**
 > Repo root: `C:\dev\zoey`
 
@@ -11,14 +11,29 @@
 
 | Check | Result |
 |---|---|
-| Auth tests | **22/22 pass** |
-| Protocol tests | **24/24 pass** |
-| Audit chain | Verifies; tamper test names the exact altered entry (`seq 10: content altered`) |
-| Token file ACL | `icacls` returns `NT AUTHORITY\SYSTEM:(F)` and `GERALD\SERIOUS-PC:(F)` only — no Users, no Everyone |
+| Protocol tests | **28/28** — envelope, closed enums, deep-link safety, forward compatibility |
+| Core sync tests | **21/21** — `core/` cannot drift from the generated contract |
+| Auth tests | **22/22** — live boundary against a running daemon |
+| Freshness check | **5 checks** — build fails if any generated output is stale |
+| **Total** | **71 passing, 0 failing** |
+| Audit chain | Verifies; tamper test names the exact altered entry |
+| Token file ACL | `SYSTEM` + owner only — no Users, no Everyone |
 | Redaction | Confirmed against `sk-ant-…`, Bearer JWTs, AWS secrets, `postgres://user:pass@…` |
-| Guard | Human gets a shell in `C:\dev`; agent does not — needs approval, and again inside OneDrive |
-| Port walk | Verified — a stray daemon held 47600, the walk correctly landed on 47601 |
-| Repo size | ~151 KB, no dependencies installed yet |
+| Guard | Human gets a shell in `C:\dev`; agent does not — needs approval, again inside OneDrive |
+| Port walk | A stray daemon held 47600; the walk correctly landed on 47601 |
+
+---
+
+## ⚠️ Correction to v2.1
+
+**v2.1 marked `packages/protocol/gen/` as gitignored. That was wrong.** Both generated protocol outputs are **committed**:
+
+- `packages/protocol/gen/python/` — imported by `core/` at daemon startup
+- `packages/protocol/src/enums.generated.ts` — re-exported by `index.ts` for both surfaces
+
+Ignoring them would make "clone the repo and run the daemon" depend on running a Node build step first — a hard cross-language coupling for no benefit. The staleness risk that ignoring was meant to solve is covered by `scripts/check-contract.mjs`, which fails the build on any drift from source.
+
+`packages/tokens/dist/` **remains gitignored** — nothing imports it at runtime before a build.
 
 ---
 
@@ -26,17 +41,19 @@
 
 | Mark | Meaning |
 |---|---|
-| ✅ | Built and verified on disk |
+| ✅ | Built and verified |
 | ⬜ | Not yet created |
 | **P0–P8** | Phase it appears in |
-| 🔒 | Shared — a surface session proposes, Gerald approves |
+| 🔒 | Shared — propose to Gerald, never edit |
 | ⚙️ | Generated output, never hand-edited |
 | 🚫 | Gitignored |
+| 📦 | Generated **and committed** |
 
-**Ownership, revised after Phase 0:**
-The **Console session owns `core/`** — it has built the daemon foundation, and one owner beats two. It also owns `apps/console`.
-The **Orb session owns `apps/orb` only** and is a pure consumer: it reads `CONTRACT.md` and `packages/*`, and never edits `core/`, `packages/`, or `apps/console`.
-Neither edits `CONTRACT.md`.
+**Ownership:**
+**Console session** owns `core/` and `apps/console`.
+**Orb session** owns `apps/orb` only — pure consumer, reads `CONTRACT.md` and `packages/*`, edits neither.
+Neither edits `CONTRACT.md`, `packages/`, or the other's app.
+**Gerald owns all git operations.** No session runs git commands.
 
 ---
 
@@ -45,32 +62,42 @@ Neither edits `CONTRACT.md`.
 ```
 C:\dev\zoey\
 │
-├── CONTRACT.md                       ✅ P0 🔒  403 lines. AWAITING APPROVAL.
-├── plan.md                           ✅ P0     Console build plan, Phase 0 marked done
-├── README.md                         ✅ P0     ⚠️ status blurb stale — edit was
-│                                                blocked by a classifier outage
-├── .gitignore                        ✅ P0     excludes runtime.json — holds the token
-├── package.json                      ✅ P0     npm workspaces root
-├── CLAUDE.md                         ⬜ P0     ⚠️ STILL MISSING
-├── .gitattributes                    ⬜ P0     ⚠️ CRLF/LF — see below
-├── .editorconfig                     ⬜ P0
-├── .env.example                      ⬜ P0     names only, never values
-├── pyproject.toml                    ⬜ P0     ⚠️ GAP #1 — see below
-├── requirements.lock                 ⬜ P0
+├── CONTRACT.md                       ✅ P0 🔒  AWAITING APPROVAL
+├── CLAUDE.md                         ✅ P0     101 lines, standing instructions
+├── COPYRIGHT.md                      ✅ P0     proprietary, all rights reserved
+├── plan.md                           ✅ P0     Console build plan
+├── README.md                         ✅ P0     ⚠️ "## License" section MISSING
+├── .gitignore                        ✅ P0
+├── .gitattributes                    ✅ P0
+├── .editorconfig                     ✅ P0
+├── .env.example                      ✅ P0     names only, never values
+├── package.json                      ✅ P0     npm workspaces (npm, not pnpm — spec §2.2)
+├── pyproject.toml                    ✅ P0     pinned
+├── requirements.lock                 ✅ P0     real sha256, --require-hashes works
+│
+├── scripts\
+│   ├── check-contract.mjs            ✅ P0     fails build on stale generated output
+│   ├── bootstrap.ps1                 ⬜ P0
+│   ├── fetch-models.ps1              ⬜ P2
+│   └── install-service.ps1           ⬜ P3
 │
 ├── packages\
 │   ├── protocol\                     🔒
 │   │   ├── package.json              ✅ P0
-│   │   ├── tsconfig.json             ✅ P0
+│   │   ├── tsconfig.json             ✅ P0     allowImportingTsExtensions + noEmit
+│   │   ├── build-enums.mjs           ✅ P0     enums.json → TS + Python
 │   │   ├── schema\
+│   │   │   ├── enums.json            ✅ P0 🔒  ★ SINGLE SOURCE OF TRUTH
+│   │   │   │                                   15 enums, 13 closed, 77 values
 │   │   │   ├── envelope.schema.json  ✅ P0
 │   │   │   ├── events.schema.json    ⬜ P0
 │   │   │   └── commands.schema.json  ⬜ P0
-│   │   ├── src\index.ts              ✅ P0     526 lines: closed enums, envelope,
-│   │   │                                       ULID, deep-link parser
-│   │   ├── gen\python\               ⬜ ⚙️ 🚫  ⚠️ GAP #2 — core/ hand-maintains
-│   │   │                                       a second copy of the contract
-│   │   └── test\smoke.ts             ✅ P0     24 passing, zero deps
+│   │   ├── src\
+│   │   │   ├── index.ts              ✅ P0     re-exports the generated enums
+│   │   │   └── enums.generated.ts    ✅ 📦     committed — index.ts imports it
+│   │   ├── gen\python\zoey_protocol\
+│   │   │   └── enums.py              ✅ 📦     committed — core/ imports it
+│   │   └── test\smoke.ts             ✅ P0     28 passing, zero deps
 │   │
 │   └── tokens\                       🔒
 │       ├── package.json              ✅ P0
@@ -79,17 +106,18 @@ C:\dev\zoey\
 │       └── dist\                     ✅ ⚙️ 🚫  tokens.css + tokens.py
 │
 ├── core\                             🔒        ← CONSOLE SESSION OWNS
-│   ├── server.py                     ✅ P0     583 lines. Loopback bind, Origin
-│   │                                            allowlist, timing-safe token
-│   │                                            compare, 3s deadline, port walk
-│   ├── test_auth.py                  ✅ P0     22 tests — move to core/tests/
+│   ├── server.py                     ✅ P0     WS daemon, Origin allowlist,
+│   │                                            timing-safe compare, port walk
+│   ├── test_auth.py                  ✅ P0     22 tests — should move to tests/
+│   ├── tests\
+│   │   ├── test_contract_sync.py     ✅ P0     21 tests — anti-drift guard
+│   │   ├── unit\ · integration\      ⬜ P1
+│   │   └── fixtures\{audio,llm}\     ⬜ P1/P2
 │   ├── security\
-│   │   ├── audit.py                  ✅ P0     hash-chained, append-only,
-│   │   │                                       redaction before write
+│   │   ├── audit.py                  ✅ P0     hash-chained, redaction before write
 │   │   ├── runtime.py                ✅ P0     empty file → lock ACL → verify →
 │   │   │                                       then write secret (TOCTOU-safe)
-│   │   ├── guard.py                  ✅ P0     ALLOW/CONFIRM/DENY. Protected paths
-│   │   │                                       compared by path PARTS, not prefix
+│   │   ├── guard.py                  ✅ P0     ALLOW/CONFIRM/DENY, path-parts compare
 │   │   ├── secrets.py                ⬜ P1     Windows Credential Manager
 │   │   └── sanitize.py               ⬜ P1     external-content delimiting
 │   ├── config\
@@ -145,13 +173,10 @@ C:\dev\zoey\
 │   │
 │   ├── memory\{store,vectors,indexer,graph}.py                 ⬜ P6
 │   ├── autonomy\{scheduler,queue,triggers,approvals,digest}.py ⬜ P5
-│   ├── telemetry\{logging,metrics,cost}.py                     ⬜ P1
-│   └── tests\                        ⬜ P1     move test_auth.py here
-│       ├── unit\ · integration\
-│       └── fixtures\{audio,llm}\
+│   └── telemetry\{logging,metrics,cost}.py                     ⬜ P1
 │
 ├── apps\
-│   ├── console\                      ⬜ P1a    ← NEXT UP. Needs npm install (~250 MB)
+│   ├── console\                      ⬜ P1a    ← NEXT UP. npm install (~250 MB)
 │   │   ├── package.json              ⬜ P1
 │   │   ├── electron.vite.config.ts   ⬜ P1
 │   │   ├── src\main\
@@ -159,7 +184,7 @@ C:\dev\zoey\
 │   │   │   ├── ws-client.ts          ⬜ P1     the ONLY socket. Sets Origin.
 │   │   │   ├── token.ts              ⬜ P1     reads runtime.json — port + token
 │   │   │   ├── pty-host.ts           ⬜ P1     spawns the utilityProcess
-│   │   │   ├── deeplink.ts           ⬜ P1     parseDeepLink, empty prompt
+│   │   │   ├── deeplink.ts           ⬜ P1     DeepLinkMode only, empty prompt
 │   │   │   └── windows.ts            ⬜ P1
 │   │   ├── src\pty-host\index.ts     ⬜ P1     utilityProcess: @lydell/node-pty
 │   │   │                                       → MessagePort → renderer
@@ -186,7 +211,7 @@ C:\dev\zoey\
 │           ├── scene\
 │           │   ├── Sphere.tsx        ⬜ P4     Three.js Points
 │           │   ├── shaders\          ⬜ P4     vert + frag GLSL
-│           │   └── states.ts         ⬜ P4     agent state → visual params
+│           │   └── states.ts         ⬜ P4     SIX agent states → visual params
 │           ├── panels\
 │           │   ├── StatusBar · Rail · Calendar            ⬜ P4
 │           │   ├── JobList · Transcript · Approval        ⬜ P4
@@ -195,81 +220,63 @@ C:\dev\zoey\
 │           ├── knowledge\            ⬜ P6
 │           └── styles\               ⬜ P4     imports packages/tokens
 │
-├── data\                             ⬜ 🚫     ⚠️ GAP #3 — Phase 1 blocker
+├── data\                             ✅ 🚫     created
 │   ├── zoey.db                       ⬜ P1     encrypted at rest
 │   ├── vectors\                      ⬜ P6
 │   ├── models\                       ⬜ P2     whisper + piper + porcupine
 │   ├── logs\                         ⬜ P1
 │   └── audio\                        ⬜ P2     debug only, auto-purged
 │
-├── scripts\
-│   ├── check-contract.mjs            ⬜ P0     ⚠️ GAP #4 — see below
-│   ├── bootstrap.ps1                 ⬜ P0
-│   ├── fetch-models.ps1              ⬜ P2
-│   └── install-service.ps1           ⬜ P3
-│
 ├── docs\
-│   ├── ZOEY_OS-spec.md               ⬜ P0     ⚠️ README links it. Link is DEAD.
-│   │                                            Gerald places v3.1 — session must
-│   │                                            NOT create its own copy.
-│   ├── STRUCTURE.md                  ⬜ P0     this file — Gerald places it
-│   └── decisions\
-│       ├── 001-electron-over-tauri.md      ⬜
-│       ├── 002-lydell-node-pty.md          ⬜
-│       ├── 003-pty-bytes-bypass-daemon.md  ⬜  the biggest architectural call so far
-│       └── 004-origin-rejections-not-counted.md ⬜  the DoS fix and why
+│   ├── ZOEY_OS-spec.md               ✅ P0     v3.2 — Gerald owns, sessions never edit
+│   ├── STRUCTURE.md                  ✅ P0     this file — Gerald owns
+│   └── decisions\                    ⬜
+│       ├── 001-electron-over-tauri.md
+│       ├── 002-lydell-node-pty.md
+│       ├── 003-pty-bytes-bypass-daemon.md
+│       ├── 004-origin-rejections-not-counted.md
+│       ├── 005-enums-single-source.md
+│       └── 006-npm-over-pnpm.md
 │
-└── .github\workflows\ci.yml          ⬜ P1
+└── .github\workflows\ci.yml          ⬜ P1     lint · typecheck · test · freshness
 ```
 
-`%LOCALAPPDATA%\Zoey\runtime.json` lives outside the repo by design and holds the per-launch token and the actual bound port.
+`%LOCALAPPDATA%\Zoey\runtime.json` lives outside the repo and holds the per-launch token and bound port.
 
 ---
 
-## Remaining gaps, in priority order
+## Remaining gaps
 
-| # | Gap | Why it matters now |
+Down from eight to five.
+
+| # | Gap | Why it matters |
 |---|---|---|
-| **1** | **`pyproject.toml` / `requirements.lock`** | The daemon imports `websockets` from global Python with nothing pinned. It runs today on one machine. Reinstall Python, or move laptop, and it dies with no record of what it needed. `core/` is now ~1,200 lines — this only gets worse. |
-| **2** | **`packages/protocol/gen/python/`** | `core/` hand-maintains a second Python copy of the contract. Two hand-written copies of one contract **will** drift, and generation is the entire reason the JSON Schema exists. Closing this before Phase 1 code piles on is far cheaper than after. |
-| **3** | **`data/`** | Nowhere for the DB, models, or logs. Phase 1 blocker. |
-| **4** | **`scripts/check-contract.mjs`** | Nothing detects stale generated output. See below. |
-| **5** | **`CLAUDE.md`** | Every session re-derives the ownership rules from scratch without it. |
-| **6** | **`.gitattributes`** | PowerShell needs CRLF, bash needs LF. Git will rewrite them and silently break the OSC 133 snippets in Phase 2. |
-| **7** | **`docs/ZOEY_OS-spec.md`** | README links it; the link is dead. The Orb session cannot start without it. **Gerald places this — the session must not create a competing copy.** |
-| **8** | **README status blurb** | Stale — the edit was blocked by a classifier outage mid-run. |
+| **1** | **README `## License` section** | Gerald's step didn't land. `COPYRIGHT.md` exists and is correct; the README pointer doesn't. |
+| **2** | **`docs/decisions/`** | Six reversals have real reasoning behind them. Without records they get re-litigated by the next session. |
+| **3** | **`.github/workflows/ci.yml`** | `check-contract.mjs` exists but nothing runs it automatically. |
+| **4** | **`scripts/bootstrap.ps1`** | `npm run bootstrap` covers Node; nothing sets up the Python venv in one command. |
+| **5** | **`core/test_auth.py` location** | Still at `core/` root; `core/tests/` now exists. |
 
 ---
 
-## The stale-generation guard
+## npm scripts
 
-`packages/tokens/dist/` and `packages/protocol/gen/` are outputs, correctly gitignored. Nothing yet verifies they're current.
-
-Failure mode: someone edits `tokens.json`, forgets `npm run tokens`, commits. The Orb renders last week's colours for days. Same for the protocol — worse, because a drifted enum is a runtime bug, not a visual one.
-
-`scripts/check-contract.mjs` regenerates both into a temp directory and **fails the build if either differs**. Three lines of CI that prevent the single most likely cross-session failure.
-
----
-
-## `.gitattributes`
-
-```gitattributes
-* text=auto eol=lf
-*.ps1   text eol=crlf
-*.cmd   text eol=crlf
-*.bat   text eol=crlf
-*.sh    text eol=lf
-*.png binary
-*.wav binary
-*.onnx binary
-*.woff2 binary
 ```
+npm run generate         # tokens + enums → all generated output
+npm run contract:check   # fail if any generated output is stale
+npm run protocol:check   # tsc --noEmit on the protocol package
+npm run protocol:test    # 28 protocol tests
+npm run core:test        # 21 anti-drift tests
+npm test                 # generate → contract:check → protocol:test → core:test
+npm run bootstrap        # generate + full test run
+```
+
+Python deps: `pip install --require-hashes -r requirements.lock`
 
 ---
 
 ## Open layout decisions
 
-1. **Package manager** — npm workspaces is in place and works. pnpm would save real disk with two Electron apps sharing dependencies, which matters at 14.5 GB free. **Decide before `npm install` runs for `apps/console`** — switching after means re-downloading everything on metered data.
-2. **`core/test_auth.py`** — currently at the `core/` root. Move to `core/tests/` before more tests land.
-3. **Build output** — `out/` vs `release/` for packaged installers. Pick one, gitignore it.
-4. **Python types** — generate from `packages/protocol/schema/` (gap 2), or formally accept a hand-maintained mirror and add a test that asserts the two match.
+1. **Build output** — `out/` vs `release/` for packaged installers. Pick one, gitignore it.
+2. **`core/test_auth.py`** — move to `core/tests/` before more tests land.
+3. **`events.schema.json` / `commands.schema.json`** — the envelope and enums are schema-backed; the event and command payloads are not yet. Worth closing in Phase 1 while the surface count is one.

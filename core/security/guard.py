@@ -13,6 +13,7 @@ owner. It never executes anything.
 from __future__ import annotations
 
 import os
+import sys
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path, PurePath
@@ -20,8 +21,18 @@ from typing import Any, Literal
 
 import yaml
 
+_GEN = Path(__file__).resolve().parents[2] / "packages" / "protocol" / "gen" / "python"
+if str(_GEN) not in sys.path:
+    sys.path.insert(0, str(_GEN))
+
+# Generated from packages/protocol/schema/enums.json
+from zoey_protocol import Tier, TIERS  # noqa: E402,F401
+
+# PTY spawn actors are a strict subset of Provenance: `program` and `external`
+# can never request a shell, and every unattended trigger (fileWatch, email,
+# webhook, systemEvent) maps to `schedule` for tier purposes — the most
+# restrictive of the three, which is the safe default.
 Actor = Literal["human", "agent", "schedule"]
-Tier = Literal["green", "amber", "red"]
 
 
 class Verdict(str, Enum):

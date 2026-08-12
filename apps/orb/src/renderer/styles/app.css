@@ -1,0 +1,756 @@
+/*
+ * Zoey Orb — the whole visual layer.
+ *
+ * Rule one, enforced by scripts/check-contract.mjs: not a single colour literal
+ * in this file. Every value below is var(--something) resolved from the
+ * generated tokens. CONTRACT §9.
+ *
+ * Rule two, CONTRACT §9.1: no emoji, no icon soup, no blue-purple gradients,
+ * labels are uppercase mono at 10px / 0.14em, and the centre stage floats over
+ * pure void with no card behind it.
+ */
+
+@import '@zoey/tokens/css';
+
+/* ─────────────────────────────────────────────── app-local layout metrics ──
+ * Not colours, and not in tokens.json — these are this surface's own geometry.
+ * Derived from the spacing scale rather than typed as pixels, so they move with
+ * the scale if it is ever retuned.
+ */
+:root {
+  --status-h: calc(var(--sp-4) + var(--sp-3)); /* 28px */
+  --hairline: 1px;
+}
+
+/* ───────────────────────────────────────────────────────────────── reset ── */
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+/* All three, not just html and body. #root is the React mount point, and a
+   percentage height resolves against an AUTO-height parent as auto — so
+   omitting it silently collapsed .app to its content height and the sphere
+   rendered into a ~240px strip instead of the full stage. */
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+  overflow: hidden;
+}
+
+body {
+  background: var(--bg-void);
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: var(--fs-base);
+  line-height: var(--lh-base);
+  /* JetBrains Mono is not installed and is not bundled in Phase 1 — the token's
+     own fallback chain (ui-monospace, Cascadia Mono, Consolas) carries this
+     release. Ligatures stay off regardless (spec §8.2). */
+  font-variant-ligatures: none;
+  -webkit-font-smoothing: antialiased;
+  user-select: none;
+  cursor: default;
+}
+
+button {
+  font: inherit;
+  color: inherit;
+  background: none;
+  border: 0;
+  padding: 0;
+  cursor: pointer;
+}
+
+/* Keyboard focus, in the palette. The UA default ring is a browser-chosen
+   colour — the one colour on screen that no token controls. :focus-visible
+   keeps it off mouse clicks and on for keyboard navigation, where it earns
+   its keep. */
+:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: 2px;
+}
+
+h2,
+h3,
+p,
+ul,
+ol {
+  margin: 0;
+  padding: 0;
+}
+
+ul,
+ol {
+  list-style: none;
+}
+
+/* ──────────────────────────────────────────────────── agent state colours ──
+ * One place maps the six contract states to tokens; every chip, dot and label
+ * reads --state-color from it. Adding a seventh state would need a line here —
+ * and AgentState is a closed set, so that is a contract change, not an edit.
+ */
+
+[data-state='idle'] {
+  --state-color: var(--status-idle);
+}
+[data-state='listening'] {
+  --state-color: var(--accent);
+}
+[data-state='thinking'] {
+  --state-color: var(--sphere-cool);
+}
+[data-state='speaking'] {
+  --state-color: var(--sphere-hot);
+}
+[data-state='working'] {
+  --state-color: var(--status-active);
+}
+[data-state='blocked'] {
+  --state-color: var(--status-warn);
+}
+
+/* ──────────────────────────────────────────────────────────────── shell ── */
+
+.app {
+  display: grid;
+  grid-template-rows: var(--status-h) 1fr;
+  height: 100%;
+}
+
+.app__body {
+  position: relative;
+  display: grid;
+  grid-template-columns: var(--rail-w) 1fr;
+  min-height: 0;
+}
+
+/* ───────────────────────────────────────────────────────────── status bar ── */
+
+.status-bar {
+  display: flex;
+  align-items: stretch;
+  justify-content: space-between;
+  border-bottom: var(--hairline) solid var(--panel-border);
+  font-size: var(--fs-label);
+  text-transform: var(--label-transform);
+  letter-spacing: var(--label-tracking);
+}
+
+.status-bar__drag {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding-left: var(--sp-3);
+  min-width: 0;
+  flex: 1;
+  /* The window is frameless, so this strip is the title bar. */
+  -webkit-app-region: drag;
+}
+
+.status-bar__mark {
+  color: var(--accent);
+}
+
+.status-bar__sep {
+  width: var(--hairline);
+  height: var(--sp-3);
+  background: var(--panel-border);
+}
+
+.status-bar__state {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+  color: var(--state-color);
+}
+
+.status-bar__dot {
+  width: var(--sp-1);
+  height: var(--sp-1);
+  border-radius: var(--radius-pill);
+  background: var(--state-color);
+}
+
+.status-bar__conn {
+  color: var(--text-muted);
+}
+
+.status-bar__conn[data-phase='connected'] {
+  color: var(--status-active);
+}
+
+.status-bar__conn[data-phase='connecting'],
+.status-bar__conn[data-phase='reconnecting'] {
+  color: var(--status-warn);
+}
+
+.status-bar__conn[data-phase='authRejected'],
+.status-bar__conn[data-phase='protocolMismatch'] {
+  color: var(--status-error);
+}
+
+.status-bar__detail {
+  color: var(--text-muted);
+  text-transform: none;
+  letter-spacing: 0;
+  font-size: var(--fs-sm);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+
+.status-bar__retry {
+  color: var(--accent);
+  border: var(--hairline) solid var(--panel-border);
+  border-radius: var(--radius-sm);
+  padding: 0 var(--sp-2);
+  text-transform: var(--label-transform);
+  letter-spacing: var(--label-tracking);
+  -webkit-app-region: no-drag;
+}
+
+.status-bar__controls {
+  display: flex;
+  -webkit-app-region: no-drag;
+}
+
+.status-bar__control {
+  width: var(--sp-7);
+  color: var(--text-muted);
+  font-size: var(--fs-md);
+  line-height: 1;
+  transition: color var(--motion-fast) var(--motion-easing);
+}
+
+.status-bar__control:hover {
+  color: var(--text);
+}
+
+.status-bar__control--close:hover {
+  color: var(--status-error);
+}
+
+/* ────────────────────────────────────────────────────────────────── rail ── */
+
+.rail {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  border-right: var(--hairline) solid var(--panel-border);
+}
+
+.rail__item {
+  position: relative;
+  display: flex;
+  justify-content: center;
+  padding: var(--sp-4) 0;
+  color: var(--text-muted);
+  transition: color var(--motion-fast) var(--motion-easing);
+}
+
+.rail__item:hover {
+  color: var(--text);
+}
+
+.rail__item[data-active='true'] {
+  color: var(--accent);
+}
+
+/* An accent bar, not a filled background — the rail stays a hairline against
+   the void instead of becoming a second panel. */
+.rail__item[data-active='true']::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: var(--sp-2);
+  bottom: var(--sp-2);
+  width: 2px;
+  background: var(--accent);
+}
+
+.rail__label {
+  writing-mode: vertical-rl;
+  text-orientation: mixed;
+  font-size: var(--fs-label);
+  text-transform: var(--label-transform);
+  letter-spacing: var(--label-tracking);
+}
+
+/* ───────────────────────────────────────────────────────────────── stage ── */
+
+.stage {
+  position: relative;
+  overflow: hidden;
+  min-width: 0;
+}
+
+/* The ambient glow behind the sphere. CONTRACT §9.1: no card background on the
+   centre stage — this is a radial on the void itself, not a panel. */
+.stage::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: radial-gradient(circle at 50% 48%, var(--bg-ambient), transparent 68%);
+  pointer-events: none;
+}
+
+.sphere-canvas {
+  position: absolute;
+  inset: 0;
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+/* ───────────────────────────────────────────────────────────────── drawer ── */
+
+.drawer {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: var(--transcript-w);
+  display: flex;
+  flex-direction: column;
+  background: var(--panel);
+  border-left: var(--hairline) solid var(--panel-border);
+  transform: translateX(100%);
+  transition: transform var(--motion-base) var(--motion-easing);
+  /* No backdrop-filter. It is a per-frame full-screen blur, and on an HD 620 it
+     would compete with the sphere for the same GPU every single frame. The
+     --panel token is already translucent. */
+}
+
+.drawer[data-open='true'] {
+  transform: translateX(0);
+}
+
+.drawer__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--sp-3) var(--sp-3) var(--sp-3) var(--sp-4);
+  border-bottom: var(--hairline) solid var(--panel-border);
+}
+
+.drawer__title {
+  font-size: var(--fs-label);
+  font-weight: 400;
+  text-transform: var(--label-transform);
+  letter-spacing: var(--label-tracking);
+  color: var(--accent);
+}
+
+.drawer__close {
+  color: var(--text-muted);
+  font-size: var(--fs-md);
+  line-height: 1;
+}
+
+.drawer__close:hover {
+  color: var(--text);
+}
+
+.drawer__body {
+  flex: 1;
+  overflow-y: auto;
+  padding: var(--sp-4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-5);
+}
+
+/* ───────────────────────────────────────────────────────────────── panels ── */
+
+.panel-label {
+  font-size: var(--fs-label);
+  font-weight: 400;
+  text-transform: var(--label-transform);
+  letter-spacing: var(--label-tracking);
+  color: var(--text-muted);
+  margin-bottom: var(--sp-2);
+}
+
+.panel-section {
+  display: block;
+}
+
+.panel-footnote {
+  font-size: var(--fs-sm);
+  color: var(--text-muted);
+  border-top: var(--hairline) solid var(--panel-border);
+  padding-top: var(--sp-3);
+}
+
+.placeholder {
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-2);
+  font-size: var(--fs-sm);
+  color: var(--text-muted);
+}
+
+.placeholder__tag {
+  flex: none;
+  font-size: var(--fs-label);
+  text-transform: var(--label-transform);
+  letter-spacing: var(--label-tracking);
+  color: var(--accent-dim);
+  border: var(--hairline) solid var(--panel-border);
+  border-radius: var(--radius-sm);
+  padding: 0 var(--sp-1);
+}
+
+.counter {
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-2);
+}
+
+.counter__value {
+  font-size: var(--fs-xl);
+  color: var(--text);
+  line-height: var(--lh-tight);
+}
+
+.counter__unit {
+  font-size: var(--fs-sm);
+  color: var(--text-muted);
+}
+
+.list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+}
+
+.list__row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-2);
+  font-size: var(--fs-sm);
+}
+
+.list__row--stacked {
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--sp-1);
+  padding-bottom: var(--sp-2);
+  border-bottom: var(--hairline) solid var(--panel-border);
+}
+
+.list__primary {
+  color: var(--text);
+}
+
+.list__meta {
+  color: var(--text-muted);
+  font-size: var(--fs-label);
+}
+
+.list__tags {
+  display: flex;
+  gap: var(--sp-1);
+}
+
+.chip {
+  font-size: var(--fs-label);
+  text-transform: var(--label-transform);
+  letter-spacing: var(--label-tracking);
+  border-radius: var(--radius-pill);
+  padding: 0 var(--sp-2);
+  border: var(--hairline) solid var(--panel-border);
+  color: var(--state-color, var(--text-muted));
+}
+
+/* JobStatus. `blocked` and `needsReview` are warn, not error: nothing has gone
+   wrong in either — one is waiting on the owner, the other timed out waiting
+   (CONTRACT §4.1). */
+.chip--job[data-status='queued'] {
+  color: var(--text-muted);
+}
+.chip--job[data-status='running'] {
+  color: var(--status-active);
+}
+.chip--job[data-status='blocked'],
+.chip--job[data-status='needsReview'] {
+  color: var(--status-warn);
+}
+.chip--job[data-status='succeeded'] {
+  color: var(--status-active);
+}
+.chip--job[data-status='failed'] {
+  color: var(--status-error);
+}
+.chip--job[data-status='cancelled'] {
+  color: var(--text-muted);
+}
+
+.chip--tier[data-tier='green'] {
+  color: var(--status-active);
+}
+.chip--tier[data-tier='amber'] {
+  color: var(--status-warn);
+}
+.chip--tier[data-tier='red'] {
+  color: var(--status-error);
+}
+
+.week {
+  display: grid;
+  grid-template-columns: repeat(7, 1fr);
+  gap: var(--sp-1);
+}
+
+.week__day {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--sp-1);
+  padding: var(--sp-1) 0;
+  border-radius: var(--radius-sm);
+  font-size: var(--fs-label);
+  color: var(--text-muted);
+}
+
+.week__day[data-today='true'] {
+  color: var(--accent);
+  border: var(--hairline) solid var(--accent-dim);
+}
+
+.week__date {
+  color: var(--text);
+  font-size: var(--fs-sm);
+}
+
+.week__day[data-today='true'] .week__date {
+  color: var(--accent);
+}
+
+/* ── transcript ── */
+
+.tabs {
+  display: flex;
+  gap: var(--sp-1);
+  border-bottom: var(--hairline) solid var(--panel-border);
+}
+
+.tabs__tab {
+  padding: var(--sp-1) var(--sp-2);
+  font-size: var(--fs-label);
+  text-transform: var(--label-transform);
+  letter-spacing: var(--label-tracking);
+  color: var(--text-muted);
+  border-bottom: 2px solid transparent;
+}
+
+.tabs__tab[data-active='true'] {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+}
+
+.transcript {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+}
+
+/* The provenance gutter (CONTRACT §6.2). `human` is transparent because it is
+   the only trusted source and needs no marking; everything else is tinted
+   because it is data, not instruction. */
+.transcript__line {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+  padding-left: var(--sp-3);
+  border-left: 2px solid var(--prov-human);
+}
+
+.transcript__line[data-role='assistant'] {
+  border-left-color: var(--prov-agent);
+}
+
+.transcript__line[data-role='tool'],
+.transcript__line[data-role='system'] {
+  border-left-color: var(--prov-program);
+}
+
+.transcript__role {
+  font-size: var(--fs-label);
+  text-transform: var(--label-transform);
+  letter-spacing: var(--label-tracking);
+  color: var(--text-muted);
+}
+
+.transcript__text {
+  font-size: var(--fs-sm);
+  color: var(--text);
+}
+
+.transcript__line[data-role='system'] .transcript__text {
+  color: var(--text-muted);
+}
+
+/* ────────────────────────────────────────────────── DOM sphere fallback ──
+ * The bottom rung: no WebGL, no rAF, no JS per frame. Three rings and a core,
+ * animated by the compositor alone. It still has to carry all six states,
+ * because the state is the information.
+ */
+
+.dom-sphere {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 320px;
+  height: 320px;
+  margin: -160px 0 0 -160px;
+  transition: transform var(--motion-base) var(--motion-easing);
+}
+
+.dom-sphere__ring,
+.dom-sphere__core {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  border-radius: var(--radius-pill);
+  transform: translate(-50%, -50%);
+  border: var(--hairline) solid var(--state-color, var(--sphere-hot));
+}
+
+.dom-sphere__ring--outer {
+  width: 100%;
+  height: 100%;
+  opacity: 0.25;
+}
+
+.dom-sphere__ring--mid {
+  width: 68%;
+  height: 68%;
+  opacity: 0.45;
+}
+
+.dom-sphere__ring--inner {
+  width: 38%;
+  height: 38%;
+  opacity: 0.7;
+}
+
+.dom-sphere__core {
+  width: 12%;
+  height: 12%;
+  background: var(--state-color, var(--sphere-hot));
+  border: 0;
+}
+
+.dom-sphere[data-state='idle'] .dom-sphere__ring {
+  animation: dom-breathe 5.2s var(--motion-easing) infinite;
+}
+
+.dom-sphere[data-state='listening'] .dom-sphere__ring {
+  animation: dom-breathe 2.6s var(--motion-easing) infinite;
+  opacity: 0.85;
+}
+
+.dom-sphere[data-state='thinking'] .dom-sphere__ring {
+  animation: dom-spin 2.4s linear infinite;
+}
+
+.dom-sphere[data-state='speaking'] .dom-sphere__ring {
+  animation: dom-ripple 0.62s var(--motion-easing) infinite;
+}
+
+.dom-sphere[data-state='working'] .dom-sphere__ring {
+  animation: dom-breathe 1.4s var(--motion-easing) infinite;
+}
+
+/* blocked: no animation declared at all. Amber and still — the whole point. */
+
+@keyframes dom-breathe {
+  0%,
+  100% {
+    transform: translate(-50%, -50%) scale(1);
+  }
+  50% {
+    transform: translate(-50%, -50%) scale(1.06);
+  }
+}
+
+@keyframes dom-ripple {
+  0%,
+  100% {
+    transform: translate(-50%, -50%) scale(0.97);
+  }
+  40% {
+    transform: translate(-50%, -50%) scale(1.05);
+  }
+}
+
+@keyframes dom-spin {
+  from {
+    transform: translate(-50%, -50%) rotate(0deg) scale(1);
+  }
+  to {
+    transform: translate(-50%, -50%) rotate(360deg) scale(1);
+  }
+}
+
+/* ────────────────────────────────────────────────────────── dev overlay ── */
+
+.dev-overlay {
+  position: fixed;
+  left: calc(var(--rail-w) + var(--sp-3));
+  bottom: var(--sp-3);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: var(--sp-2) var(--sp-3);
+  max-width: 320px;
+  background: var(--panel);
+  border: var(--hairline) solid var(--panel-border);
+  border-radius: var(--radius-sm);
+  font-size: var(--fs-label);
+  color: var(--text-muted);
+  pointer-events: none;
+}
+
+.dev-overlay__row {
+  display: flex;
+  gap: var(--sp-2);
+}
+
+.dev-overlay__key {
+  flex: none;
+  width: var(--sp-7);
+  color: var(--accent-dim);
+  text-transform: var(--label-transform);
+  letter-spacing: var(--label-tracking);
+}
+
+.dev-overlay__wrap {
+  overflow-wrap: anywhere;
+}
+
+.dev-overlay__row--hint {
+  border-top: var(--hairline) solid var(--panel-border);
+  margin-top: var(--sp-1);
+  padding-top: var(--sp-1);
+}
+
+/* ──────────────────────────────────────────────────────── reduced motion ── */
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
