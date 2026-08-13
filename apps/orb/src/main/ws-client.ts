@@ -40,19 +40,66 @@ import { WebSocket } from 'ws';
 import type { RawData } from 'ws';
 
 import {
+  AGENT_STATES,
   CLOSE_CODES,
   HANDSHAKE_DEADLINE_MS,
   MAX_FRAME_BYTES,
+  ORB_COMMANDS,
   PROTOCOL_VERSION,
   isEnvelope,
   makeEnvelope,
+  ulid,
+  type AgentState,
   type AllowedOrigin,
+  type Envelope,
+  type EvtAgentState,
+  type EvtDaemonHealth,
   type ResHello,
   type Surface,
 } from '@zoey/protocol';
 
-import type { ConnectionStatus } from '../shared/ipc-contract.ts';
+import type {
+  AuditEntry,
+  ConnectionStatus,
+  DaemonHealth,
+  PtySession,
+  TranscriptLine,
+} from '../shared/ipc-contract.ts';
 import { readRuntimeFile, type RuntimeInfo } from './runtime-file.ts';
+import { TranscriptAssembler, type TranscriptDelta } from './transcript-assembler.ts';
+
+/**
+ * Topics subscribed after a successful hello.
+ *
+ * Prefix globs per CONTRACT §5.1. Verified against the daemon's matcher rather
+ * than assumed: `core/server.py::topic_matches` strips the first segment of the
+ * type before comparing, so `daemon.*` matches `evt.daemon.health` and
+ * `agent.*` matches `evt.agent.state`.
+ *
+ * Only these two. The Orb has no use yet for job, transcript, permission or
+ * audit traffic, and subscribing to events with nowhere to render them would
+ * burn frames decoding JSON to drop it.
+ */
+const TOPICS = ['daemon.*', 'agent.*', 'audit.*', 'pty.*', 'transcript.*'] as const;
+
+/** How much audit history SENTINEL asks for on connect. */
+const AUDIT_HISTORY_LIMIT = 100;
+
+/**
+ * Role → provenance, for the TRACE gutter (§R.6).
+ *
+ * Deliberately conservative. CONTRACT §6.2 makes `human` the ONLY trusted
+ * source, so anything not typed by the owner maps to something untrusted:
+ * assistant text is `agent`, tool output is `program`. Getting this wrong in
+ * the safe direction costs a duller colour; getting it wrong the other way
+ * paints model-proposed text as though the owner wrote it.
+ */
+const ROLE_PROVENANCE: Record<string, string> = {
+  user: 'human',
+  assistant: 'agent',
+  tool: 'program',
+  system: 'system',
+};
 
 /**
  * Typed against the contract's allowlist, so a typo is a compile error rather
@@ -87,6 +134,44 @@ function scrub(text: string): string {
   return text.replace(/\b[0-9a-f]{64}\b/gi, '<redacted-token>');
 }
 
+/**
+ * Envelope for an Orb-only command the contract has RESERVED but not yet given
+ * a payload shape.
+ *
+ * `makeEnvelope` is keyed on `PayloadMap`, and `cmd.voice.pushToTalk` has no
+ * entry there — CONTRACT §5.3 lists it under "Reserved", which is precisely the
+ * state of "the name is agreed, the payload is not". Gerald has approved
+ * `{ action: "start" | "stop" }` and will apply the §5.3 diff; until he does,
+ * `packages/protocol` is shared and locked and this surface does not get to
+ * edit it.
+ *
+ * So the frame is built from the protocol's own primitives instead of casting
+ * past its types. What that still buys:
+ *
+ *   • the TYPE NAME is compile-checked against the contract's own
+ *     `ORB_COMMANDS` tuple, so a typo cannot ship;
+ *   • the version and id generator are the protocol's, not a second copy;
+ *   • the result is run through the protocol's own `isEnvelope` before it can
+ *     be sent, so a malformed frame fails here rather than at the daemon.
+ *
+ * Only the payload is unchecked, which is exactly the part the contract has not
+ * specified yet. When the diff lands, this collapses back to `makeEnvelope`.
+ */
+function reservedOrbEnvelope(
+  type: (typeof ORB_COMMANDS)[number],
+  payload: Record<string, unknown>,
+): Envelope | null {
+  const frame = {
+    v: PROTOCOL_VERSION,
+    id: ulid(),
+    ts: new Date().toISOString().replace(/(\.\d{3})\d*Z$/, '$1Z'),
+    type,
+    corr: null,
+    payload,
+  };
+  return isEnvelope(frame) ? frame : null;
+}
+
 /** Short, non-reversible handle for a credential, so a rejected token need not be kept. */
 function credentialDigest(port: number, token: string): string {
   return createHash('sha256').update(`${port}:${token}`).digest('hex').slice(0, 16);
@@ -95,6 +180,23 @@ function credentialDigest(port: number, token: string): string {
 export interface DaemonConnectionOptions {
   surfaceVersion: string;
   onStatus: (status: ConnectionStatus) => void;
+  onHealth: (health: DaemonHealth) => void;
+  onAgentState: (state: AgentState) => void;
+  onAuditHistory: (entries: AuditEntry[]) => void;
+  onAuditAppended: (entry: AuditEntry) => void;
+  onPtySessions: (sessions: PtySession[]) => void;
+  onTranscriptLine: (line: TranscriptLine) => void;
+  /**
+   * The daemon ANSWERED a `cmd.voice.pushToTalk`. `active` is its own view of
+   * whether the microphone is claimed, which is the only view worth rendering.
+   */
+  onVoiceAck: (action: 'start' | 'stop', active: boolean) => void;
+  /**
+   * The daemon REFUSED it, or the socket died before it could answer. The
+   * distinction matters: a refusal means the claim did not happen, and the
+   * indicator must not light.
+   */
+  onVoiceRefused: (action: 'start' | 'stop', detail: string) => void;
   log: (message: string) => void;
 }
 
@@ -109,10 +211,32 @@ export class DaemonConnection {
   private status: ConnectionStatus = { phase: 'offline' };
   private backoffMs = BACKOFF_MIN_MS;
   private helloId: string | null = null;
+  private subscribeId: string | null = null;
+  private auditQueryId: string | null = null;
   private stopped = false;
+  private loggedFirstHealth = false;
+
+  /**
+   * Per-connection, and reset on disconnect. A half-streamed message cannot be
+   * completed by the next connection, and holding its fragments would let stale
+   * text prepend itself to a future message that reuses the id.
+   */
+  private readonly assembler = new TranscriptAssembler();
 
   /** Digest of the (port, token) that was rejected with 4401. Never retried. */
   private rejectedCredential: string | null = null;
+
+  /**
+   * In-flight `cmd.voice.pushToTalk` frames, by correlation id.
+   *
+   * Kept so a reply can be attributed to the action that caused it. Without
+   * this, a `stop` acknowledged after a `start` was refused would be read as
+   * confirmation of the start. Cleared on disconnect, where every outstanding
+   * one is reported as refused — a command with no answer is not a command that
+   * succeeded, and for this particular command the safe reading is "the
+   * microphone is not claimed".
+   */
+  private readonly pendingVoice = new Map<string, 'start' | 'stop'>();
 
   constructor(options: DaemonConnectionOptions) {
     this.opts = options;
@@ -139,6 +263,35 @@ export class DaemonConnection {
     this.backoffMs = BACKOFF_MIN_MS;
     this.clearTimer();
     this.attempt();
+  }
+
+  /**
+   * CONTRACT §5.3 `cmd.voice.pushToTalk` — Orb-only, payload
+   * `{ action: "start" | "stop" }`.
+   *
+   * Fire-and-correlate rather than fire-and-forget. The daemon's reply carries
+   * `active`, and that is what the indicator renders; this method never asserts
+   * anything about the microphone by itself.
+   *
+   * Returns false when there is no open socket, so the caller can say "not
+   * connected" instead of showing a claim that was never sent.
+   */
+  sendPushToTalk(action: 'start' | 'stop'): boolean {
+    if (!this.socket || this.socket.readyState !== WebSocket.OPEN) {
+      this.opts.onVoiceRefused(action, 'not connected to the daemon');
+      return false;
+    }
+    const frame = reservedOrbEnvelope('cmd.voice.pushToTalk', { action });
+    if (!frame) {
+      // Unreachable unless the protocol's own validator rejects a frame this
+      // file built from the protocol's own primitives — which would mean the
+      // two have drifted. Refuse rather than send something unvalidated.
+      this.opts.onVoiceRefused(action, 'could not build a valid envelope');
+      return false;
+    }
+    this.pendingVoice.set(frame.id, action);
+    this.socket.send(JSON.stringify(frame));
+    return true;
   }
 
   dispose(): void {
@@ -264,6 +417,172 @@ export class DaemonConnection {
       return;
     }
 
+    if (parsed.type === 'res.subscribe' && parsed.corr === this.subscribeId) {
+      const topics = (parsed.payload as { topics?: unknown }).topics;
+      this.opts.log(`subscribed: ${Array.isArray(topics) ? topics.join(', ') : '(none echoed)'}`);
+      return;
+    }
+
+    // Push-to-talk replies, matched by correlation id. Both outcomes are
+    // handled here rather than letting a refusal fall through to the silent
+    // ignore at the bottom: an unanswered microphone claim must not look like
+    // a successful one.
+    if (parsed.corr && this.pendingVoice.has(parsed.corr)) {
+      const action = this.pendingVoice.get(parsed.corr) as 'start' | 'stop';
+      this.pendingVoice.delete(parsed.corr);
+
+      if (parsed.type === 'res.ok') {
+        const payload = parsed.payload as { active?: unknown; changed?: unknown };
+        // `active` is the daemon's own view. Absent means an older daemon
+        // answered a bare res.ok, and inferring the claim from the action we
+        // sent would be exactly the local optimism this avoids — so treat a
+        // reply with no `active` as unconfirmed.
+        if (typeof payload.active === 'boolean') {
+          this.opts.log(
+            `voice.pushToTalk ${action} → mic ${payload.active ? 'CLAIMED' : 'released'}` +
+              `${payload.changed === false ? ' (no change)' : ''}`,
+          );
+          this.opts.onVoiceAck(action, payload.active);
+        } else {
+          this.opts.onVoiceRefused(action, 'daemon replied without an active flag');
+        }
+      } else {
+        const payload = parsed.payload as { message?: unknown };
+        const detail = typeof payload.message === 'string' ? payload.message : parsed.type;
+        this.opts.log(`voice.pushToTalk ${action} REFUSED: ${scrub(detail)}`);
+        this.opts.onVoiceRefused(action, detail);
+      }
+      return;
+    }
+
+    if (parsed.type === 'evt.daemon.health') {
+      // Log the first frame verbatim. Session 1 is filling these fields with
+      // real values, so what actually arrives will change under us; a literal
+      // record of one frame is worth more than an assumption about its shape.
+      if (!this.loggedFirstHealth) {
+        this.loggedFirstHealth = true;
+        this.opts.log(`first evt.daemon.health verbatim: ${JSON.stringify(parsed)}`);
+      }
+      const health = parsed.payload as unknown as EvtDaemonHealth;
+      if (typeof health.uptimeS === 'number') {
+        // Each field defaulted independently rather than gated on one another:
+        // the daemon is filling these in progressively, so a frame carrying
+        // uptime but not yet budget is a real intermediate state, not a fault.
+        const num = (v: unknown): number => (typeof v === 'number' && Number.isFinite(v) ? v : 0);
+        this.opts.onHealth({
+          uptimeS: health.uptimeS,
+          cpuPct: num(health.cpuPct),
+          memMB: num(health.memMB),
+          apiReachable: health.apiReachable === true,
+          budgetSpent: num(health.budgetSpent),
+          budgetCap: num(health.budgetCap),
+          receivedAt: Date.now(),
+        });
+      }
+      return;
+    }
+
+    if (parsed.type === 'res.audit' && parsed.corr === this.auditQueryId) {
+      const rows = (parsed.payload as { entries?: unknown }).entries;
+      if (Array.isArray(rows)) {
+        const entries = rows
+          .filter((r): r is Record<string, unknown> => typeof r === 'object' && r !== null)
+          .map((r) => this.toAuditEntry(r))
+          .filter((e): e is AuditEntry => e !== null);
+        this.opts.log(`audit history: ${entries.length} entries`);
+        this.opts.onAuditHistory(entries);
+      }
+      return;
+    }
+
+    if (parsed.type === 'evt.audit.appended') {
+      const entry = this.toAuditEntry(parsed.payload as Record<string, unknown>);
+      if (entry) this.opts.onAuditAppended(entry);
+      return;
+    }
+
+    if (parsed.type === 'evt.pty.sessions') {
+      const list = (parsed.payload as { sessions?: unknown }).sessions;
+      if (Array.isArray(list)) {
+        this.opts.onPtySessions(list as PtySession[]);
+      }
+      return;
+    }
+
+    // Streaming text. Reassembled by seq per CONTRACT §3.3 — see
+    // transcript-assembler.ts. Emits only when `done` closes the message, so
+    // consumers never see a half-sentence or an out-of-order fragment.
+    if (parsed.type === 'evt.transcript.delta') {
+      const d = parsed.payload as unknown as TranscriptDelta;
+      const finished = this.assembler.push(d);
+      if (finished) {
+        if (finished.gaps.length > 0) {
+          this.opts.log(
+            `transcript ${finished.messageId} completed with ${finished.gaps.length} missing ` +
+              `fragment(s) at seq ${finished.gaps.join(',')} — emitting what arrived`,
+          );
+        }
+        this.opts.onTranscriptLine({
+          messageId: finished.messageId,
+          role: finished.role,
+          provenance: ROLE_PROVENANCE[finished.role] ?? 'system',
+          text: finished.text,
+          ts: parsed.ts,
+        });
+      }
+      return;
+    }
+
+    if (parsed.type === 'evt.transcript.message') {
+      const payload = parsed.payload as { message?: Record<string, unknown> };
+      const m = payload.message;
+      if (!m || typeof m['text'] !== 'string') {
+        // Say so. CONTRACT §4.1 specifies this payload as
+        // `{ companionId, message: { messageId, role, text, toolCalls?, ts } }`
+        // and the daemon currently sends `{ role, text, final }` flat, with no
+        // `message` wrapper and no messageId or ts.
+        //
+        // Not accepted anyway, and the silence was the real defect: dropping it
+        // without a word produced an empty TRACE and an empty under-sphere line
+        // with nothing anywhere to say why, which is indistinguishable from
+        // "the daemon said nothing". Rendering the flat form instead would be
+        // worse — it would hide a contract mismatch AND invent the messageId
+        // the reassembler and the React key both need.
+        this.opts.log(
+          `!! evt.transcript.message does not match CONTRACT §4.1 — expected a ` +
+            `nested \`message\` object, got keys [${Object.keys(
+              parsed.payload as Record<string, unknown>,
+            ).join(', ')}]. Dropping it.`,
+        );
+        return;
+      }
+      {
+        const role = typeof m['role'] === 'string' ? m['role'] : 'system';
+        this.opts.onTranscriptLine({
+          messageId: String(m['messageId'] ?? ''),
+          role,
+          provenance: ROLE_PROVENANCE[role] ?? 'system',
+          text: m['text'],
+          ts: typeof m['ts'] === 'string' ? m['ts'] : new Date().toISOString(),
+        });
+      }
+      return;
+    }
+
+    if (parsed.type === 'evt.agent.state') {
+      const evt = parsed.payload as unknown as EvtAgentState;
+      // Validated against the closed set rather than trusted. The daemon is the
+      // authority, but a value outside AgentState would mean the two sides have
+      // drifted (CONTRACT §7.4) — dropping it keeps the sphere on a state it
+      // can actually render instead of blanking.
+      if (typeof evt.state === 'string' && (AGENT_STATES as readonly string[]).includes(evt.state)) {
+        this.opts.onAgentState(evt.state);
+      } else {
+        this.opts.log(`ignored evt.agent.state with unknown state '${String(evt.state)}'`);
+      }
+      return;
+    }
+
     if (this.status.phase === 'connecting' && parsed.type.startsWith('err.')) {
       const payload = parsed.payload as { message?: unknown };
       const detail = typeof payload.message === 'string' ? payload.message : parsed.type;
@@ -293,6 +612,42 @@ export class DaemonConnection {
     this.opts.log(
       `connected — daemon ${payload.daemonVersion}, session ${payload.sessionId.slice(0, 8)}`,
     );
+
+    // Subscribe only after the handshake is accepted. A cmd.* before a
+    // successful cmd.hello earns err.auth.required (CONTRACT §5.4), and the
+    // subscription has to be re-sent on every reconnect because the daemon
+    // holds it in per-connection state, not per-surface.
+    const frame = makeEnvelope('cmd.subscribe', { topics: [...TOPICS] });
+    this.subscribeId = frame.id;
+    this.socket?.send(JSON.stringify(frame));
+
+    // Subscription only delivers what happens NEXT. SENTINEL needs the log that
+    // already exists, so ask for it once per connection.
+    const query = makeEnvelope('cmd.audit.query', { limit: AUDIT_HISTORY_LIMIT });
+    this.auditQueryId = query.id;
+    this.socket?.send(JSON.stringify(query));
+  }
+
+  /**
+   * Normalise one audit row.
+   *
+   * `res.audit` returns raw log rows keyed by `seq`; `evt.audit.appended` is
+   * specified with `entryId`. Accept either rather than assuming, because one
+   * of the two is going to change and a silently-empty SENTINEL is worse than
+   * a loud mismatch.
+   */
+  private toAuditEntry(raw: Record<string, unknown>): AuditEntry | null {
+    const id = raw['entryId'] ?? raw['seq'] ?? raw['id'];
+    if (id === undefined || id === null) return null;
+    return {
+      id: String(id),
+      ts: typeof raw['ts'] === 'string' ? raw['ts'] : '',
+      actor: typeof raw['actor'] === 'string' ? raw['actor'] : 'unknown',
+      tool: typeof raw['tool'] === 'string' ? raw['tool'] : '',
+      tier: typeof raw['tier'] === 'string' ? raw['tier'] : 'none',
+      summary: typeof raw['summary'] === 'string' ? raw['summary'] : '',
+      provenance: typeof raw['provenance'] === 'string' ? raw['provenance'] : null,
+    };
   }
 
   /**
@@ -337,6 +692,19 @@ export class DaemonConnection {
     this.socket?.removeAllListeners();
     this.socket = null;
     this.helloId = null;
+    this.subscribeId = null;
+    this.auditQueryId = null;
+    this.assembler.reset();
+
+    // Every unanswered voice command fails closed. A `start` whose reply was
+    // lost with the socket did not claim anything the surface can vouch for,
+    // and a `stop` that never arrived means the daemon still thinks the mic is
+    // open — in both cases the honest local state is "not claimed", and the
+    // controller re-sends a stop when the link returns.
+    for (const [, action] of this.pendingVoice) {
+      this.opts.onVoiceRefused(action, `connection closed (${code}) before the daemon answered`);
+    }
+    this.pendingVoice.clear();
 
     if (this.stopped) return;
 

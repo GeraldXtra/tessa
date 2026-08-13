@@ -1,16 +1,143 @@
-# GENERATED — daemon dependency lock for core/
+# GENERATED - daemon dependency lock for core/
 #
 # Install exactly:  pip install --require-hashes -r requirements.lock
-# Regenerate:       python scripts/lock-python.py
 #
-# Pinned because core/ is ~1,200 lines that previously imported websockets from
-# global Python with nothing recorded — it ran on exactly one machine.
+# WHEELS ONLY (cp312 / win_amd64 where native). There is NO MSVC and no Rust
+# on this machine, so a source build is a hard failure rather than a slow
+# path -- every line below resolved to a prebuilt wheel.
 #
-# NOTE: these are win_amd64 cp312 wheels, matching the owner's Python 3.12.7 on
-# Windows 11 x64. Building on another platform needs a regenerated lock.
+# Hashes are the registry's own sha256 for the exact artifact the resolver
+# picked, taken from `pip install --dry-run --report`. That is the same value
+# --require-hashes verifies against, so the lock cannot drift from the check.
+#
+# Regenerate:  python scratchpad/gen_lock.py   (resolves, does not download)
+#
+# 32 pinned distributions.
 
-websockets==17.0.1 \
-    --hash=sha256:2b3f3020171202b135ca078e20434977c6b2b02af647130d6980c9e39b9462e3
+# anyio-4.14.2-py3-none-any.whl
+anyio==4.14.2 \
+    --hash=sha256:9f505dda5ac9f0c8309b5e8bd445a8c2bf7246f3ce950121e45ea15bc41d1494
 
+# av-18.1.0-cp311-abi3-win_amd64.whl
+av==18.1.0 \
+    --hash=sha256:ea1480b7a8d5405cb5f382b344731bf125fd2c1c6fae3964f6c48595628387ff
+
+# certifi-2026.7.22-py3-none-any.whl
+certifi==2026.7.22 \
+    --hash=sha256:62f22742b58a1a33014a2b6b706588a8d7e2a88ae7bd1a6ebe8c992928483775
+
+# cffi-2.1.1-cp312-cp312-win_amd64.whl
+cffi==2.1.1 \
+    --hash=sha256:f53e442b08449d42821fa4a4fba000095af9f62742a500f978a9f557ec44339a
+
+# click-8.4.2-py3-none-any.whl
+click==8.4.2 \
+    --hash=sha256:e6f9f66136c816745b9d65817da91d61d957fb16e02e4dcd0552553c5a197b76
+
+# colorama-0.4.6-py2.py3-none-any.whl
+colorama==0.4.6 \
+    --hash=sha256:4f1d9991f5acc0ca119f9d443620b77f9d6b33703e51011c16baf57afb285fc6
+
+# ctranslate2-4.8.1-cp312-cp312-win_amd64.whl
+ctranslate2==4.8.1 \
+    --hash=sha256:49f96e861b57301f0b76a082109bde2cac8204a6b4fedc870883008271e82251
+
+# faster_whisper-1.2.1-py3-none-any.whl
+faster-whisper==1.2.1 \
+    --hash=sha256:79a66ad50688c0b794dd501dc340a736992a6342f7f95e5811be60b5224a26a7
+
+# filelock-3.32.2-py3-none-any.whl
+filelock==3.32.2 \
+    --hash=sha256:87dd94cf281e586d135fa51132b8e3d9a598b316e90377a288663c9321036c82
+
+# flatbuffers-25.12.19-py2.py3-none-any.whl
+flatbuffers==25.12.19 \
+    --hash=sha256:7634f50c427838bb021c2d66a3d1168e9d199b0607e6329399f04846d42e20b4
+
+# fsspec-2026.7.0-py3-none-any.whl
+fsspec==2026.7.0 \
+    --hash=sha256:b57ddbafedfaef7018c1ecab32aa200a9d7ca26b77965f64e48b70061249d279
+
+# h11-0.16.0-py3-none-any.whl
+h11==0.16.0 \
+    --hash=sha256:63cf8bbe7522de3bf65932fda1d9c2772064ffb3dae62d55932da54b31cb6c86
+
+# hf_xet-1.6.0-cp38-abi3-win_amd64.whl
+hf-xet==1.6.0 \
+    --hash=sha256:fb4fadde1b2b70bf4c0c14a6dccbe7194b1c28947fefd5bbe3fed9d940676c3b
+
+# httpcore-1.0.9-py3-none-any.whl
+httpcore==1.0.9 \
+    --hash=sha256:2d400746a40668fc9dec9810239072b40b4484b640a8c38fd654a024c7a1bf55
+
+# httpx-0.28.1-py3-none-any.whl
+httpx==0.28.1 \
+    --hash=sha256:d909fcccc110f8c7faf814ca82a9a4d816bc5a6dbfea25d6591d6985b8ba59ad
+
+# huggingface_hub-1.27.0-py3-none-any.whl
+huggingface_hub==1.27.0 \
+    --hash=sha256:7df6827c2f956c60fbaa64646e979e566db76f619dd0a9729dfb8c5a3eb4f68d
+
+# idna-3.18-py3-none-any.whl
+idna==3.18 \
+    --hash=sha256:7f952cbe720b688055e3f87de14f5c3e5fdaa8bc3928985c4077ca689de849a2
+
+# numpy-2.5.2-cp312-cp312-win_amd64.whl
+numpy==2.5.2 \
+    --hash=sha256:28ac63476ec7651484215ee7fa15a1f78b57c14621f01e392afe17b9a1390ce4
+
+# onnxruntime-1.28.0-cp312-cp312-win_amd64.whl
+onnxruntime==1.28.0 \
+    --hash=sha256:c35064f9b3c43c81c5d5d282091401d0f1ff22796d93ccade4ea2ece5e137ab8
+
+# packaging-26.3-py3-none-any.whl
+packaging==26.3 \
+    --hash=sha256:d7193f7c8e4e93f444fde0262bf90af30e16fa0ad0ad44cb553c87339b23cd1c
+
+# pathvalidate-3.3.1-py3-none-any.whl
+pathvalidate==3.3.1 \
+    --hash=sha256:5263baab691f8e1af96092fa5137ee17df5bdfbd6cff1fcac4d6ef4bc2e1735f
+
+# piper_tts-1.6.0-cp39-abi3-win_amd64.whl
+piper-tts==1.6.0 \
+    --hash=sha256:5f10915ff8193053303ae406d0f121e2e775b4a91309c0c89b0d8652a232c438
+
+# protobuf-7.35.1-cp310-abi3-win_amd64.whl
+protobuf==7.35.1 \
+    --hash=sha256:230a75ddfc2de4806e56696ce9640c1cdfdb6543b7cfce98d42a4c0a0e7bdb87
+
+# psutil-7.2.2-cp37-abi3-win_amd64.whl
+psutil==7.2.2 \
+    --hash=sha256:eb7e81434c8d223ec4a219b5fc1c47d0417b12be7ea866e24fb5ad6e84b3d988
+
+# pycparser-3.0-py3-none-any.whl
+pycparser==3.0 \
+    --hash=sha256:b727414169a36b7d524c1c3e31839a521725078d7b2ff038656844266160a992
+
+# pyyaml-6.0.3-cp312-cp312-win_amd64.whl
 PyYAML==6.0.3 \
     --hash=sha256:5fcd34e47f6e0b794d17de1b4ff496c00986e1c83f7ab2fb8fcfe9616ff7477b
+
+# setuptools-84.0.0-py3-none-any.whl
+setuptools==84.0.0 \
+    --hash=sha256:51a52592b3b99e102b609654876bd65f19f999935166d1352678931132b0c670
+
+# sounddevice-0.5.5-py3-none-win_amd64.whl
+sounddevice==0.5.5 \
+    --hash=sha256:cfc6b2c49fb7f555591c78cb8ecf48d6a637fd5b6e1db5fec6ed9365d64b3519
+
+# tokenizers-0.23.1-cp310-abi3-win_amd64.whl
+tokenizers==0.23.1 \
+    --hash=sha256:e7bfaf995c1bdbbd21d13539decb6650967013759318627d85daeb7881af16b7
+
+# tqdm-4.70.0-py3-none-any.whl
+tqdm==4.70.0 \
+    --hash=sha256:7f585706bfddbdebf89daac705b2dfcc16890130727d3197ca62c732b4310953
+
+# typing_extensions-4.16.0-py3-none-any.whl
+typing_extensions==4.16.0 \
+    --hash=sha256:481caa481374e813c1b176ada14e97f1f67a4539ce9cfeb3f350d78d6370c2e8
+
+# websockets-17.0.1-cp312-cp312-win_amd64.whl
+websockets==17.0.1 \
+    --hash=sha256:2b3f3020171202b135ca078e20434977c6b2b02af647130d6980c9e39b9462e3

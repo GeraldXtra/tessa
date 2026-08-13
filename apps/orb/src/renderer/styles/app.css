@@ -139,6 +139,71 @@ ol {
   font-size: var(--fs-label);
   text-transform: var(--label-transform);
   letter-spacing: var(--label-tracking);
+  /* The mic rule is absolutely positioned against this. */
+  position: relative;
+}
+
+/* ── the microphone claim ──────────────────────────────────────────────────
+   A full-window-width bar on the top edge, in --status-error. This is the
+   across-the-room signal; the pill below it is the up-close one.
+
+   3px, not the rail marker's 2px, and the extra pixel is doing work: the rail
+   marker is read at arm's length against a 48px column, this is read in
+   peripheral vision across a room against a 1366px edge. Both are the same
+   idiom — a solid bar of a status colour meaning "this is on" — so it is §R.7's
+   existing language at a different scale, not a new one.
+
+   It is a sibling element rather than a border-top because a border would shift
+   the bar's own layout by 3px every time the microphone opened, jogging every
+   label in the strip. */
+.status-bar__mic-rule {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 3px;
+  background: var(--status-error);
+  pointer-events: none;
+}
+
+.status-bar__mic {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+  color: var(--text-muted);
+  /* Never a drag handle: a click here must not be swallowed by the title bar. */
+  -webkit-app-region: no-drag;
+}
+
+.status-bar__mic-dot {
+  width: var(--sp-1);
+  height: var(--sp-1);
+  border-radius: var(--radius-pill);
+  /* Hollow when dark, filled when live — the same dot the agent state uses. */
+  border: var(--hairline) solid var(--text-muted);
+}
+
+.status-bar__mic[data-claimed='true'] {
+  color: var(--status-error);
+}
+
+.status-bar__mic[data-claimed='true'] .status-bar__mic-dot {
+  background: var(--status-error);
+  border-color: var(--status-error);
+}
+
+/* The trigger's own state: which mode, and whether the chord is live. Muted
+   while the mic is dark so it reads as configuration rather than as an alarm. */
+.status-bar__mic-mode {
+  color: var(--text-muted);
+  text-transform: none;
+  letter-spacing: normal;
+}
+
+/* Hold mode gives up the global chord — the trigger only works focused. That is
+   a real reduction in capability and it is marked, not hidden. */
+.status-bar__mic[data-mode='hold'] .status-bar__mic-mode {
+  color: var(--status-warn);
 }
 
 .status-bar__drag {
@@ -194,6 +259,139 @@ ol {
   color: var(--status-error);
 }
 
+.status-bar__beat {
+  color: var(--status-active);
+}
+
+.status-bar__beat[data-stale='true'] {
+  color: var(--status-warn);
+}
+
+/* §R.2 top-bar metrics: data used today, API spend today. */
+.status-bar__metric {
+  display: inline-flex;
+  align-items: baseline;
+  gap: var(--sp-2);
+}
+
+.status-bar__metric-label {
+  color: var(--text-muted);
+}
+
+.status-bar__nodata {
+  color: var(--text-muted);
+}
+
+/* ── §R.2 top-right notification stack ──
+   No keyframes anywhere: a card transitions once when it mounts and once when
+   it leaves. §R.7 — nothing animates at rest. */
+.notes {
+  position: absolute;
+  top: var(--sp-3);
+  right: var(--sp-3);
+  z-index: 3;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  width: 280px;
+  pointer-events: none;
+}
+
+.note {
+  pointer-events: auto;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+  padding: var(--sp-2) var(--sp-3);
+  background: var(--panel);
+  border: var(--hairline) solid var(--panel-border);
+  border-left: 2px solid var(--text-muted);
+  border-radius: var(--radius-sm);
+  backdrop-filter: blur(12px);
+}
+
+.note[data-level='info'] {
+  border-left-color: var(--status-active);
+}
+.note[data-level='warn'] {
+  border-left-color: var(--status-warn);
+}
+.note[data-level='error'] {
+  border-left-color: var(--status-error);
+}
+
+.note__head {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+}
+
+.note__level {
+  font-size: var(--fs-label);
+  text-transform: var(--label-transform);
+  letter-spacing: var(--label-tracking);
+  color: var(--text-muted);
+}
+
+.note__close {
+  margin-left: auto;
+  color: var(--text-muted);
+  font-size: var(--fs-md);
+  line-height: 1;
+}
+.note__close:hover {
+  color: var(--text);
+}
+
+.note__title {
+  font-size: var(--fs-sm);
+  color: var(--text);
+}
+
+.note__body {
+  font-size: var(--fs-label);
+  color: var(--text-muted);
+}
+
+/* ── §R.2 under the sphere: one line, fading ── */
+.lastline {
+  position: absolute;
+  left: 50%;
+  bottom: var(--sp-6);
+  transform: translateX(-50%);
+  max-width: 60%;
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-2);
+  padding-left: var(--sp-3);
+  /* The provenance gutter follows the line out here too — the last thing said
+     is exactly where mistaking agent text for the owner's would matter most. */
+  border-left: 2px solid var(--prov-program);
+  pointer-events: none;
+}
+.lastline[data-provenance='human'] {
+  border-left-color: var(--prov-human);
+}
+.lastline[data-provenance='agent'] {
+  border-left-color: var(--prov-agent);
+}
+
+.lastline__role {
+  flex: none;
+  font-size: var(--fs-label);
+  text-transform: var(--label-transform);
+  letter-spacing: var(--label-tracking);
+  color: var(--text-muted);
+}
+
+.lastline__text {
+  font-size: var(--fs-sm);
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .status-bar__detail {
   color: var(--text-muted);
   text-transform: none;
@@ -243,6 +441,13 @@ ol {
   flex-direction: column;
   align-items: stretch;
   border-right: var(--hairline) solid var(--panel-border);
+  /* Above the drawer. The drawer starts at left:var(--rail-w) and slides in
+     from translateX(-100%), so for those 180ms it passes across the rail's
+     column. Without this the labels flicker under a moving panel every time a
+     rail is opened. */
+  position: relative;
+  z-index: 2;
+  background: var(--bg-void);
 }
 
 .rail__item {
@@ -262,20 +467,51 @@ ol {
   color: var(--accent);
 }
 
-/* An accent bar, not a filled background — the rail stays a hairline against
-   the void instead of becoming a second panel. */
+/* §R.7: "a 2px --accent bar on the rail's INNER edge, 24px tall, vertically
+   centred on the label". Inner edge = the side facing the app, i.e. the right
+   edge of a left-hand rail. Fixed 24px and centred, not stretched to the item. */
 .rail__item[data-active='true']::before {
   content: '';
   position: absolute;
-  left: 0;
-  top: var(--sp-2);
-  bottom: var(--sp-2);
+  right: 0;
+  top: 50%;
+  transform: translateY(-50%);
   width: 2px;
+  height: 24px;
   background: var(--accent);
 }
 
+/* §R.7: SENTINEL is the only rail carrying a status colour, and it carries it
+   even while another drawer is open. These win over the active/hover rules
+   because a threat must not be repainted by the state of some other panel.
+   No source sets data-status today — see rails/sentinel-status.ts. */
+.rail__item[data-status='green'],
+.rail__item[data-status='green']:hover {
+  color: var(--status-active);
+}
+.rail__item[data-status='amber'],
+.rail__item[data-status='amber']:hover {
+  color: var(--status-warn);
+}
+.rail__item[data-status='red'],
+.rail__item[data-status='red']:hover {
+  color: var(--status-error);
+}
+.rail__item[data-status='red']::before {
+  content: '';
+  position: absolute;
+  right: 0;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 2px;
+  height: 24px;
+  background: var(--status-error);
+}
+
+/* §R.7: "Vertical text, rotated 180°, reading bottom-to-top." */
 .rail__label {
   writing-mode: vertical-rl;
+  transform: rotate(180deg);
   text-orientation: mixed;
   font-size: var(--fs-label);
   text-transform: var(--label-transform);
@@ -310,21 +546,45 @@ ol {
 
 /* ───────────────────────────────────────────────────────────────── drawer ── */
 
+/* §R.7: "320px wide, full height, RIGHT OF THE RAIL" — so it sits against the
+   rail at the left of the body, not docked to the far right. Its left edge is
+   square against the rail; its right edge faces the sphere and carries both the
+   1px border ("inner edge only") and the 12px radius ("outer corners"). */
 .drawer {
   position: absolute;
   top: 0;
-  right: 0;
+  /* Offset by the rail, not flush to the body's left edge. §R.7 says "right of
+     the rail", and at left:0 the drawer sat ON TOP of it — the other four rail
+     labels were unreachable for as long as any drawer was open, which defeats
+     the point of a rail. */
+  left: var(--rail-w);
   bottom: 0;
   width: var(--transcript-w);
   display: flex;
   flex-direction: column;
   background: var(--panel);
-  border-left: var(--hairline) solid var(--panel-border);
-  transform: translateX(100%);
-  transition: transform var(--motion-base) var(--motion-easing);
-  /* No backdrop-filter. It is a per-frame full-screen blur, and on an HD 620 it
-     would compete with the sphere for the same GPU every single frame. The
-     --panel token is already translucent. */
+  border-right: var(--hairline) solid var(--panel-border);
+  border-radius: 0 var(--panel-radius) var(--panel-radius) 0;
+  transform: translateX(-100%);
+
+  /* §R.7: slides in 180ms cubic-bezier(.2,.8,.2,1). SLIDES, NEVER FADES —
+     transform only, no opacity. */
+  transition: transform 180ms cubic-bezier(0.2, 0.8, 0.2, 1);
+
+  /* §R.7 mandates backdrop-filter: blur(12px).
+     An earlier revision of this file refused it on the theory that a
+     full-screen blur would compete with the sphere for the HD 620 every frame.
+     That was a guess, and it is now measured rather than assumed — see the
+     18g before/after. The blur is only composited over the 320px the drawer
+     occupies, not the whole window. */
+  backdrop-filter: blur(12px);
+}
+
+/* §R.7: reduced motion snaps instantly rather than sliding. */
+@media (prefers-reduced-motion: reduce) {
+  .drawer {
+    transition: none;
+  }
 }
 
 .drawer[data-open='true'] {
@@ -366,237 +626,259 @@ ol {
   gap: var(--sp-5);
 }
 
-/* ───────────────────────────────────────────────────────────────── panels ── */
+/* ═══════════════════════════════════════════ drawer interior — §R.7 exactly ══
+   Section headers, 28px rows, 2% alternating rows, tabular numbers, NO DATA,
+   sparklines, bars, tier badges. One set of rules for all five rails. */
 
-.panel-label {
+.sec {
+  display: block;
+}
+
+/* §R.7: --fs-label uppercase mono 0.14em --text-muted, 1px --panel-border
+   underline, --sp-4 above. */
+.sec__head {
+  margin-top: var(--sp-4);
+  padding-bottom: var(--sp-1);
+  border-bottom: var(--hairline) solid var(--panel-border);
   font-size: var(--fs-label);
   font-weight: 400;
   text-transform: var(--label-transform);
   letter-spacing: var(--label-tracking);
   color: var(--text-muted);
-  margin-bottom: var(--sp-2);
 }
 
-.panel-section {
-  display: block;
-}
-
-.panel-footnote {
-  font-size: var(--fs-sm);
+/* §R.7: "the word NO DATA in --text-muted, --fs-label". */
+.nodata {
+  padding: var(--sp-2) var(--sp-3);
+  font-size: var(--fs-label);
+  letter-spacing: var(--label-tracking);
   color: var(--text-muted);
-  border-top: var(--hairline) solid var(--panel-border);
-  padding-top: var(--sp-3);
 }
 
-.placeholder {
+/* §R.7: row height 28px, --sp-3 horizontal padding, alternating rows at 2%
+   white — "barely there". */
+.row {
   display: flex;
-  align-items: baseline;
+  align-items: center;
   gap: var(--sp-2);
-  font-size: var(--fs-sm);
-  color: var(--text-muted);
+  min-height: 28px;
+  padding: 0 var(--sp-3);
+  font-size: var(--fs-base);
 }
 
-.placeholder__tag {
+.row:nth-child(even) {
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.row__label {
+  color: var(--text-muted);
   flex: none;
-  font-size: var(--fs-label);
-  text-transform: var(--label-transform);
-  letter-spacing: var(--label-tracking);
-  color: var(--accent-dim);
-  border: var(--hairline) solid var(--panel-border);
-  border-radius: var(--radius-sm);
-  padding: 0 var(--sp-1);
 }
 
-.counter {
-  display: flex;
-  align-items: baseline;
-  gap: var(--sp-2);
-}
-
-.counter__value {
-  font-size: var(--fs-xl);
+.row__value {
+  margin-left: auto;
   color: var(--text);
+  white-space: nowrap;
+}
+
+/* The hint sits on its own line under the row rather than competing with the
+   value for horizontal space. "process, normalised across cores" is the whole
+   reason the CPU figure is not misread, so it must not be the thing that gets
+   ellipsised away. */
+.row__hint {
+  flex-basis: 100%;
+  order: 1;
+  padding-bottom: var(--sp-1);
+  font-size: var(--fs-label);
   line-height: var(--lh-tight);
-}
-
-.counter__unit {
-  font-size: var(--fs-sm);
   color: var(--text-muted);
 }
 
-.list {
-  display: flex;
-  flex-direction: column;
-  gap: var(--sp-2);
+.row:has(.row__hint) {
+  flex-wrap: wrap;
+  align-items: baseline;
+  padding-top: var(--sp-1);
 }
 
-.list__row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--sp-2);
-  font-size: var(--fs-sm);
+/* §R.7: "ALL numbers font-variant-numeric: tabular-nums" so live values do not
+   jitter as digits change. */
+.num,
+.bar,
+.spark,
+.audit__ts,
+.trace__ts {
+  font-variant-numeric: tabular-nums;
 }
 
-.list__row--stacked {
-  flex-direction: column;
-  align-items: flex-start;
-  gap: var(--sp-1);
-  padding-bottom: var(--sp-2);
-  border-bottom: var(--hairline) solid var(--panel-border);
-}
-
-.list__primary {
-  color: var(--text);
-}
-
-.list__meta {
+.state {
   color: var(--text-muted);
-  font-size: var(--fs-label);
+}
+.state[data-ok='true'] {
+  color: var(--status-active);
+}
+.state[data-ok='false'] {
+  color: var(--status-warn);
 }
 
-.list__tags {
-  display: flex;
-  gap: var(--sp-1);
-}
-
-.chip {
-  font-size: var(--fs-label);
-  text-transform: var(--label-transform);
-  letter-spacing: var(--label-tracking);
+/* §R.7: "Bars: 4px tall, --radius-pill, track at 6% white." */
+.bar {
+  height: 4px;
+  margin: var(--sp-1) var(--sp-3) var(--sp-2);
   border-radius: var(--radius-pill);
-  padding: 0 var(--sp-2);
+  background: rgba(255, 255, 255, 0.06);
+  overflow: hidden;
+}
+
+.bar__fill {
+  height: 100%;
+  border-radius: var(--radius-pill);
+  background: var(--status-active);
+}
+.bar[data-level='warning'] .bar__fill {
+  background: var(--status-warn);
+}
+.bar[data-level='critical'] .bar__fill {
+  background: var(--status-error);
+}
+
+/* §R.7: "Sparklines: 1px stroke, 40px tall, no axes, no grid, no legend." */
+.spark {
+  display: block;
+  width: calc(100% - (2 * var(--sp-3)));
+  height: 40px;
+  margin: var(--sp-1) var(--sp-3) var(--sp-2);
+}
+
+.spark path {
+  fill: none;
+  stroke: var(--status-active);
+  stroke-width: 1;
+  vector-effect: non-scaling-stroke;
+}
+.spark[data-level='warning'] path {
+  stroke: var(--status-warn);
+}
+.spark[data-level='critical'] path {
+  stroke: var(--status-error);
+}
+
+/* §R.7: "Tier badges: pill, --fs-label, 2px/6px padding ... always with the
+   tier word, never colour alone." */
+.tier {
+  flex: none;
+  padding: 2px 6px;
+  border-radius: var(--radius-pill);
   border: var(--hairline) solid var(--panel-border);
-  color: var(--state-color, var(--text-muted));
-}
-
-/* JobStatus. `blocked` and `needsReview` are warn, not error: nothing has gone
-   wrong in either — one is waiting on the owner, the other timed out waiting
-   (CONTRACT §4.1). */
-.chip--job[data-status='queued'] {
-  color: var(--text-muted);
-}
-.chip--job[data-status='running'] {
-  color: var(--status-active);
-}
-.chip--job[data-status='blocked'],
-.chip--job[data-status='needsReview'] {
-  color: var(--status-warn);
-}
-.chip--job[data-status='succeeded'] {
-  color: var(--status-active);
-}
-.chip--job[data-status='failed'] {
-  color: var(--status-error);
-}
-.chip--job[data-status='cancelled'] {
-  color: var(--text-muted);
-}
-
-.chip--tier[data-tier='green'] {
-  color: var(--status-active);
-}
-.chip--tier[data-tier='amber'] {
-  color: var(--status-warn);
-}
-.chip--tier[data-tier='red'] {
-  color: var(--status-error);
-}
-
-.week {
-  display: grid;
-  grid-template-columns: repeat(7, 1fr);
-  gap: var(--sp-1);
-}
-
-.week__day {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: var(--sp-1);
-  padding: var(--sp-1) 0;
-  border-radius: var(--radius-sm);
-  font-size: var(--fs-label);
-  color: var(--text-muted);
-}
-
-.week__day[data-today='true'] {
-  color: var(--accent);
-  border: var(--hairline) solid var(--accent-dim);
-}
-
-.week__date {
-  color: var(--text);
-  font-size: var(--fs-sm);
-}
-
-.week__day[data-today='true'] .week__date {
-  color: var(--accent);
-}
-
-/* ── transcript ── */
-
-.tabs {
-  display: flex;
-  gap: var(--sp-1);
-  border-bottom: var(--hairline) solid var(--panel-border);
-}
-
-.tabs__tab {
-  padding: var(--sp-1) var(--sp-2);
   font-size: var(--fs-label);
   text-transform: var(--label-transform);
   letter-spacing: var(--label-tracking);
   color: var(--text-muted);
-  border-bottom: 2px solid transparent;
+}
+.tier[data-tier='green'] {
+  color: var(--status-active);
+}
+.tier[data-tier='amber'] {
+  color: var(--status-warn);
+}
+.tier[data-tier='red'] {
+  color: var(--status-error);
 }
 
-.tabs__tab[data-active='true'] {
-  color: var(--accent);
-  border-bottom-color: var(--accent);
-}
+/* ── audit rows ── */
 
-.transcript {
+.audit {
   display: flex;
   flex-direction: column;
-  gap: var(--sp-3);
+  gap: 2px;
+  padding: var(--sp-2) var(--sp-3);
+  border-bottom: var(--hairline) solid var(--panel-border);
 }
 
-/* The provenance gutter (CONTRACT §6.2). `human` is transparent because it is
-   the only trusted source and needs no marking; everything else is tinted
-   because it is data, not instruction. */
-.transcript__line {
+.audit:nth-child(even) {
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.audit__top {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+}
+
+.audit__tool {
+  font-size: var(--fs-sm);
+  color: var(--text);
+}
+
+.audit__ts {
+  margin-left: auto;
+  font-size: var(--fs-label);
+  color: var(--text-muted);
+}
+
+.audit__summary {
+  font-size: var(--fs-sm);
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+
+.audit__actor {
+  font-size: var(--fs-label);
+  color: var(--text-muted);
+}
+
+/* ── TRACE, with the provenance gutter (§R.6) ── */
+
+.trace {
   display: flex;
   flex-direction: column;
-  gap: var(--sp-1);
-  padding-left: var(--sp-3);
-  border-left: 2px solid var(--prov-human);
+  gap: var(--sp-2);
+  padding: var(--sp-2) 0;
 }
 
-.transcript__line[data-role='assistant'] {
+/* Only three of the six Provenance values have tokens. The default is the
+   `program` tint — the untrusted side — because falling back toward "trusted"
+   would be the dangerous direction to be wrong in. schedule/external/system are
+   awaiting a tokens.json addition; see the report. */
+.trace__line {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 0 var(--sp-3);
+  border-left: 2px solid var(--prov-program);
+}
+.trace__line[data-provenance='human'] {
+  border-left-color: var(--prov-human);
+}
+.trace__line[data-provenance='agent'] {
   border-left-color: var(--prov-agent);
 }
-
-.transcript__line[data-role='tool'],
-.transcript__line[data-role='system'] {
+.trace__line[data-provenance='program'] {
   border-left-color: var(--prov-program);
 }
 
-.transcript__role {
+.trace__meta {
+  display: flex;
+  gap: var(--sp-2);
   font-size: var(--fs-label);
   text-transform: var(--label-transform);
   letter-spacing: var(--label-tracking);
   color: var(--text-muted);
 }
 
-.transcript__text {
+.trace__ts {
+  margin-left: auto;
+}
+
+.trace__text {
   font-size: var(--fs-sm);
   color: var(--text);
 }
 
-.transcript__line[data-role='system'] .transcript__text {
-  color: var(--text-muted);
-}
+/* The styling for the deleted AGENDA / JOBS / TRANSCRIPT panels lived here
+   (.panel-label, .placeholder, .counter, .list, .chip, .week, .tabs and the
+   old .transcript block). It was removed with them — dead selectors are how
+   a replaced rail stays reachable. The drawer interior is now specified once,
+   above, from §R.7. */
 
 /* ────────────────────────────────────────────────── DOM sphere fallback ──
  * The bottom rung: no WebGL, no rAF, no JS per frame. Three rings and a core,
@@ -735,6 +1017,12 @@ ol {
 
 .dev-overlay__wrap {
   overflow-wrap: anywhere;
+}
+
+/* A stale or unfocused window must not read as a live measurement. */
+.dev-overlay[data-stale='true'] {
+  color: var(--status-warn);
+  border-color: var(--accent-dim);
 }
 
 .dev-overlay__row--hint {

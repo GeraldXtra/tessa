@@ -1,0 +1,54 @@
+# core/config/settings.yaml
+#
+# Runtime settings for the Zoey Core daemon.
+#
+# Distinct from permissions.yaml on purpose: that file answers "may this
+# happen?" and is the security authority. This one answers "how should the
+# daemon behave?" and is tuning.
+
+version: 1
+
+# ── Budget ────────────────────────────────────────────────────────────────────
+# ZOEY_OS-spec §6: a nightly budget cap is a HARD STOP, not a warning.
+# `budgetCap` and `budgetSpent` ship on every evt.daemon.health frame
+# (CONTRACT §4.1).
+#
+# UNIT: NGN. CONTRACT §4.1 does not state a currency for those two fields —
+# a one-line clarification has been proposed to the owner rather than assumed.
+budget:
+  currency: NGN
+  nightly_cap: 3000.0
+  # Ledger path, relative to the repo root. Date-keyed, persisted, and rebuilt
+  # on startup so a restart mid-evening does not hand back a fresh allowance.
+  ledger_path: "data/cost-ledger.jsonl"
+
+# ── Health heartbeat ──────────────────────────────────────────────────────────
+health:
+  # evt.daemon.health cadence. CONTRACT §4.1 says every 5 s.
+  interval_s: 5
+
+  # The reachability probe is NOT run on every heartbeat.
+  #
+  # Three reasons, all of which matter on this machine: the connection is
+  # metered, a probe every 5 s is 17,280 requests a day for one boolean, and a
+  # blocking check inside the beat would stall the heartbeat the Orb renders
+  # from. So it runs at most once per this interval and every beat in between
+  # reports the cached value.
+  api_probe_interval_s: 60
+
+  # Probed with a plain TCP connect, NOT an HTTP request and NOT an API call:
+  # it needs no API key, sends no payload, and costs a few hundred bytes of
+  # handshake. `apiReachable` answers "is the network there", not "is my key
+  # valid" — conflating those would make a billing problem look like an outage.
+  api_probe_host: "api.anthropic.com"
+  api_probe_port: 443
+  api_probe_timeout_s: 2.0
+
+# ── PTY grants ────────────────────────────────────────────────────────────────
+# CONTRACT §6.5: a grant covers one session, one directory, and expires.
+pty:
+  # Generous for a spawn (~85 ms observed for the worker probe plus spawn),
+  # far too short to be useful to anything sitting on a captured grantId.
+  grant_ttl_s: 30
+  # How often to drop unredeemed grants past their deadline.
+  grant_sweep_interval_s: 15

@@ -22,8 +22,22 @@ uniform float uAmpGain;
 uniform float uPointScale;  // world units
 uniform float uSizeScale;   // canvasHeight / (2 * tan(fov/2)) — set on resize
 
+// §R.1 equatorial pulse. uPulse runs 0->1 once per received heartbeat.
+//
+// uPulseGain is 1 while a beat is in flight and 0 otherwise, and it is NOT
+// redundant with uPulse == 0. uPulse == 0 is the START of the travel, where the
+// band sits on the equator at full amplitude — the single most visible frame of
+// the whole animation. Using it as the resting value left a dead daemon showing
+// a permanently brightened, permanently bulged equator: MEASURED at +14.8%
+// column luminance over the unlit shell, held across 457 consecutive samples.
+// "No beat in flight" is a different fact from "the beat is at phase zero", and
+// it needs its own uniform.
+uniform float uPulse;
+uniform float uPulseGain;
+
 varying float vRim;
 varying float vSeed;
+varying float vPulse;
 
 // Three detuned sines instead of a hash. No texture fetch, no branching, and on
 // an integrated part the vertex stage has headroom that the fragment stage does
@@ -44,6 +58,17 @@ void main() {
                + uBreath
                + uTurbulence * noise
                + uAmpGain * uAmplitude * ripple * 0.35;
+
+  // A band travelling from equator to poles once per heartbeat. dir.y is 0 at
+  // the equator and +/-1 at the poles, so |dir.y| is latitude; the band is a
+  // narrow window around a latitude that sweeps outward as uPulse goes 0->1.
+  // With no beat in flight uPulseGain is 0 and the shell is unaffected.
+  float latitude = abs(dir.y);
+  float band = 1.0 - smoothstep(0.0, 0.18, abs(latitude - uPulse));
+  float pulse = uPulseGain * band * (1.0 - uPulse);   // fades toward the poles
+  vPulse = pulse;
+
+  radius += pulse * 0.05;
 
   vec4 viewPos = modelViewMatrix * vec4(dir * radius, 1.0);
 

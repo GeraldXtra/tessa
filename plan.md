@@ -56,7 +56,7 @@ Measured on this machine. Several kill otherwise-obvious choices.
 | Claude Code | `@anthropic-ai/claude-code@2.1.228` global | Runs as a PTY child. Zero integration work for v1. |
 | OneDrive tree | **79,353 entries at depth ≤4, 18.3 s to walk.** 17,340 reparse points. 2,634 `node_modules`. | **Eager listing is impossible.** Drives §6 entirely. |
 
-**Package baseline** (npm registry, Aug 2026): `electron` **43.4.0** · `@xterm/xterm` **6.0.0** (scoped; unscoped `xterm` is superseded) · `@lydell/node-pty` **1.2.0-beta.15**.
+**Package baseline** (npm registry, Aug 2026): `electron` **43.4.0** · `@xterm/xterm` **6.0.0** (scoped; unscoped `xterm` is superseded) · `@lydell/node-pty` **1.1.0 stable** (NOT the beta — corrected before install; see below).
 
 ### 2.1 The File Explorer requirement, honestly
 
@@ -114,7 +114,15 @@ Scope is deliberately tight: **tabs + ConPTY + xterm + lazy file tree + CONTRACT
 
 🔵 The fleet contradicted itself: the PTY-core agent proposed a standalone **Go** ConPTY host and rejected node-pty; the shell-profiles agent proposed **`@lydell/node-pty`** and rejected the Go host.
 
-**Decision: `@lydell/node-pty` 1.2.0-beta.15. The Go host is rejected for Phase 1.**
+**Decision: `@lydell/node-pty` 1.1.0 STABLE. The Go host is rejected for Phase 1.**
+
+⚠️ **Corrected before the first install, and this is what the repo actually runs.** An earlier
+draft of this plan recorded `1.2.0-beta.15`, which holds npm's `latest` tag but was four days old.
+Verified on the registry: **1.1.0 ships the same six prebuilt platform-specific
+`optionalDependencies` and has NO `scripts` field at all**, so it cannot invoke `node-gyp` even as
+a fallback — decisive on a machine with no MSVC to recover with. Confirmed on disk after install:
+`@lydell/node-pty@1.1.0` with only `@lydell/node-pty-win32-x64` fetched (the `os`/`cpu` gates
+prevented a six-platform download).
 
 The Go agent rejected node-pty as *"NAN-based, ABI-pinned"* that would *"likely refuse to load on Node v25."* 🟢 **That is false for node-pty 1.x** — the registry shows it depends on `node-addon-api@^7.1.0`, i.e. it is a **Node-API** addon. N-API is ABI-stable across Node *and* Electron, which is exactly why no rebuild step is needed. The rejection rested on a false premise.
 
@@ -262,7 +270,10 @@ One part-time developer, 2-core laptop, intermittent power. 🔵 The fleet's per
 | Phase | Deliverable | Exit criterion | Est. |
 |---|---|---|---|
 | **0** ✅ | Monorepo, `CONTRACT.md`, `packages/protocol` + `packages/tokens` generating, daemon skeleton with **auth working** | ✅ **MET** — 22/22 auth tests pass, 24/24 protocol tests pass, audit chain verifies, ACL confirmed user-only | done |
-| **1a** | Electron shell, one window, one xterm, one ConPTY session | `npm install`, `pip install`, `git`, `claude` all work | 1.5 wk |
+| **1a-0** ✅ | PTY smoke test in plain Node | ✅ **MET** — binary loads 14 ms, `napi=10`, spawn+resize+echo+exit clean on 22631 | done |
+| **1a-1** ✅ | Electron shell, one hardened window | ✅ **MET** — cold start 425–576 ms, main RSS ~74–108 MB, `nodeAccess=none`, `contextBridge=ok` | done |
+| **1a-2** ✅ | PTY in a `utilityProcess` + MessagePort | ✅ **MET** — `worker_threads` probe PASSES in stock Electron 43 (39–86 ms), so rung 1 holds; echo round-trips; teardown frees the tree verified by PID | done |
+| **1a-3** ⚠️ | xterm + GPU probe | **PARTIAL** — rung selected and addon attached (`webgl`, ANGLE/D3D11); **keystroke→glyph NOT measured**, harness aborts, see `latency.ts` header. Target restated to **33.3 ms p95** (16 ms is unreachable at 60 Hz). | — |
 | **1b** | Tabs + shell profiles (cmd, PS 5.1, Git Bash, both WSL distros) | Every profile launches; Ctrl+C interrupts; closing a tab kills the process tree | 1.5 wk |
 | **1c** | Lazy file tree + click-folder-to-spawn | Tree paints <200 ms at OneDrive root; click opens console there; hydration cost shown | 2 wk |
 | **1d** | Security hardening + audit log + protected paths | Hash-chain verifies; protected-path write prompts; secrets redacted | 1 wk |

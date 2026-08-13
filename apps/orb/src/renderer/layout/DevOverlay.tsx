@@ -1,21 +1,26 @@
 /**
  * Dev-only instrumentation. Never rendered in a packaged build.
  *
- * Exists because two of this phase's claims are measurements, not assertions:
- * which tier the GPU probe chose on the HD 620, and whether that tier holds a
- * 30 fps frame budget while sharing two cores with the daemon. Spec §4 makes
- * missing a latency target a bug — so the number has to be visible, not
- * inferred from how it looks.
+ * Rebuilt after the first version produced a number that could not be acted on.
+ * It showed a single `FRAME` figure that was really the pacer's own output
+ * interval — bounded below by the frame target, so it could never read healthy —
+ * and it never indicated that a window had gone stale, which it does the moment
+ * the app loses focus. Three separate rows now, because they answer three
+ * different questions and only one of them is a verdict:
  *
- * Polls at 2 Hz. The engine keeps its own rolling percentiles; this only reads
- * them, so the overlay cannot perturb what it is measuring.
+ *   COST     our own work per frame. The only row a tier change can move.
+ *   RAF      how often the browser offers a frame at all. The ceiling.
+ *   SHOWN    the cadence actually presented. A pacing readout, not a budget.
+ *
+ * Polls at 2 Hz and only reads what the engine already computed, so the overlay
+ * cannot perturb what it measures.
  */
 
 import { useEffect, useState } from 'react';
 
 import type { SphereTier } from '../../shared/ipc-contract.ts';
 import { PARTICLE_COUNT } from '../scene/gpu-tier.ts';
-import type { SphereStats } from '../scene/sphere-engine.ts';
+import { STATS_STALE_AFTER_MS, type SphereStats } from '../scene/sphere-engine.ts';
 
 interface DevOverlayProps {
   /**
@@ -32,35 +37,65 @@ interface DevOverlayProps {
   rendererName: string;
 }
 
+function pair(label: string, p50: number, p95: number) {
+  return `${label} p50 ${p50.toFixed(p50 < 10 ? 2 : 1)} · p95 ${p95.toFixed(p95 < 10 ? 2 : 1)}ms`;
+}
+
 export function DevOverlay({ tier, readStats, tierReason, rendererName }: DevOverlayProps) {
   const [stats, setStats] = useState<SphereStats | null>(null);
+  const [now, setNow] = useState(() => performance.now());
 
   useEffect(() => {
     if (!readStats) {
       setStats(null);
       return;
     }
-    const id = window.setInterval(() => setStats(readStats()), 500);
+    const id = window.setInterval(() => {
+      setStats(readStats());
+      setNow(performance.now());
+    }, 500);
     return () => window.clearInterval(id);
   }, [readStats]);
 
+  const published = stats && stats.publishedAt > 0;
+  const ageMs = published ? now - stats.publishedAt : 0;
+  const stale = published ? ageMs > STATS_STALE_AFTER_MS : false;
+
+  // A window collected while unfocused was paced to 10 fps deliberately. Saying
+  // so is the difference between "slow" and "idling on purpose".
+  const qualifier = !published
+    ? 'collecting…'
+    : stale
+      ? `stale ${(ageMs / 1000).toFixed(0)}s`
+      : stats.focused
+        ? `${stats.samples} frames`
+        : 'unfocused — paced to 10fps';
+
   return (
-    <div className="dev-overlay">
+    <div className="dev-overlay" data-stale={stale || (published && !stats.focused)}>
       <div className="dev-overlay__row">
         <span className="dev-overlay__key">tier</span>
         <span>{`${tier} · ${PARTICLE_COUNT[tier].toLocaleString()} pts`}</span>
       </div>
       <div className="dev-overlay__row">
-        <span className="dev-overlay__key">frame</span>
+        <span className="dev-overlay__key">cost</span>
+        <span>{published ? pair('', stats.cost.p50, stats.cost.p95) : '—'}</span>
+      </div>
+      <div className="dev-overlay__row">
+        <span className="dev-overlay__key">raf</span>
+        <span>{published ? pair('', stats.raf.p50, stats.raf.p95) : '—'}</span>
+      </div>
+      <div className="dev-overlay__row">
+        <span className="dev-overlay__key">shown</span>
         <span>
-          {stats && stats.p50 > 0
-            ? `p50 ${stats.p50.toFixed(1)}ms · p95 ${stats.p95.toFixed(1)}ms · ${stats.fps.toFixed(0)}fps`
-            : 'sampling…'}
+          {published
+            ? `${pair('', stats.present.p50, stats.present.p95)} · ${stats.fps.toFixed(0)}fps`
+            : '—'}
         </span>
       </div>
       <div className="dev-overlay__row">
-        <span className="dev-overlay__key">submit</span>
-        <span>{stats ? `${stats.submitMs.toFixed(2)}ms` : '—'}</span>
+        <span className="dev-overlay__key">window</span>
+        <span>{qualifier}</span>
       </div>
       <div className="dev-overlay__row">
         <span className="dev-overlay__key">gpu</span>

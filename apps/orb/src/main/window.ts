@@ -10,7 +10,16 @@
 
 import { join } from 'node:path';
 
-import { BrowserWindow, type WebContents } from 'electron';
+import { BrowserWindow, screen, type WebContents } from 'electron';
+
+import {
+  loadWindowState,
+  saveWindowState,
+  MIN_HEIGHT,
+  MIN_WIDTH,
+  SAVE_DEBOUNCE_MS,
+  type SavedWindowState,
+} from './window-state.ts';
 
 // Design tokens are the single source of truth for colour (CONTRACT §9), and
 // that applies to the native window chrome too, not just CSS. Reading the value
@@ -21,15 +30,21 @@ import tokens from '@zoey/tokens';
 const BACKGROUND = tokens.color['bg-void'].value;
 
 /**
- * 1280×760 on a 1366×768 display leaves room for the taskbar without the window
- * needing to be maximised. The minimum is the point below which the collapsed
- * layout stops being honest: 1024 still gives the sphere ~700px with a drawer
- * open (spec §8.1).
+ * There are no default dimensions any more, and that is the fix.
+ *
+ * The old code carried `DEFAULT_WIDTH = 1280, DEFAULT_HEIGHT = 760` as literals
+ * and never consulted `screen` at all — not `.size`, not `.workAreaSize`. On a
+ * 1366×768 panel with a 48px taskbar (work area 1366×720) a 760-tall window is
+ * 40px taller than the space available, so it could not sit inside the work
+ * area whatever it did. First launch now derives its size from
+ * `workAreaSize` and maximizes.
+ *
+ * Every dimension below is CONTENT, not window rect — `useContentSize: true`
+ * makes width/height/minWidth/minHeight all refer to the web page. That
+ * distinction is the whole of §R.8: a maximized frameless window on Windows has
+ * a window rect 16px larger in each axis than its content, because DWM keeps an
+ * invisible resize border outside the visible edge.
  */
-const DEFAULT_WIDTH = 1280;
-const DEFAULT_HEIGHT = 760;
-const MIN_WIDTH = 1024;
-const MIN_HEIGHT = 640;
 
 export interface WindowOptions {
   isDev: boolean;
@@ -61,11 +76,45 @@ export function hardenWebContents(contents: WebContents): void {
 }
 
 export function createOrbWindow(options: WindowOptions): BrowserWindow {
+  // workAreaSize, never size. `.size` is the panel including the taskbar strip;
+  // using it is how a window ends up 48px taller than the space it can occupy.
+  const { workAreaSize, workArea } = screen.getPrimaryDisplay();
+
+  const restored = loadWindowState();
+  const initial: SavedWindowState = restored.ok
+    ? restored.state
+    : {
+        width: workAreaSize.width,
+        height: workAreaSize.height,
+        x: workArea.x,
+        y: workArea.y,
+        isMaximized: true,
+      };
+
+  console.log(
+    `[orb] window: workArea ${workAreaSize.width}x${workAreaSize.height} · ` +
+      (restored.ok
+        ? `restored ${initial.width}x${initial.height} at ${initial.x},${initial.y} maximized=${initial.isMaximized}`
+        : `no restore (${restored.reason}: ${restored.detail}) — maximizing`),
+  );
+
   const window = new BrowserWindow({
-    width: DEFAULT_WIDTH,
-    height: DEFAULT_HEIGHT,
+    // CONTENT dimensions, because useContentSize is true below.
+    width: initial.width,
+    height: initial.height,
+    x: initial.x,
+    y: initial.y,
     minWidth: MIN_WIDTH,
     minHeight: MIN_HEIGHT,
+
+    /**
+     * Every width/height on this object is the web page, not the window rect.
+     *
+     * Without this, "1366×720" would mean a window rect of 1366×720 whose
+     * content is 1350×704 — the invisible DWM resize border eats 8px per side.
+     * §R.8 is written in content pixels, so the API is set to speak in them.
+     */
+    useContentSize: true,
 
     // CONTRACT §9.1: "centre stage floats over pure void". A native title bar
     // would put a strip of OS chrome above that void, so the window is
@@ -106,7 +155,13 @@ export function createOrbWindow(options: WindowOptions): BrowserWindow {
     },
   });
 
+  // First launch, or a discarded restore, opens filling the work area exactly.
+  if (initial.isMaximized) window.maximize();
+
   window.once('ready-to-show', () => window.show());
+
+  attachStatePersistence(window);
+  attachFullscreenToggle(window);
 
   if (options.isDev && options.rendererUrl) {
     void window.loadURL(options.rendererUrl);
@@ -115,4 +170,74 @@ export function createOrbWindow(options: WindowOptions): BrowserWindow {
   }
 
   return window;
+}
+
+/**
+ * Persist geometry on move and resize, coalesced.
+ *
+ * `getNormalBounds()` rather than `getBounds()` is the important part: while
+ * maximized, getBounds returns the maximized rectangle, so saving it would mean
+ * un-maximizing restores to a window that exactly covers the work area and the
+ * owner can never get their smaller window back. getNormalBounds keeps the
+ * pre-maximize rectangle, which is what "restore" is supposed to mean.
+ */
+function attachStatePersistence(window: BrowserWindow): void {
+  let timer: NodeJS.Timeout | null = null;
+
+  const persist = (): void => {
+    if (timer) clearTimeout(timer);
+    timer = setTimeout(() => {
+      timer = null;
+      if (window.isDestroyed()) return;
+      // Fullscreen bounds are the panel, not a window the owner chose. Saving
+      // them would make every launch after an F11 session open fullscreen-sized.
+      if (window.isFullScreen()) return;
+
+      const bounds = window.getNormalBounds();
+      saveWindowState({
+        width: bounds.width,
+        height: bounds.height,
+        x: bounds.x,
+        y: bounds.y,
+        isMaximized: window.isMaximized(),
+      });
+    }, SAVE_DEBOUNCE_MS);
+  };
+
+  // Registered one by one rather than over a list: BrowserWindow.on is
+  // overloaded per event name, and a union of names matches no single overload.
+  window.on('resize', persist);
+  window.on('move', persist);
+  window.on('maximize', persist);
+  window.on('unmaximize', persist);
+
+  // A close can outrun a pending debounce; flush synchronously.
+  window.on('close', () => {
+    if (timer) clearTimeout(timer);
+    if (window.isFullScreen()) return;
+    const bounds = window.getNormalBounds();
+    saveWindowState({
+      width: bounds.width,
+      height: bounds.height,
+      x: bounds.x,
+      y: bounds.y,
+      isMaximized: window.isMaximized(),
+    });
+  });
+}
+
+/**
+ * F11 toggles borderless fullscreen.
+ *
+ * Bound through `before-input-event` rather than an accelerator because this
+ * app has no application menu (main/index.ts removes it, so Alt reaches the
+ * renderer). Fullscreen is the one state that legitimately covers the taskbar,
+ * so its content is the full 1366×768 rather than the 1366×720 work area.
+ */
+function attachFullscreenToggle(window: BrowserWindow): void {
+  window.webContents.on('before-input-event', (event, input) => {
+    if (input.type !== 'keyDown' || input.key !== 'F11') return;
+    event.preventDefault();
+    window.setFullScreen(!window.isFullScreen());
+  });
 }

@@ -22,7 +22,11 @@ export * from './enums.generated.ts';
 
 import {
   PROTOCOL_VERSION,
-  SPAWN_MODES,
+  // NOTE: SPAWN_MODES (the value) is deliberately NOT imported. `parseDeepLink`
+  // uses DEEP_LINK_MODES — a strict subset that excludes `cdCurrent` (§6.6).
+  // It remains part of this package's PUBLIC API via the `export *` above;
+  // consumers are unaffected.
+  type ErrorCode,
   type Provenance,
   type SpawnMode,
   type Surface,
@@ -449,9 +453,16 @@ export function ulid(now: number = Date.now()): string {
   }
 
   if (now === lastUlidMs) {
-    // increment the previous random component, right to left, with carry
+    // Increment the previous random component, right to left, with carry.
+    //
+    // `cur` is hoisted because `noUncheckedIndexedAccess` types `number[]`
+    // indexing as `number | undefined`. The guard is unreachable in practice —
+    // `i` is bounded by the array's own length — but narrowing it here keeps
+    // the carry logic identical rather than papering over it with `!`.
     for (let i = lastUlidRandom.length - 1; i >= 0; i--) {
-      if (lastUlidRandom[i] < 31) { lastUlidRandom[i]++; break; }
+      const cur = lastUlidRandom[i];
+      if (cur === undefined) continue;
+      if (cur < 31) { lastUlidRandom[i] = cur + 1; break; }
       lastUlidRandom[i] = 0;
     }
   } else {

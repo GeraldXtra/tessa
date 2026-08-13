@@ -12,20 +12,34 @@
 
 import { useEffect, useRef } from 'react';
 
+import type { AgentState } from '@zoey/protocol';
+
 import type { SphereTier } from '../../shared/ipc-contract.ts';
 import { agentStateStore } from '../state/store.ts';
-import { createSphereEngine, type SphereEngine, type SphereStats } from './sphere-engine.ts';
+import { createSphereEngine, type SphereEngine } from './sphere-engine.ts';
 
 interface SphereProps {
   tier: SphereTier;
   /** How far to shift the sphere left, in pixels, when a drawer is open. */
   offsetPx: number;
   onTierChange: (tier: SphereTier, reason: string) => void;
-  /** Dev overlay polls this; absent in production. */
-  onEngineReady?: (readStats: () => SphereStats) => void;
+  /**
+   * The engine itself, once. The dev overlay polls `stats()` and the dev probes
+   * call `probeFrame()`; handing up the whole object beats adding a prop per
+   * imperative method. Nothing in production calls this.
+   */
+  onEngineReady?: (engine: SphereEngine) => void;
+  /** Spec §4 measurement. See SphereEngineOptions.onStateRendered. */
+  onStateRendered?: (state: AgentState, at: number) => void;
 }
 
-export function Sphere({ tier, offsetPx, onTierChange, onEngineReady }: SphereProps) {
+export function Sphere({
+  tier,
+  offsetPx,
+  onTierChange,
+  onEngineReady,
+  onStateRendered,
+}: SphereProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const engineRef = useRef<SphereEngine | null>(null);
 
@@ -36,6 +50,8 @@ export function Sphere({ tier, offsetPx, onTierChange, onEngineReady }: SpherePr
   onTierChangeRef.current = onTierChange;
   const onEngineReadyRef = useRef(onEngineReady);
   onEngineReadyRef.current = onEngineReady;
+  const onStateRenderedRef = useRef(onStateRendered);
+  onStateRenderedRef.current = onStateRendered;
   const initialTierRef = useRef(tier);
 
   useEffect(() => {
@@ -47,11 +63,40 @@ export function Sphere({ tier, offsetPx, onTierChange, onEngineReady }: SpherePr
       initialTier: initialTierRef.current,
       getState: () => agentStateStore.get(),
       onTierChange: (next, reason) => onTierChangeRef.current(next, reason),
+      onStateRendered: (state, at) => onStateRenderedRef.current?.(state, at),
     });
     engineRef.current = engine;
-    onEngineReadyRef.current?.(engine.stats);
+    onEngineReadyRef.current?.(engine);
+
+    // §R.8 item 8 — a display change can move us to a panel with a different
+    // refresh rate, which changes the correct frame divider.
+    const offDisplay = window.zoey.onDisplayChanged(() => {
+      console.log('[orb] display changed — re-probing refresh rate');
+      engine.reprobeRefresh();
+    });
+
+    // §R.1 — the equatorial pulse rides the real heartbeat. Subscribed here
+    // rather than in App so it never passes through a React render: the pulse
+    // must fire on arrival, not on the next reconciliation.
+    const offBeat = window.zoey.onHealth((health) => {
+      engine.beat();
+
+      /**
+       * §R.1 colour temperature, from the daemon's own CPU.
+       *
+       * LOAD_CEILING is the normalised-CPU figure treated as "fully hot". 25%
+       * of one core is a judgement, not a measured threshold — it is picked so
+       * the instrument has usable range for a process that idles near 0.3% and
+       * will climb once the brain runs tool loops. Stated rather than hidden so
+       * it can be retuned against real load when there is some.
+       */
+      const LOAD_CEILING = 25;
+      engine.setLoad(health.cpuPct / LOAD_CEILING);
+    });
 
     return () => {
+      offBeat();
+      offDisplay();
       engine.dispose();
       engineRef.current = null;
     };

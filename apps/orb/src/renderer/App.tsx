@@ -16,55 +16,82 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 
-import { AGENT_STATES } from '@zoey/protocol';
+import { AGENT_STATES, type AgentState } from '@zoey/protocol';
 
 import type { BootstrapInfo, SphereTier } from '../shared/ipc-contract.ts';
 import { tokenPx } from './design-tokens.ts';
 import { Drawer } from './layout/Drawer.tsx';
 import { DevOverlay } from './layout/DevOverlay.tsx';
+import { LastLine } from './layout/LastLine.tsx';
+import { NotificationStack } from './layout/NotificationStack.tsx';
 import { Rail } from './layout/Rail.tsx';
 import { StatusBar } from './layout/StatusBar.tsx';
-import { AgendaPanel } from './panels/AgendaPanel.tsx';
-import { JobsPanel } from './panels/JobsPanel.tsx';
-import { TranscriptPanel } from './panels/TranscriptPanel.tsx';
+import { railById } from './rails/rails.tsx';
 import { DomSphere } from './scene/DomSphere.tsx';
 import { Sphere } from './scene/Sphere.tsx';
 import { probeSphereTier } from './scene/gpu-tier.ts';
-import type { SphereStats } from './scene/sphere-engine.ts';
+import type { ProbeReading, SphereEngine } from './scene/sphere-engine.ts';
 import {
   agentStateStore,
+  auditStore,
+  AUDIT_MAX,
   connectionStore,
-  drawerStore,
+  healthStore,
+  micStore,
+  ptySessionsStore,
+  pushHealthSample,
+  pushNotification,
+  railStore,
   tierStore,
+  transcriptStore,
+  TRANSCRIPT_MAX,
   useStore,
-  type DrawerId,
+  type RailId,
 } from './state/store.ts';
 
-const DRAWER_TITLE: Record<DrawerId, string> = {
-  agenda: 'Agenda',
-  jobs: 'Jobs',
-  transcript: 'Transcript',
-};
-
-function panelFor(id: DrawerId) {
-  switch (id) {
-    case 'agenda':
-      return <AgendaPanel />;
-    case 'jobs':
-      return <JobsPanel />;
-    case 'transcript':
-      return <TranscriptPanel />;
-  }
+/**
+ * One probe reading as a log line. Three decimals on the offsets: the pass
+ * condition for the instrument is that a motionless sphere reads the SAME every
+ * time, and a tolerance stated to 0.001 px is a claim that can fail.
+ */
+function describeProbe(r: ProbeReading): string {
+  return (
+    `buf=${r.bufW}x${r.bufH} css=${r.cssW}x${r.cssH} ` +
+    `c=${r.cx.toFixed(3)},${r.cy.toFixed(3)} ` +
+    `dx=${r.dx.toFixed(3)} dy=${r.dy.toFixed(3)} ` +
+    `lit=${r.lit} sum=${r.sum} uPulse=${r.uPulse.toFixed(4)} ` +
+    `state=${agentStateStore.get()} resize=${r.resizeReason}`
+  );
 }
 
 export function App() {
   const tier = useStore(tierStore);
-  const drawer = useStore(drawerStore);
+  const rail = useStore(railStore);
+  const mic = useStore(micStore);
 
   const [bootstrap, setBootstrap] = useState<BootstrapInfo | null>(null);
   const [tierReason, setTierReason] = useState('probing…');
   const [rendererName, setRendererName] = useState('probing…');
-  const [readStats, setReadStats] = useState<(() => SphereStats) | null>(null);
+  const [engine, setEngine] = useState<SphereEngine | null>(null);
+  const readStats = engine ? engine.stats : null;
+
+  /**
+   * The one un-drawn state change, and when it arrived. Spec §4.
+   *
+   * A single slot, not a map keyed by state. The daemon repeats each state
+   * several times per turn — one run saw `speaking` broadcast seven times — and
+   * a map lets a later duplicate overwrite the timestamp of the arrival that
+   * actually caused the redraw, or leave an entry that is never consumed and is
+   * then paired with a redraw seconds later. Both produce a latency figure that
+   * is arithmetic on two unrelated instants, which is the same error as pairing
+   * a health frame with a different frame's render.
+   *
+   * A repeat of the state already showing is not a state CHANGE and is ignored;
+   * a genuine change replaces whatever was pending, because the sphere will
+   * never draw the superseded one.
+   */
+  const pendingState = useRef<{ state: string; at: number } | null>(null);
+  const lastArrivedState = useRef<string | null>(null);
 
   /* ── bootstrap: GPU tier, then the connection feed ─────────────────────── */
 
@@ -75,6 +102,9 @@ export function App() {
       if (!alive) return;
       setBootstrap(info);
 
+      // Validated against AGENT_STATES in main before it got here.
+      if (info.forcedState) agentStateStore.set(info.forcedState as AgentState);
+
       const probe = probeSphereTier(info.gpu);
       tierStore.set(probe.tier);
       setTierReason(probe.reason);
@@ -82,28 +112,174 @@ export function App() {
       console.log(`[orb] sphere tier=${probe.tier} — ${probe.reason} (${probe.renderer})`);
     });
 
-    // Ask once for the current status so first paint is accurate, then follow
-    // the push channel. Without the initial read the status bar would show
-    // 'offline' until the next change, which on a healthy system might be never.
-    void window.zoey.getConnection().then((status) => {
-      if (alive) connectionStore.set(status);
+    // Pull everything main has already seen, THEN follow the push channels.
+    //
+    // Push alone loses a race it cannot win: the daemon connects and returns
+    // res.audit in milliseconds, while this bundle is still parsing. Main
+    // logged "audit history → renderer: 100 entries" and SENTINEL still showed
+    // NO DATA, because nothing was listening yet.
+    void window.zoey.getSnapshot().then((snap) => {
+      if (!alive) return;
+      connectionStore.set(snap.connection);
+      if (snap.health) {
+        healthStore.set(snap.health);
+        pushHealthSample(snap.health);
+      }
+      if (snap.audit.length > 0) auditStore.set([...snap.audit].reverse().slice(0, AUDIT_MAX));
+      if (snap.ptySessions.length > 0) ptySessionsStore.set(snap.ptySessions);
+      // Unconditional, unlike the two above: `claimed: false` is a real answer
+      // and must overwrite the placeholder, not be skipped as "empty".
+      micStore.set(snap.mic);
     });
-    const unsubscribe = window.zoey.onConnection((status) => connectionStore.set(status));
+    const offConnection = window.zoey.onConnection((status) => {
+      connectionStore.set(status);
+      // A dropped link must not leave a frozen uptime on screen looking live.
+      if (status.phase !== 'connected') healthStore.set(null);
+    });
+    const offHealth = window.zoey.onHealth((health) => {
+      healthStore.set(health);
+      pushHealthSample(health);
+    });
+
+    // SENTINEL's two real sources. History seeds the list; the live stream
+    // prepends onto it, newest first, bounded so a long-running surface cannot
+    // grow without limit.
+    const offAuditHistory = window.zoey.onAuditHistory((entries) =>
+      auditStore.set([...entries].reverse().slice(0, AUDIT_MAX)),
+    );
+    const offAuditAppended = window.zoey.onAuditAppended((entry) =>
+      auditStore.set([entry, ...auditStore.get()].slice(0, AUDIT_MAX)),
+    );
+    const offPty = window.zoey.onPtySessions((sessions) => ptySessionsStore.set(sessions));
+    const offMic = window.zoey.onMicState((state) => micStore.set(state));
+    const offNote = window.zoey.onNotification((note) => pushNotification(note));
+    const offTranscript = window.zoey.onTranscriptLine((line) =>
+      transcriptStore.set([...transcriptStore.get(), line].slice(-TRANSCRIPT_MAX)),
+    );
+
+    // Main has already validated this against AGENT_STATES before sending.
+    const offAgentState = window.zoey.onAgentState((state) => {
+      const at = performance.now();
+      const repeat = state === lastArrivedState.current;
+      lastArrivedState.current = state;
+      // Stamped BEFORE the store is set, so the measured interval includes the
+      // store notification and everything after it. Same clock as the engine's
+      // report — both are `performance.now()` in this renderer, so there is no
+      // cross-process clock to reconcile.
+      if (!repeat) pendingState.current = { state, at };
+      window.zoey.reportMetrics(
+        `STATE-ARRIVED state=${state} t=${at.toFixed(1)} repeat=${repeat}`,
+      );
+      agentStateStore.set(state as AgentState);
+    });
 
     return () => {
       alive = false;
-      unsubscribe();
+      offConnection();
+      offHealth();
+      offAgentState();
+      offAuditHistory();
+      offAuditAppended();
+      offPty();
+      offTranscript();
+      offMic();
+      offNote();
     };
   }, []);
+
 
   /* ── keyboard ──────────────────────────────────────────────────────────── */
 
   const isDev = bootstrap?.isDev ?? false;
 
+  /**
+   * A dead global chord is news, and it must not depend on winning a race.
+   *
+   * Main registers the shortcut before the renderer has mounted, so its pushed
+   * notification arrives at a window with no listener yet — the same race that
+   * left SENTINEL empty while main's log said it had forwarded 100 audit
+   * entries. `chordRegistered` rides the snapshot, so deriving the message from
+   * the state is race-free. Deduped by id against main's push, so a runtime
+   * mode switch does not produce two of them.
+   */
+  useEffect(() => {
+    if (mic.mode !== 'toggle' || !mic.chord || mic.chordRegistered) return;
+    pushNotification({
+      id: 'ptt-chord-failed',
+      level: 'error',
+      title: 'Push-to-talk shortcut unavailable',
+      body: `${mic.chord} is already held by another application. Push-to-talk still works while the Orb has focus.`,
+    });
+  }, [mic.mode, mic.chord, mic.chordRegistered]);
+
+  /* ── push-to-talk, hold mode ───────────────────────────────────────────── */
+
+  /**
+   * Ctrl+Alt+Space, from the renderer, for HOLD only.
+   *
+   * In toggle mode main holds the same chord as a global shortcut, which
+   * consumes the keydown before any window sees it — so this listener is dead
+   * by construction there, and registering it anyway would double-fire the
+   * moment the global registration failed. Gated on the mode instead.
+   *
+   * The release matcher is deliberately looser than the press matcher. A chord
+   * is released one key at a time and in any order: let go of Ctrl first and
+   * the Space keyup arrives with `ctrlKey: false`, so a release handler that
+   * required the full chord would never fire and the microphone would stay
+   * claimed. Any of the three lifting ends the hold.
+   */
+  const holdMode = mic.mode === 'hold';
+  useEffect(() => {
+    if (!holdMode) return;
+    let held = false;
+    if (isDev) window.zoey.reportMetrics('PTT-KEY hold-mode listener attached');
+
+    const isSpace = (e: KeyboardEvent): boolean => e.code === 'Space' || e.key === ' ';
+
+    function onDown(event: KeyboardEvent) {
+      if (held || event.repeat) return;
+      const match = event.ctrlKey && event.altKey && isSpace(event);
+      // Dev-only, and it earned its place: the first hold-mode run produced no
+      // edges at all and there was no way to tell whether the window lacked
+      // focus, the chord was still globally grabbed, or the matcher was simply
+      // wrong about what synthetic input looks like. Renderer console does not
+      // reach the process log in a preview build, so it goes through the
+      // metrics channel.
+      if (isDev && (event.ctrlKey || event.altKey)) {
+        window.zoey.reportMetrics(
+          `PTT-KEY code=${event.code || '(none)'} key=${JSON.stringify(event.key)} ` +
+            `ctrl=${event.ctrlKey} alt=${event.altKey} shift=${event.shiftKey} ` +
+            `repeat=${event.repeat} focus=${document.hasFocus()} match=${match}`,
+        );
+      }
+      if (!match) return;
+      held = true;
+      event.preventDefault();
+      window.zoey.pushToTalkEdge('down');
+    }
+
+    function onUp(event: KeyboardEvent) {
+      if (!held) return;
+      if (!isSpace(event) && event.key !== 'Control' && event.key !== 'Alt') return;
+      held = false;
+      window.zoey.pushToTalkEdge('up');
+    }
+
+    window.addEventListener('keydown', onDown);
+    window.addEventListener('keyup', onUp);
+    return () => {
+      window.removeEventListener('keydown', onDown);
+      window.removeEventListener('keyup', onUp);
+      // Unmounting mid-hold would otherwise strand the claim with no keyup
+      // listener left to end it.
+      if (held) window.zoey.pushToTalkEdge('up');
+    };
+  }, [holdMode, isDev]);
+
   useEffect(() => {
     function onKeyDown(event: KeyboardEvent) {
       if (event.key === 'Escape') {
-        drawerStore.set(null);
+        railStore.set(null);
         return;
       }
 
@@ -135,15 +311,85 @@ export function App() {
     return () => window.removeEventListener('keydown', onKeyDown);
   }, [isDev]);
 
+  /* ── dev metrics → main process log ────────────────────────────────────── */
+
+  useEffect(() => {
+    if (!isDev || !readStats) return;
+    const id = window.setInterval(() => {
+      const s = readStats();
+      if (s.publishedAt === 0) return;
+      window.zoey.reportMetrics(
+        `tier=${s.tier} pts=${s.particles} focused=${s.focused} n=${s.samples} ` +
+          `cost=${s.cost.p50.toFixed(2)}/${s.cost.p95.toFixed(2)} ` +
+          `raf=${s.raf.p50.toFixed(1)}/${s.raf.p95.toFixed(1)} ` +
+          `shown=${s.present.p50.toFixed(1)}/${s.present.p95.toFixed(1)} ` +
+          `fps=${s.fps.toFixed(1)} state=${agentStateStore.get()} ` +
+          `canvas=${s.canvas.cssW}x${s.canvas.cssH}css/${s.canvas.bufW}x${s.canvas.bufH}buf`,
+      );
+    }, 5000);
+    return () => window.clearInterval(id);
+  }, [isDev, readStats]);
+
+  /* ── dev probes: read the drawing buffer, not the screen ───────────────── */
+
+  const geometryMs = bootstrap?.probeGeometryMs ?? 0;
+  const pulseMs = bootstrap?.probePulseMs ?? 0;
+
+  /**
+   * Geometry (§R.8 item 18f). One full-buffer read per tick.
+   *
+   * Every value the reader needs is on the line, including the buffer and CSS
+   * sizes. A resize that did not take is then self-evident in the data rather
+   * than something to be cross-checked against a window rectangle read from
+   * outside — the previous run reported a 144×20 client and there was no way to
+   * tell from the numbers alone that the leg was void.
+   */
+  useEffect(() => {
+    if (!isDev || geometryMs <= 0 || !engine) return;
+    const id = window.setInterval(() => {
+      const r = engine.probeFrame('full');
+      if (r) window.zoey.reportMetrics(`PROBE-GEO ${describeProbe(r)}`);
+    }, geometryMs);
+    return () => window.clearInterval(id);
+  }, [isDev, geometryMs, engine]);
+
+  /**
+   * Pulse (§R.1). One centred full-height column per tick.
+   *
+   * `sum` is total luminance over the column, which rises and falls as the band
+   * travels regardless of WHERE it currently is — the failure of the previous
+   * attempt, which watched a ±10 px strip at the equator that the band leaves
+   * almost immediately. `uPulse` rides along as the ground truth: the
+   * brightness series says what is on screen, the uniform says what the engine
+   * thinks it is drawing, and §R.1 needs both to agree.
+   */
+  useEffect(() => {
+    if (!isDev || pulseMs <= 0 || !engine) return;
+    const id = window.setInterval(() => {
+      const r = engine.probeFrame('column');
+      if (!r) return;
+      window.zoey.reportMetrics(
+        `PROBE-PULSE t=${performance.now().toFixed(0)} uPulse=${r.uPulse.toFixed(4)} ` +
+          `sum=${r.sum} lit=${r.lit} col=${r.x0}..${r.x1} h=${r.bufH} ` +
+          `state=${agentStateStore.get()}`,
+      );
+    }, pulseMs);
+    return () => window.clearInterval(id);
+  }, [isDev, pulseMs, engine]);
+
   /* ── the drawer, and what it does to the sphere ────────────────────────── */
 
   // Keep the last panel mounted while the drawer slides shut, so the content
   // does not vanish a beat before the panel does.
-  const lastDrawer = useRef<DrawerId>('agenda');
-  if (drawer) lastDrawer.current = drawer;
+  const lastRail = useRef<RailId>('pulse');
+  if (rail) lastRail.current = rail;
 
+  // NEGATIVE, unlike the previous build. §R.7 puts the drawer immediately right
+  // of the rail, so the stage that remains is to its RIGHT and the sphere has to
+  // move right to stay centred in it. The old drawer was docked to the far right
+  // and the sphere moved left.
   const drawerWidth = tokenPx('--transcript-w', 320);
-  const offsetPx = drawer ? drawerWidth : 0;
+  const offsetPx = rail ? -drawerWidth : 0;
 
   const onTierChange = useCallback((next: SphereTier, reason: string) => {
     tierStore.set(next);
@@ -151,10 +397,29 @@ export function App() {
     console.warn(`[orb] sphere demoted to ${next}: ${reason}`);
   }, []);
 
-  const onEngineReady = useCallback((read: () => SphereStats) => {
-    // Wrapped in a thunk — React would otherwise call the function as a lazy
-    // state initialiser and store its return value instead of the function.
-    setReadStats(() => read);
+  const onEngineReady = useCallback((next: SphereEngine) => {
+    setEngine(next);
+  }, []);
+
+  /**
+   * Spec §4: "sphere state change → visible, p95 80 ms, hard fail 200 ms".
+   *
+   * Only states that came FROM THE DAEMON are timed. The Alt+1…6 cycler and
+   * `--force-state` also change the state and would produce a flattering number
+   * measured from a keystroke this process synthesised — so they are simply
+   * absent from the map and report nothing, rather than being averaged in.
+   */
+  const onStateRendered = useCallback((state: AgentState, at: number) => {
+    const pending = pendingState.current;
+    // Only pair a draw with the arrival that caused it. A draw of a state the
+    // daemon never sent — the Alt+1…6 cycler, `--force-state` — has no pending
+    // arrival and reports nothing, rather than being timed against a keystroke
+    // this process synthesised itself.
+    if (!pending || pending.state !== state) return;
+    pendingState.current = null;
+    window.zoey.reportMetrics(
+      `STATE-VISIBLE state=${state} arrivedToDrawnMs=${(at - pending.at).toFixed(2)}`,
+    );
   }, []);
 
   return (
@@ -178,16 +443,22 @@ export function App() {
               offsetPx={offsetPx}
               onTierChange={onTierChange}
               onEngineReady={onEngineReady}
+              onStateRendered={onStateRendered}
             />
           )}
+
+          {/* §R.2 — the HUD sits over the stage, never inside a drawer.
+              Both render nothing until they have something true to show. */}
+          <NotificationStack />
+          <LastLine />
         </main>
 
         <Drawer
-          title={DRAWER_TITLE[lastDrawer.current]}
-          open={drawer !== null}
-          onClose={() => drawerStore.set(null)}
+          title={railById(lastRail.current).label}
+          open={rail !== null}
+          onClose={() => railStore.set(null)}
         >
-          {panelFor(lastDrawer.current)}
+          {railById(lastRail.current).render()}
         </Drawer>
       </div>
 

@@ -17,6 +17,7 @@ uniform float uBrightness;
 
 varying float vRim;
 varying float vSeed;
+varying float vPulse;
 
 void main() {
   // Round the point. gl_PointCoord is [0,1] across the sprite; work in squared
@@ -38,6 +39,10 @@ void main() {
   // dot screen. Cheap hash on the seed; deterministic across frames.
   float grain = 0.78 + 0.22 * fract(sin(vSeed * 91.7) * 43758.5453);
 
-  float alpha = falloff * uBrightness * grain;
+  // The heartbeat band brightens the particles it passes through rather than
+  // adding a separate ring: the pulse IS the shell reacting, not an overlay
+  // drawn on top of it. Zero when no beat is in flight — enforced by uPulseGain
+  // in the vertex stage, because phase zero is NOT the resting state.
+  float alpha = falloff * uBrightness * grain * (1.0 + vPulse * 1.6);
   gl_FragColor = vec4(tint * alpha, alpha);
 }

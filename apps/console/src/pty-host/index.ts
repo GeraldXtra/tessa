@@ -92,6 +92,53 @@ async function main(): Promise<void> {
 
     if (msg?.t === 'shutdown') {
       // Kill the shell BEFORE exiting, or cmd.exe and conhost.exe orphan.
+      //
+      // `term.kill()` alone is NOT sufficient on Windows — measured, twice: a
+      // revoke reported success while the shell (pid 14764) was still alive,
+      // and killing the host process does not reap it either. What freed the
+      // tree in Step 2 was the whole app exiting, which masked this.
+      //
+      // So the pid is reaped explicitly with `taskkill /T` (whole tree, so
+      // conhost goes too). This is the Job-Object problem in miniature; a real
+      // Job Object with KILL_ON_JOB_CLOSE is the Phase-2 answer.
+      const pid = term?.pid
+      if (typeof pid === 'number') {
+        try {
+          const { execFile } = require('node:child_process') as typeof import('node:child_process')
+          // ORDER MATTERS. taskkill runs BEFORE term.kill().
+          //
+          // The other way round — measured — produces an EMPTY claim list:
+          // term.kill() closes the pseudoconsole, the grandchild dies of
+          // CTRL_CLOSE_EVENT, and taskkill then reports "process not found"
+          // on stderr with nothing on stdout. Main is left believing the tree
+          // was just the shell, and a surviving grandchild would sit outside
+          // the set it must observe before reporting `killed`.
+          execFile('taskkill', ['/F', '/T', '/PID', String(pid)], (_err, stdout) => {
+            try {
+              term?.kill()
+            } catch {
+              /* taskkill already got it */
+            }
+            term = null
+            // taskkill /T names every process it terminated, e.g.
+            //   SUCCESS: The process with PID 24476 (child process of PID 18792) ...
+            // That list is the only cheap enumeration of the tree we get, and
+            // main needs it: the grandchild is invisible to main otherwise.
+            const claimed = new Set<number>([pid])
+            for (const m of String(stdout ?? '').matchAll(/PID (\d+)/g)) {
+              if (m[1]) claimed.add(Number(m[1]))
+            }
+            toMain({ t: 'reaped', pids: [...claimed] })
+            // Long enough for the message to leave before the process does.
+            setTimeout(() => process.exit(0), 120)
+          })
+          return
+        } catch {
+          /* fall through to the plain exit below */
+        }
+      }
+      // Fallback: no pid, or taskkill could not be launched at all. Do what can
+      // still be done, and let main's ladder observe the result either way.
       try {
         term?.kill()
       } catch {
@@ -99,6 +146,26 @@ async function main(): Promise<void> {
       }
       term = null
       setTimeout(() => process.exit(0), 150)
+      return
+    }
+
+    // DEV HARNESS ONLY. Same term.write() the renderer's keystrokes reach.
+    if (msg?.t === 'devInput') {
+      try {
+        term?.write(Buffer.from(msg.b64, 'base64').toString('utf8'))
+      } catch (err) {
+        toMain({ t: 'log', message: `devInput failed: ${(err as Error).message}` })
+      }
+      return
+    }
+
+    if (msg?.t === 'devResize') {
+      try {
+        if (msg.cols > 0 && msg.rows > 0) term?.resize(msg.cols, msg.rows)
+        toMain({ t: 'log', message: `devResize -> ${msg.cols}x${msg.rows}` })
+      } catch (err) {
+        toMain({ t: 'log', message: `devResize failed: ${(err as Error).message}` })
+      }
       return
     }
 
@@ -116,7 +183,31 @@ async function main(): Promise<void> {
         cols: msg.cols,
         rows: msg.rows,
         cwd: msg.cwd,
-        env: process.env as Record<string, string>,
+        // TERM and COLORTERM are set HERE because ConPTY does not set them.
+        //
+        // node-pty's `name` option sets the pty's terminal TYPE; on Windows it
+        // does not export anything into the child's environment, and
+        // `process.env` has no TERM on Windows. Measured consequence: a raw tee
+        // of a real `claude` session contained ZERO colour of any depth — no
+        // 38;2 truecolor, no 38;5 palette, not even basic SGR 30-37. The program
+        // detected no colour support and correctly emitted none. Every
+        // colour-capable program in the Console was rendering monochrome.
+        //
+        // COLORTERM=truecolor is claimed on evidence, not hope: xterm 6.0.0's
+        // public cell API exposes `isFgRGB()`/`isBgRGB()` and documents the
+        // value as "a hex value representing a 'true color': 0xRRGGBB"
+        // (typings/xterm.d.ts), and addon-webgl resolves cells through
+        // `toColorRGB`. The 24-bit path exists in both the buffer model and the
+        // GPU renderer on this machine.
+        //
+        // This is UPSTREAM of the missing 16-colour ANSI ramp in
+        // packages/tokens: that decides which colours xterm paints, this decides
+        // whether a program asks for colour at all. The ramp stays on xterm's
+        // built-in defaults per Gerald's Phase 1a ruling.
+        env: { ...process.env, TERM: 'xterm-256color', COLORTERM: 'truecolor' } as Record<
+          string,
+          string
+        >,
       })
     } catch (err) {
       toMain({ t: 'spawn-failed', message: (err as Error).message })
@@ -127,9 +218,36 @@ async function main(): Promise<void> {
 
     port.start()
     send({ t: 'ready', pid: term.pid })
-    toMain({ t: 'spawned', pid: term.pid })
 
-    term.onData((d) => send({ t: 'data', b64: Buffer.from(d, 'utf8').toString('base64') }))
+    // DEV HARNESS ONLY: delay the `spawned` reply so main's spawn timeout can be
+    // exercised for real. Absent in every normal launch.
+    const announce = (): void => toMain({ t: 'spawned', pid: term?.pid ?? -1 })
+    if (typeof msg.stallSpawnMs === 'number' && msg.stallSpawnMs > 0) {
+      toMain({ t: 'log', message: `DEV: stalling 'spawned' by ${msg.stallSpawnMs} ms` })
+      setTimeout(announce, msg.stallSpawnMs)
+    } else {
+      announce()
+    }
+
+    // DEV HARNESS ONLY: tee, not redirect. The renderer still gets every byte.
+    let tee: ((d: string) => void) | null = null
+    if (msg.capturePath) {
+      const fs = require('node:fs') as typeof import('node:fs')
+      const fd = fs.openSync(msg.capturePath, 'a')
+      tee = (d: string) => {
+        try {
+          fs.writeSync(fd, Buffer.from(d, 'utf8'))
+        } catch {
+          /* evidence capture must never break the terminal */
+        }
+      }
+      toMain({ t: 'log', message: `DEV: teeing PTY output to ${msg.capturePath}` })
+    }
+
+    term.onData((d) => {
+      tee?.(d)
+      send({ t: 'data', b64: Buffer.from(d, 'utf8').toString('base64') })
+    })
     term.onExit(({ exitCode, signal }) => send({ t: 'exit', code: exitCode, signal }))
 
     port.on('message', (ev) => {

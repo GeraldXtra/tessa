@@ -9,6 +9,12 @@
   box-sizing: border-box;
 }
 
+html,
+body,
+#root {
+  height: 100%;
+}
+
 body {
   margin: 0;
   background: var(--bg-void);
@@ -17,81 +23,79 @@ body {
   font-size: var(--fs-base);
   line-height: var(--lh-base);
   -webkit-font-smoothing: antialiased;
-  /* The renderer is untrusted content; never let it feel like a web page. */
+  /* The renderer hosts untrusted program output; never let it feel like a page. */
   user-select: none;
   cursor: default;
   overflow: hidden;
 }
 
 .shell {
-  padding: var(--sp-6);
-  max-width: 720px;
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  padding: var(--sp-3);
+  gap: var(--sp-2);
+}
+
+/* ── header ──────────────────────────────────────────────────────────────── */
+
+.top {
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-4);
+  flex: 0 0 auto;
 }
 
 .brand {
   margin: 0;
-  font-size: var(--fs-xl);
+  font-size: var(--fs-md);
   font-weight: 500;
   letter-spacing: var(--label-tracking);
   color: var(--accent);
 }
 
 .phase {
-  margin: var(--sp-1) 0 var(--sp-6);
   font-size: var(--fs-label);
   text-transform: var(--label-transform);
   letter-spacing: var(--label-tracking);
   color: var(--text-muted);
 }
 
-.facts {
-  display: grid;
-  grid-template-columns: max-content 1fr;
-  gap: var(--sp-2) var(--sp-5);
-  margin: 0;
-  padding: var(--sp-4);
-  background: var(--panel);
-  border: 1px solid var(--panel-border);
-  border-radius: var(--panel-radius);
-}
-
-.facts dt {
-  font-size: var(--fs-label);
-  text-transform: var(--label-transform);
-  letter-spacing: var(--label-tracking);
-  color: var(--text-muted);
-  align-self: center;
-}
-
-.facts dd {
-  margin: 0;
-  user-select: text;
-}
-
-.facts dd[data-state='ok'] {
+b[data-state='ok'] {
   color: var(--status-active);
+  font-weight: 500;
 }
-.facts dd[data-state='checking'] {
+b[data-state='checking'] {
   color: var(--status-warn);
+  font-weight: 500;
 }
-.facts dd[data-state='failed'] {
+b[data-state='failed'] {
   color: var(--status-error);
   font-weight: 700;
 }
 
-.next {
-  margin-top: var(--sp-5);
-  font-size: var(--fs-sm);
+/* ── terminal ────────────────────────────────────────────────────────────── */
+
+.term-wrap {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0; /* lets the xterm host actually shrink inside a flex column */
+  gap: var(--sp-2);
+}
+
+.term-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex: 0 0 auto;
+  font-size: var(--fs-label);
+  text-transform: var(--label-transform);
+  letter-spacing: var(--label-tracking);
   color: var(--text-muted);
 }
 
-.row {
-  display: flex;
-  gap: var(--sp-2);
-  margin: var(--sp-4) 0;
-}
-
-.row button {
+.term-bar button {
   font-family: var(--font-mono);
   font-size: var(--fs-label);
   text-transform: var(--label-transform);
@@ -100,25 +104,40 @@ body {
   background: var(--panel);
   border: 1px solid var(--panel-border);
   border-radius: var(--radius-sm);
-  padding: var(--sp-2) var(--sp-3);
+  padding: var(--sp-1) var(--sp-3);
   cursor: pointer;
 }
 
-.row button:hover {
+.term-bar button:hover:not(:disabled) {
   border-color: var(--accent);
   color: var(--accent);
 }
 
-.out {
+.term-bar button:disabled {
+  color: var(--text-muted);
+  cursor: default;
+}
+
+/* The terminal is the centre stage: it floats over void with no card. */
+.term-host {
+  flex: 1 1 auto;
+  min-height: 0;
+  /* xterm manages its own selection and cursor inside this element. */
+  user-select: text;
+  cursor: text;
+}
+
+.term-report {
+  flex: 0 0 auto;
   margin: 0;
   padding: var(--sp-3);
-  height: 260px;
+  max-height: 240px;
   overflow: auto;
-  background: var(--bg-ambient);
+  background: var(--panel);
   border: 1px solid var(--panel-border);
   border-radius: var(--radius-sm);
   font-size: var(--fs-sm);
-  white-space: pre-wrap;
-  word-break: break-all;
+  color: var(--text);
+  white-space: pre;
   user-select: text;
 }

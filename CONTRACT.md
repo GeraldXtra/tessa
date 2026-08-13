@@ -1,8 +1,13 @@
 # CONTRACT.md — Zoey Surface/Daemon Protocol
 
 **PROTOCOL_VERSION: 1**
-Status: **awaiting owner approval** · Owner: Gerald (Titan Wave LTD)
+Status: **APPROVED 2026-08-12 — FROZEN** · Owner: Gerald (Titan Wave LTD)
 Created: 2026-08-12
+
+> Frozen on the owner's approval. From this point every change follows §7:
+> additive changes do not bump `PROTOCOL_VERSION`; breaking changes do, and require
+> the owner's approval plus both surfaces updating together.
+> **Neither surface session may edit this file.**
 
 ---
 

@@ -33,6 +33,20 @@ export type PtyToHost =
   | { t: 'resize'; cols: number; rows: number }
   | { t: 'kill' }
 
+/**
+ * DEV HARNESS ONLY — main → host, to type into the PTY.
+ *
+ * There is no supported way to drive xterm's keyboard from outside the
+ * renderer, and Step 5 requires the commands to run in the Console's OWN
+ * terminal rather than in some other shell. This writes to the SAME
+ * `term.write()` the renderer's keystrokes reach, so the path under test is the
+ * real one; only the origin of the bytes differs.
+ */
+export interface DevInput {
+  t: 'devInput'
+  b64: string
+}
+
 /** Host → renderer. */
 export type PtyFromHost =
   | { t: 'ready'; pid: number }
@@ -46,6 +60,15 @@ export type HostToMain =
   | { t: 'spawned'; pid: number }
   | { t: 'spawn-failed'; message: string }
   | { t: 'log'; message: string }
+  /**
+   * Every pid `taskkill /F /T` CLAIMED to terminate, parsed from its output.
+   *
+   * A claim, not a fact — which is the point. Main adds each one to the set it
+   * must observe dead before it may report `killed`. Without this, main knows
+   * only the shell pid, and a surviving GRANDCHILD (`cmd` -> `ping`) would sit
+   * outside the observation set entirely while `killed` was reported as true.
+   */
+  | { t: 'reaped'; pids: number[] }
 
 /** Main → host, on the control channel. */
 export type MainToHost =
@@ -56,6 +79,24 @@ export type MainToHost =
       cwd: string
       cols: number
       rows: number
+      /**
+       * DEV HARNESS ONLY. Delay the `spawned` reply by this many ms.
+       *
+       * Exists to force main's spawn timeout for real rather than reason about
+       * it. The timeout path used to report `started` for a PTY nobody had
+       * observed, and a fix for a path that is never executed is a guess.
+       * Set only by `--stall-spawn`; absent in every normal launch.
+       */
+      stallSpawnMs?: number
+      /**
+       * DEV HARNESS ONLY. Append every byte the PTY emits to this file.
+       *
+       * A TEE, not a redirect: the bytes still go to the renderer over the
+       * MessagePort exactly as they always do, so what xterm renders is
+       * unchanged and the capture is evidence of the real stream rather than a
+       * substitute for it. Set only by `--capture`.
+       */
+      capturePath?: string
     }
   /**
    * Reap the PTY and exit.
@@ -65,6 +106,9 @@ export type MainToHost =
    * Step 2, where a force-kill left 2 cmd.exe and 4 conhost.exe behind.
    */
   | { t: 'shutdown' }
+  | DevInput
+  /** DEV HARNESS ONLY. Resize the PTY from main, for the Step 5 resize check. */
+  | { t: 'devResize'; cols: number; rows: number }
 
 /** Which rung is hosting the PTY. Reported so the UI can be honest about it. */
 export const PTY_HOST_KINDS = ['utilityProcess', 'main', 'forkedNode'] as const
