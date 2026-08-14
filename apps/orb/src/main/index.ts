@@ -21,6 +21,9 @@ import {
   type Session,
 } from 'electron';
 
+import { writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
+
 import { AGENT_STATES } from '@zoey/protocol';
 
 import { developmentCsp, PRODUCTION_CSP } from '../shared/csp.ts';
@@ -41,6 +44,26 @@ import { DaemonConnection } from './ws-client.ts';
 
 const isDev = !app.isPackaged;
 const rendererUrl = process.env['ELECTRON_RENDERER_URL'];
+
+/**
+ * Dev capture needs the compositor to keep producing frames for a window
+ * nobody is looking at.
+ *
+ * `capturePage()` removed the FOREGROUND dependency from measurement. It did
+ * not remove the VISIBILITY one: Chromium tracks native window occlusion on
+ * Windows and stops producing frames for a covered window, so a capture of one
+ * fails with `UnknownVizError` — which is exactly what happened the moment a
+ * run stopped maximising the window first.
+ *
+ * Turning occlusion tracking off keeps the renderer drawing while covered.
+ * Scanned at module scope because `appendSwitch` has to run before the app is
+ * ready, and gated on the capture flag so a normal launch keeps Chromium's
+ * power-saving behaviour intact.
+ */
+const wantsCapture = isDev && process.argv.some((a) => a.startsWith('--capture-every='));
+if (wantsCapture) {
+  app.commandLine.appendSwitch('disable-features', 'CalculateNativeWinOcclusion');
+}
 
 /** Dev-only. See the note where it is used, in the health handler. */
 const beatsStopAfterMs = (() => {
@@ -69,6 +92,43 @@ function forcedState(): string | null {
   const value = flag.slice('--force-state='.length);
   return (AGENT_STATES as readonly string[]).includes(value) ? value : null;
 }
+
+/**
+ * Dev-only `--fixture-transcript`. A LAYOUT FIXTURE, and nothing else.
+ *
+ * The long-answer rendering has to be verified against a long answer, and the
+ * daemon's router replies in one sentence — so there is no way to see the
+ * three-paragraph case without supplying one. This injects two lines through
+ * the real IPC path so the actual render is exercised, not a mock of it.
+ *
+ * It is fabricated text and it is therefore fenced hard: dev builds only, off
+ * unless the flag is passed, logged loudly when it fires, and the content says
+ * what it is in its own first words so a screenshot of it can never be mistaken
+ * for something the daemon said. The ban on fabricated data is about the
+ * surface asserting invented values as real; a labelled fixture used to measure
+ * a layout asserts nothing.
+ */
+const FIXTURE_LINES = [
+  {
+    role: 'user',
+    text: 'fixture: what is causing the slowdown',
+  },
+  {
+    role: 'assistant',
+    text:
+      'FIXTURE TEXT, not a real answer — the three main causes are memory pressure, ' +
+      'disk contention and thermal throttling, and they tend to arrive in that order. ' +
+      'Memory pressure shows up first because the working set exceeds physical RAM and ' +
+      'the allocator starts returning pages that have to be faulted back in. Disk ' +
+      'contention follows once swapping begins, because the same spindle is now serving ' +
+      'both the page file and whatever the application was actually trying to read. ' +
+      'Thermal throttling is last and is usually a symptom rather than a cause: sustained ' +
+      'load raises the package temperature until the processor reduces its own clock, at ' +
+      'which point everything above gets slower and the queue depth grows further. On a ' +
+      'two-core part the effect compounds, because there is no spare core to absorb the ' +
+      'work while one is stalled on a page fault.',
+  },
+] as const;
 
 /** Dev-only. `--probe-geometry=<ms>` / `--probe-pulse=<ms>`; 0 when absent. */
 function probeFlagMs(name: string): number {
@@ -193,6 +253,11 @@ if (!app.requestSingleInstanceLock()) {
       probeGeometryMs: probeFlagMs('probe-geometry'),
       probePulseMs: probeFlagMs('probe-pulse'),
       forcedState: forcedState(),
+      devScript: (() => {
+        if (!isDev) return null;
+        const flag = process.argv.find((a) => a.startsWith('--dev-drive='));
+        return flag ? flag.slice('--dev-drive='.length) : null;
+      })(),
     };
     if (bootstrap.probeGeometryMs || bootstrap.probePulseMs || bootstrap.forcedState) {
       log(
@@ -208,6 +273,9 @@ if (!app.requestSingleInstanceLock()) {
     };
 
     /* ── push-to-talk ─────────────────────────────────────────────────────── */
+
+    /** Dev fixture hook, armed only by --fixture-transcript. Null otherwise. */
+    let onSnapshotRequested: (() => void) | null = null;
 
     let lastMic: MicState;
     const ptt = new PttController({
@@ -402,13 +470,18 @@ if (!app.requestSingleInstanceLock()) {
 
     ipcMain.handle(IPC.bootstrap, () => bootstrap);
     ipcMain.handle(IPC.getConnection, () => connection?.current ?? { phase: 'offline' });
-    ipcMain.handle(IPC.getSnapshot, () => ({
+    ipcMain.handle(IPC.getSnapshot, () => {
+      // Dev fixture hook only; null in every normal run. See FIXTURE_LINES.
+      onSnapshotRequested?.();
+      return snapshot();
+    });
+    const snapshot = () => ({
       connection: connection?.current ?? { phase: 'offline' },
       health: lastHealth,
       audit: lastAudit,
       ptySessions: lastPtySessions,
       mic: lastMic,
-    }));
+    });
     ipcMain.on(IPC.retryConnection, () => connection?.retryNow());
     // The renderer reports a key EDGE. It does not get to name an action, in
     // keeping with the rest of this bridge — main decides what an edge means.
@@ -519,6 +592,87 @@ if (!app.requestSingleInstanceLock()) {
     // reference for no gain.
     app.on('before-quit', () => ptt.shutdown());
     app.on('will-quit', () => globalShortcut.unregisterAll());
+
+    /**
+     * `--capture-every=<ms>` — dev only. Writes the window's own pixels.
+     *
+     * A GDI screen grab photographs whatever owns the foreground at those
+     * coordinates, which under load is repeatedly not the Orb: a whole run of
+     * captures came back refused, and one earlier came back as the owner's
+     * browser. `capturePage()` asks the window for its own contents, so
+     * occlusion, focus and z-order stop being inputs to the measurement — the
+     * same move as reading the drawing buffer instead of the screen.
+     *
+     * It captures the full window INCLUDING the DOM, which `gl.readPixels`
+     * cannot: the rails, the status bar and the transcript are all DOM.
+     */
+    const captureEveryMs = (() => {
+      if (!isDev) return 0;
+      const flag = process.argv.find((a) => a.startsWith('--capture-every='));
+      if (!flag) return 0;
+      const ms = Number.parseInt(flag.slice('--capture-every='.length), 10);
+      return Number.isFinite(ms) && ms >= 500 ? ms : 0;
+    })();
+
+    if (captureEveryMs > 0) {
+      const dir = process.env['ZOEY_CAPTURE_DIR'];
+      const [win] = BrowserWindow.getAllWindows();
+      if (dir && win) {
+        let n = 0;
+        const MAX_CAPTURES = 24;
+        const timer = setInterval(() => {
+          if (n >= MAX_CAPTURES || win.isDestroyed()) {
+            clearInterval(timer);
+            return;
+          }
+          const index = n;
+          n += 1;
+          void win.webContents
+            .capturePage()
+            .then((image) =>
+              writeFile(join(dir, `cap-${String(index).padStart(2, '0')}.png`), image.toPNG()),
+            )
+            .then(() => log(`capture cap-${String(index).padStart(2, '0')}.png`))
+            .catch((err: unknown) => log(`capture failed: ${String(err)}`));
+        }, captureEveryMs);
+      } else {
+        log('!! --capture-every needs ZOEY_CAPTURE_DIR');
+      }
+    }
+
+    // Layout fixture. See FIXTURE_LINES — dev only, off by default, and loud.
+    if (isDev && process.argv.includes('--fixture-transcript')) {
+      /**
+       * Fired when the renderer asks for its snapshot, not on a timer.
+       *
+       * `did-finish-load` means the document loaded, not that React has
+       * attached its IPC listeners, and injecting there lost one of two lines.
+       * The first version of this fix waited 2000 ms — which is a guess at how
+       * long React takes, and a guess is the same class of thing that lost the
+       * audit history in the first place.
+       *
+       * `getSnapshot` is the signal that already exists: the renderer invokes it
+       * from its mount effect, and registers `onTranscriptLine` synchronously in
+       * that same tick. By the time this handler runs, the listener is attached.
+       * No timing assumption, and no fixture code inside the production snapshot
+       * path — the fixture waits on an existing signal rather than joining it.
+       */
+      let fired = false;
+      onSnapshotRequested = () => {
+        if (fired) return;
+        fired = true;
+        log(`!! FIXTURE TRANSCRIPT injected (${FIXTURE_LINES.length} lines) — NOT from the daemon`);
+        FIXTURE_LINES.forEach((line, i) => {
+          broadcast(IPC.transcriptLine, {
+            messageId: `fixture-${i}`,
+            role: line.role,
+            provenance: line.role === 'user' ? 'human' : 'agent',
+            text: line.text,
+            ts: new Date().toISOString(),
+          });
+        });
+      };
+    }
 
     connection.start();
   });

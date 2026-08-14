@@ -412,6 +412,32 @@ export class DaemonConnection {
       return;
     }
 
+    /**
+     * ARRIVAL, logged before anything can reject it.
+     *
+     * A transcript run produced no rendered lines AND no mismatch warning, and
+     * those two are very different facts — "arrived and was refused" versus
+     * "never arrived" — that looked identical from the outside. The rejection
+     * path was built to be loud precisely so that could not happen, and it
+     * still could, because silence upstream of the rejection is also silence.
+     *
+     * So the frame is recorded the moment it parses, before the shape check,
+     * before the reassembler, before IPC. Whatever happens after this, the
+     * question "did the daemon send one" now has an answer in the log.
+     */
+    if (parsed.type.startsWith('evt.transcript.')) {
+      const p = (parsed.payload ?? {}) as Record<string, unknown>;
+      const msg = p['message'] as Record<string, unknown> | undefined;
+      // Identity and shape only. The TEXT is never logged: it is whatever the
+      // owner said out loud, and a debug line is not a place to put that.
+      this.opts.log(
+        `TRANSCRIPT-IN ${parsed.type} keys=[${Object.keys(p).join(',')}] ` +
+          `messageId=${String(msg?.['messageId'] ?? '(none)')} ` +
+          `role=${String(msg?.['role'] ?? '(none)')} ` +
+          `chars=${typeof msg?.['text'] === 'string' ? (msg['text'] as string).length : 0}`,
+      );
+    }
+
     if (parsed.type === 'res.hello' && parsed.corr === this.helloId) {
       this.onHelloAccepted(parsed.payload as unknown as ResHello);
       return;
@@ -571,6 +597,31 @@ export class DaemonConnection {
 
     if (parsed.type === 'evt.agent.state') {
       const evt = parsed.payload as unknown as EvtAgentState;
+
+      /**
+       * The missing field this handler did NOT catch.
+       *
+       * `EvtAgentState` is `{ companionId, state, detail? }`, and for four
+       * emit sites the daemon sent no `companionId` at all. This code never
+       * noticed, because `as unknown as EvtAgentState` asserts the shape
+       * instead of checking it and the runtime guard only ever looked at
+       * `state`. The sphere rendered correctly off a malformed frame for days.
+       *
+       * §3.2 requires tolerating unknown FIELDS — a field the contract does not
+       * define. It says nothing about a required field being absent, and
+       * treating the two the same is how a wrong shape survives. Reported, and
+       * deliberately NOT fatal: `companionId` is not something the sphere uses,
+       * and blanking the state over a field this surface does not read would
+       * turn someone else's schema slip into a dead sphere.
+       */
+      if (typeof evt.companionId !== 'string' || evt.companionId.length === 0) {
+        this.opts.log(
+          `!! evt.agent.state is missing the required \`companionId\` (CONTRACT §4.1) — ` +
+            `keys [${Object.keys(parsed.payload as Record<string, unknown>).join(', ')}]. ` +
+            `Rendering the state anyway; the sphere does not read companionId.`,
+        );
+      }
+
       // Validated against the closed set rather than trusted. The daemon is the
       // authority, but a value outside AgentState would mean the two sides have
       // drifted (CONTRACT §7.4) — dropping it keeps the sphere on a state it

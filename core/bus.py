@@ -31,6 +31,10 @@ class AgentState(str, Enum):
     LISTENING = "listening"
     THINKING = "thinking"
     SPEAKING = "speaking"
+    #: A tool is running. Local tools flash past; browser automation takes real
+    #: seconds, and that is when he needs to see something other than the state
+    #: he was already in.
+    WORKING = "working"
 
 
 @dataclass
@@ -99,8 +103,27 @@ class AudioBus:
         self._pos = end
 
     def speak(self, samples: np.ndarray, sample_rate: int, blocking: bool = False) -> None:
-        """Take the speaker. Any current speech is stopped first — one speaker."""
+        """
+        Take the speaker. Any current speech is stopped first — one speaker.
+
+        SHE MUST GO IDLE WHEN THE AUDIO ENDS. She previously emitted `speaking`
+        when playback started and NOTHING when it finished, so the sphere sat in
+        `speaking` for hours — telling Gerald she was talking while she was
+        silent. §5.1 exists so the sphere reads correctly from across the room,
+        and a state that never clears makes it read wrong rather than not at all.
+        `finished_callback` fires when the device actually drains, so the
+        transition is driven by playback ending, not by a timer guessing.
+        """
         self.stop("superseded")
+
+        def _finished() -> None:
+            self._done.set()
+            # `stop()` sets `_stopping` before aborting, so a barge-in does not
+            # come through here and wrongly report idle — the interrupting turn
+            # owns the state from that point.
+            if not self._stopping:
+                self.set_state(AgentState.IDLE)
+
         with self._lock:
             self._samples = samples.astype(np.int16)
             self._pos = 0
@@ -108,7 +131,7 @@ class AudioBus:
             self._done.clear()
             self._stream = sd.OutputStream(
                 samplerate=sample_rate, channels=1, dtype="int16",
-                callback=self._callback, finished_callback=self._done.set,
+                callback=self._callback, finished_callback=_finished,
             )
             self._stream.start()
         self.set_state(AgentState.SPEAKING)

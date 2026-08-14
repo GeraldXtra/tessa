@@ -85,6 +85,14 @@ def greeting(now: datetime | None = None, variant: int = 0, late_fact: str | Non
 _CONNECTORS = re.compile(r"\s*(?:,\s*)?\b(?:and then|then|and also|and|also)\b\s+", re.I)
 
 
+#: Self-correction mid-sentence. Speech is not typing — he changes his mind
+#: halfway through and there is no backspace. "open Chrome... actually open VS
+#: Code" is ONE instruction whose operative half is the second one, and treating
+#: it as two would open Chrome he did not want.
+_CORRECTIONS = re.compile(
+    r"\b(?:actually|no wait|wait no|scratch that|i mean|rather|instead|sorry)\b", re.I)
+
+
 def split_clauses(text: str) -> list[str]:
     """
     "open my Zoey console and check my node version" -> two clauses.
@@ -92,7 +100,14 @@ def split_clauses(text: str) -> list[str]:
     Deliberately naive, and bounded to 3: a real conjunction parser would start
     splitting "node and npm" into two jobs. Anything it gets wrong falls through
     to UNROUTED, which is visible, rather than into a wrong action, which is not.
+
+    A self-correction wins outright — everything before it is discarded, because
+    that is what he meant by saying it.
     """
+    if _CORRECTIONS.search(text):
+        tail = _CORRECTIONS.split(text)[-1].strip(" ,.")
+        if tail:
+            text = tail
     parts = [p.strip(" ,.") for p in _CONNECTORS.split(text) if p and p.strip(" ,.")]
     return parts[:3] if len(parts) > 1 else [text.strip()]
 
@@ -196,11 +211,18 @@ class IntentParser:
                             speech="Opening it."), None
 
         # ── VS Code ─────────────────────────────────────────────────────────
-        if re.search(r"\b(vs ?code|visual studio code|in code)\b", c):
+        #
+        # With a folder, open that folder IN VS Code. Without one, open the
+        # editor itself — "open VS Code" is a complete instruction and it
+        # previously fell through to a fuzzy app match that scored 0.56 against
+        # "Visual Studio Code" and lost, so she said she could not do it.
+        if re.search(r"\b(vs ?code|visual studio code|vscode|in code)\b", c):
             target = self._folder_from(c)
             if target is not None:
                 return ToolCall("app.open_vscode", {"path": str(target)},
                                 speech="Opening in VS Code."), None
+            return ToolCall("app.open_vscode", {"path": ""},
+                            speech="Opening VS Code."), None
 
         # ── folders ─────────────────────────────────────────────────────────
         if re.search(r"\b(open|show|go to|take me to)\b", c) or c in _KNOWN_FOLDERS:

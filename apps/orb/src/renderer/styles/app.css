@@ -389,7 +389,25 @@ ol {
   color: var(--text);
   overflow: hidden;
   text-overflow: ellipsis;
+  /* Still one line. The excerpt already cut at a sentence, so this ellipsis is
+     now only a backstop for a single sentence longer than the box — not the
+     primary shortening, which is what made it read as damage. */
   white-space: nowrap;
+}
+
+/* "There is more, and here is how much." Never rendered when the excerpt IS
+   the whole answer, so its presence always means something. */
+.lastline__more {
+  flex: none;
+  color: var(--accent-dim);
+  font-size: var(--fs-label);
+  text-transform: var(--label-transform);
+  letter-spacing: var(--label-tracking);
+  white-space: nowrap;
+}
+
+.lastline__more:hover {
+  color: var(--accent);
 }
 
 .status-bar__detail {
@@ -869,9 +887,36 @@ ol {
   margin-left: auto;
 }
 
+/* One line at rest — the property §R.7's 28px row encodes. Ten long answers
+   stay ten rows, so the eleventh is still reachable without scrolling past a
+   wall of prose. */
 .trace__text {
   font-size: var(--fs-sm);
   color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Expanded: wrap freely. `anywhere` because a path or URL with no spaces would
+   otherwise push the 320px drawer wider than the rail allows. */
+.trace__text[data-expanded='true'] {
+  white-space: normal;
+  overflow: visible;
+  overflow-wrap: anywhere;
+  line-height: var(--lh-base);
+}
+
+/* Sits between the role and the timestamp, which is auto-pushed right. */
+.trace__toggle {
+  color: var(--accent-dim);
+  font-size: var(--fs-label);
+  text-transform: var(--label-transform);
+  letter-spacing: var(--label-tracking);
+}
+
+.trace__toggle:hover {
+  color: var(--accent);
 }
 
 /* The styling for the deleted AGENDA / JOBS / TRANSCRIPT panels lived here

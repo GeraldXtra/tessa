@@ -304,6 +304,12 @@ export interface BootstrapInfo {
    * closed set in main. Null means the live/cycler state wins as usual.
    */
   forcedState: string | null;
+  /**
+   * DEV ONLY. `--dev-drive=click:<sel>;wait:<ms>;…` — a tiny script of UI
+   * actions the renderer runs on mount, so a drawer can be opened and a toggle
+   * clicked without the Orb ever needing the foreground. See dev-drive.ts.
+   */
+  devScript: string | null;
 }
 
 /* ───────────────────────────────────────────────────── the bridge, in types */

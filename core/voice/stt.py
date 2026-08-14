@@ -55,11 +55,55 @@ class Transcript:
     audio_s: float
     wall_s: float
     segments: list[str] = field(default_factory=list)
+    #: True when the decoder echoed its own vocabulary prime instead of speech.
+    prime_echo: bool = False
 
     @property
     def realtime_factor(self) -> float:
         """Audio seconds per processing second. >1 is faster than real time."""
         return self.audio_s / self.wall_s if self.wall_s > 0 else float("inf")
+
+
+_PRIME_WORDS = {w.strip(" ,.").lower() for w in VOCABULARY_PRIME.replace(",", " ").split() if w.strip(" ,.")}
+
+#: At or above this fraction of prime words, the transcript is the prime coming
+#: back rather than speech. 0.6 rather than 1.0 because the echo arrives
+#: partial and reordered; rather than 0.4 because a real command can legitimately
+#: contain two primed proper nouns ("open LedgerWatch and check Aptech").
+PRIME_ECHO_RATIO = 0.6
+#: Utterances this short are exempt: "Zoey" on its own is a real thing to say.
+PRIME_ECHO_MIN_WORDS = 3
+
+
+def _is_prime_echo(text: str) -> bool:
+    words = [w.strip(" ,.!?").lower() for w in text.split() if w.strip(" ,.!?")]
+    if len(words) < PRIME_ECHO_MIN_WORDS:
+        return False
+    hits = sum(1 for w in words if w in _PRIME_WORDS)
+    return (hits / len(words)) >= PRIME_ECHO_RATIO
+
+
+#: THREAD_PRIORITY_BELOW_NORMAL. One step down, not lowest: THREAD_MODE_
+#: BACKGROUND_BEGIN also throttles I/O and would slow model page-ins.
+_THREAD_PRIORITY_BELOW_NORMAL = -1
+_priority_set: set[int] = set()
+
+
+def _lower_this_thread_priority() -> None:
+    """Idempotent per thread, and never fatal — a failure here must not kill a turn."""
+    import threading
+
+    tid = threading.get_ident()
+    if tid in _priority_set:
+        return
+    try:
+        import ctypes
+
+        handle = ctypes.windll.kernel32.GetCurrentThread()
+        ctypes.windll.kernel32.SetThreadPriority(handle, _THREAD_PRIORITY_BELOW_NORMAL)
+        _priority_set.add(tid)
+    except Exception:  # noqa: BLE001
+        pass
 
 
 class WhisperSTT:
@@ -88,17 +132,64 @@ class WhisperSTT:
         and missing it badly. If accuracy needs the beam, that is a trade to make
         with the measured numbers in hand, not by default.
         """
+        # ── THREAD PRIORITY, and why it is here rather than on the process ───
+        #
+        # Session 2 measured a STATE-VISIBLE arrivedToDrawnMs of 677.80 against
+        # ten pairings between 2.9 and 24.2 ms, twice, both times while this
+        # thread was transcribing at 31-46% CPU. Their renderer's own cost in
+        # that state is 0.10-0.20 ms, so 677.8 ms is ~20 vsyncs in which the
+        # renderer was never SCHEDULED. That is a scheduling signature, not a
+        # rendering one, and on two physical cores the renderer loses to a
+        # compute-bound native thread every time.
+        #
+        # THREAD, not process: `psutil.nice()` would deprioritise the whole
+        # daemon including the WebSocket that carries the very state events the
+        # Orb is waiting for, which would make the symptom worse while looking
+        # like a fix. `SetThreadPriority` touches only the thread doing the
+        # transcription.
+        #
+        # Whisper is already seconds long. A few percent slower here is
+        # invisible; a sphere that freezes for 700 ms while she listens is not.
+        _lower_this_thread_priority()
+
         t0 = time.perf_counter()
         segments, info = self.model.transcribe(
             audio, beam_size=1, language="en", vad_filter=False,
             initial_prompt=VOCABULARY_PRIME,
         )
+        # (segments is lazy; consumption happens below and the timer spans it)
         # faster-whisper is lazy: the generator is where the work happens, so the
         # timer must span its consumption, not just the call.
         texts = [s.text for s in segments]
         wall = time.perf_counter() - t0
+        joined = "".join(texts).strip()
+
+        # ── THE PRIME LEAK ───────────────────────────────────────────────────
+        #
+        # On near-silent audio the decoder has nothing to condition on and
+        # echoes its own `initial_prompt` back as the transcript. Observed live
+        # at 03:01:37: "aptech, naira, Titan Wave, ZOEY." — the prime, returned
+        # verbatim as though he had said it, then routed as a real utterance.
+        #
+        # The prime STAYS: it fixed Zoey, LedgerWatch and Aptech and it is a 2x
+        # speed saving. The failure is detected instead.
+        #
+        # TOKEN OVERLAP, not string similarity: the echo comes back reordered,
+        # re-cased and partially truncated ("Titan Wave" -> "titan wave.",
+        # subsets in any order), so a sequence-based ratio misses it while a set
+        # overlap catches every variant. The test is "what fraction of what he
+        # said is just my own prime words" — at 60% or more it is an echo, and
+        # short utterances are exempt because "Zoey" alone is a real thing to say.
+        if _is_prime_echo(joined):
+            return Transcript(
+                text="", language=info.language,
+                language_probability=float(info.language_probability),
+                audio_s=len(audio) / sample_rate, wall_s=wall,
+                segments=[], prime_echo=True,
+            )
+
         return Transcript(
-            text="".join(texts).strip(),
+            text=joined,
             language=info.language,
             language_probability=float(info.language_probability),
             audio_s=len(audio) / sample_rate,

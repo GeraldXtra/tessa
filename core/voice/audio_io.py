@@ -19,7 +19,7 @@ import time
 import wave
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import numpy as np
 import sounddevice as sd
@@ -235,6 +235,63 @@ class ArmedMicrophone:
         if self._filled < size:
             return self._ring[: self._write].copy()
         return np.concatenate([self._ring[self._write:], self._ring[: self._write]])
+
+    def rms_of(self, block: np.ndarray) -> float:
+        return float(np.sqrt(np.mean(block.astype(np.float64) ** 2))) if block.size else 0.0
+
+    def wait_for_silence(
+        self,
+        *,
+        silence_ms: int = 1200,
+        floor_rms: float = 300.0,
+        hard_cap_s: float = 20.0,
+        poll_ms: int = 50,
+        stop_flag: Callable[[], bool] | None = None,
+    ) -> tuple[str, float]:
+        """
+        Close the segment when HE stops talking. Returns (reason, ms_since_last_speech).
+
+        THE PROBLEM THIS SOLVES: the chord was a toggle. Gerald pressed it, spoke,
+        and did not know he had to press again — so he pressed four more times and
+        Whisper returned "What time is it?" five times over, and he sat on
+        `listening` for 77 seconds. Press once, speak, and it should end.
+
+        SILENCE WINDOW = 1200 ms, and the number is not arbitrary. Natural
+        between-clause pauses in connected speech run 200-500 ms, and a
+        mid-sentence hesitation ("open the... downloads folder") sits around
+        600-900 ms. 1200 ms clears the longest of those with margin. Shorter and
+        it truncates him mid-thought, which is a worse failure than pressing
+        twice — he loses the second half of a sentence and does not know why.
+
+        FLOOR = 300 RMS against a measured ambient of ~74 RMS (-33.8 dBFS) in
+        this room. Four times the noise floor, so the room alone cannot hold the
+        segment open, and well under speech (his fixture measured 2966 RMS).
+
+        HARD CAP = 20 s regardless. A noisy room, a fan, a passing conversation
+        must never record indefinitely — the microphone is already always-live
+        and an unbounded segment turns that into an unbounded recording.
+
+        `stop_flag` is checked every poll so a SECOND PRESS still ends it
+        instantly. He must never be trapped waiting for silence detection to
+        notice; the manual override outranks the automatic one.
+        """
+        t0 = time.perf_counter()
+        last_speech = t0
+        heard_any = False
+        while True:
+            if stop_flag is not None and stop_flag():
+                return "second-press", (time.perf_counter() - last_speech) * 1000.0
+            now = time.perf_counter()
+            if now - t0 >= hard_cap_s:
+                return "hard-cap", (now - last_speech) * 1000.0
+            chunk = self._captured[-1] if self._captured else None
+            if chunk is not None and self.rms_of(chunk) >= floor_rms:
+                last_speech = now
+                heard_any = True
+            quiet_ms = (now - last_speech) * 1000.0
+            if heard_any and quiet_ms >= silence_ms:
+                return "silence", quiet_ms
+            time.sleep(poll_ms / 1000.0)
 
     def arm(self) -> np.ndarray:
         """

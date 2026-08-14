@@ -737,7 +737,13 @@ class ZoeyDaemon:
             })
 
         t = turn.timing
-        log(f"TURN heard={turn.heard!r} intent={turn.intent.value} | {t.describe()}")
+        # TOOL OUTCOME IN THE LOG LINE. A successful call, a failed call and a
+        # call that never dispatched previously looked identical here.
+        tools = " | tools=" + (", ".join(
+            f"{n}:{'ok' if ok else 'FAILED ' + err}" for n, ok, err in turn.tools
+        ) if turn.tools else "none")
+        log(f"TURN heard={turn.heard!r} intent={turn.intent.value}{tools} | {t.describe()}")
+        log(f"     said={turn.said!r}")
         self.audit.append(
             actor="human", tool=f"voice.turn.{turn.intent.value}", tier="green",
             summary=f"voice turn: heard {turn.heard[:60]!r} -> {turn.intent.value}",

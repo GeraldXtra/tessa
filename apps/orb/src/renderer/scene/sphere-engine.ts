@@ -82,6 +82,44 @@ const BREACHES_BEFORE_DEMOTION = 2;
 export const STATS_STALE_AFTER_MS = 6_000;
 
 /**
+ * ─── `thinking` has to intensify, and must not look anxious ───
+ *
+ * §R.1 gives `thinking` "turbulence", and until now it was metronomic: measured
+ * at a median per-pixel change of 2.416 with a range of 1.06 across a full
+ * minute. That reads as ambient — a screensaver — and a local model can hold
+ * this state for 60–90 s, which is exactly when the owner needs to see effort
+ * rather than a loop.
+ *
+ * WHAT INTENSIFIES, AND WHAT DELIBERATELY DOES NOT:
+ *
+ *   RATE, mostly. The noise clock accelerates up to 2.2x. The same shell churns
+ *   faster without growing, brightening or changing hue — which is what "she is
+ *   working harder" looks like when it is not also "something is wrong".
+ *
+ *   AMPLITUDE, a little. +35% at the ceiling. Rate alone changes the character
+ *   without changing the magnitude, so at a glance across a room it would not
+ *   register; a bounded amplitude rise makes it perceptible. It is kept small
+ *   on purpose — displacement growth is the shell distending, and a shell that
+ *   visibly comes apart is distress, not concentration.
+ *
+ *   COLOUR, NOT AT ALL. §R.7 reserves red for critical, and the colour
+ *   temperature already tracks the daemon's cpuPct. Adding a second colour
+ *   language here would make "thinking for a while" and "the machine is hot"
+ *   the same picture — the same mistake as painting the microphone claim onto
+ *   the sphere.
+ *
+ * IT SETTLES. The curve is saturating, `1 - e^(-t/TAU)`, not linear: 0.24 at
+ * 5 s, 0.67 at 20 s, 0.89 at 40 s, 0.96 at 60 s, 0.99 at 90 s. A long turn ends
+ * at the ceiling rather than accelerating out of it, and the ceiling is a fixed
+ * multiple rather than a limit that is merely never reached in practice.
+ */
+const THINKING_TAU_MS = 18_000;
+/** Noise clock multiplier at full intensity. 1 + this = 2.2x churn. */
+const NOISE_RATE_GAIN = 1.2;
+/** Turbulence amplitude multiplier at full intensity. */
+const TURB_AMP_GAIN = 0.35;
+
+/**
  * Width of the centre column the pulse probe reads, in buffer pixels.
  *
  * The heartbeat band travels in LATITUDE — down the screen from the equator to
@@ -218,10 +256,31 @@ export interface ProbeReading {
   dy: number;
   /** Total luminance over the region — the pulse's signal. */
   sum: number;
+  /**
+   * Mean absolute per-pixel change since the previous read of the same region.
+   * NaN on the first read, and whenever the region size changed.
+   *
+   * `sum` cannot answer "is this moving". Total brightness is very nearly
+   * conserved under motion — a rigid rotation of a symmetric shell moves every
+   * particle while leaving the total almost unchanged — so a near-zero
+   * frame-to-frame change in `sum` was being read as a stall when it was
+   * nothing of the kind. This differences the actual pixels, which is the
+   * question.
+   */
+  pixelDelta: number;
   /** Pixels above threshold. */
   lit: number;
   /** The pulse uniform at the instant of the read. Ground truth for §R.1. */
   uPulse: number;
+  /**
+   * How long the current agent state has been held, in ms, and the resulting
+   * 0..1 intensity. Carried so the turbulence ramp can be bucketed by TIME IN
+   * STATE rather than by wall clock — the two differ by however long the app
+   * took to mount, which is exactly the kind of approximation that produces a
+   * figure nobody can check.
+   */
+  heldMs: number;
+  focus: number;
   /**
    * What last brought the drawing buffer into step with the CSS box —
    * `observer`, `frame`, `probe`, `init` or `reprobe`.
@@ -407,6 +466,7 @@ export function createSphereEngine(options: SphereEngineOptions): SphereEngine {
     uSizeScale: { value: 600 },
     uPulse: { value: 0 },
     uPulseGain: { value: 0 },
+    uNoiseTime: { value: 0 },
     uColorHot: { value: tokenColor('--sphere-hot') },
     uColorCool: { value: tokenColor('--sphere-cool') },
     uCoolMix: { value: 0.35 },
@@ -440,6 +500,16 @@ export function createSphereEngine(options: SphereEngineOptions): SphereEngine {
   const smooth = { ...paramsFor('idle') } as SphereParams;
   /** Last state a frame was actually drawn with. Null until the first draw. */
   let renderedState: AgentState | null = null;
+
+  /* ── sustained-state intensity (see THINKING_TAU_MS) ───────────────────── */
+
+  /** The state the intensity clock is currently counting, and for how long. */
+  let intensityState: AgentState | null = null;
+  let stateHeldMs = 0;
+  /** 0..1, smoothed, so leaving `thinking` eases out instead of snapping. */
+  let focusCurrent = 0;
+  /** The turbulence clock, accumulated at a variable rate. Seconds. */
+  let noisePhaseS = 0;
   let sceneTimeMs = 0;
   let breathPhase = 0;
   let spinAngle = 0;
@@ -670,10 +740,28 @@ export function createSphereEngine(options: SphereEngineOptions): SphereEngine {
     uniforms.uPulse.value = pulseInFlight ? pulseElapsedMs / PULSE_TRAVEL_MS : 0;
     uniforms.uPulseGain.value = pulseInFlight ? 1 : 0;
 
+    // How long this state has been held, and how hard she is visibly working
+    // because of it. Only `thinking` intensifies: it is the state that can last
+    // 90 s with nothing else to show for it.
+    if (state !== intensityState) {
+      intensityState = state;
+      stateHeldMs = 0;
+    } else if (!target.frozen && !reducedMotion) {
+      stateHeldMs += deltaMs;
+    }
+    const focusTarget = state === 'thinking' ? 1 - Math.exp(-stateHeldMs / THINKING_TAU_MS) : 0;
+    focusCurrent = approach(focusCurrent, focusTarget, rate);
+
+    // Accumulated, never uTime * factor — see the note in particles.vert.
+    if (!target.frozen && !reducedMotion) {
+      noisePhaseS += (deltaMs / 1000) * (1 + NOISE_RATE_GAIN * focusCurrent);
+    }
+
     uniforms.uTime.value = sceneTimeMs / 1000;
+    uniforms.uNoiseTime.value = noisePhaseS;
     uniforms.uAmplitude.value = amplitude;
     uniforms.uRadius.value = smooth.radius;
-    uniforms.uTurbulence.value = smooth.turbulence;
+    uniforms.uTurbulence.value = smooth.turbulence * (1 + TURB_AMP_GAIN * focusCurrent);
     uniforms.uBreath.value = Math.sin(breathPhase) * smooth.breathDepth;
     uniforms.uAmpGain.value = smooth.amplitudeGain;
     uniforms.uPointScale.value = smooth.pointScale;
@@ -709,6 +797,9 @@ export function createSphereEngine(options: SphereEngineOptions): SphereEngine {
 
   /** Reused across reads; a fresh 3.6 MB array every 60 ms would be the cost. */
   let probeBuffer: Uint8Array | null = null;
+  /** Previous read, for the per-pixel difference. Same size or discarded. */
+  let probePrev: Uint8Array | null = null;
+  let probePrevLen = 0;
 
   function probeFrame(mode: 'full' | 'column'): ProbeReading | null {
     if (disposed) return null;
@@ -757,6 +848,23 @@ export function createSphereEngine(options: SphereEngineOptions): SphereEngine {
       }
     }
 
+    // Per-pixel change against the previous read. Green channel only: the
+    // three are near-identical on an additively-blended monochrome-ish shell,
+    // so differencing all three costs 3× for no extra information.
+    let pixelDelta = Number.NaN;
+    if (probePrev && probePrevLen === needed) {
+      let acc = 0;
+      let n = 0;
+      for (let i = 1; i < needed; i += 4) {
+        acc += Math.abs((px[i] ?? 0) - (probePrev[i] ?? 0));
+        n += 1;
+      }
+      pixelDelta = n > 0 ? acc / n : Number.NaN;
+    }
+    if (!probePrev || probePrevLen !== needed) probePrev = new Uint8Array(needed);
+    probePrev.set(px.subarray(0, needed));
+    probePrevLen = needed;
+
     const centreX = (bufW - 1) / 2;
     const centreY = (bufH - 1) / 2;
     const cx = sum > 0 ? sx / sum : Number.NaN;
@@ -774,8 +882,11 @@ export function createSphereEngine(options: SphereEngineOptions): SphereEngine {
       dx: cx - centreX,
       dy: cy - centreY,
       sum,
+      pixelDelta,
       lit,
       uPulse: uniforms.uPulse.value,
+      heldMs: stateHeldMs,
+      focus: focusCurrent,
       resizeReason,
     };
   }

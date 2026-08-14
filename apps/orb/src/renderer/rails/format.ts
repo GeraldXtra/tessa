@@ -34,6 +34,69 @@ export function formatMetric(value: number, digits: number): string {
   return value.toFixed(digits);
 }
 
+/**
+ * Shortest length a leading excerpt may be before a sentence terminator is
+ * believed.
+ *
+ * Abbreviations are why. "It is 6:57 P.M." has terminators after `P` and `M`,
+ * and cutting at the first one yields "It is 6:57 P." — which is not a shorter
+ * version of the answer, it is a different and wrong one. Requiring the excerpt
+ * to reach a plausible sentence length before a terminator counts steps over
+ * the common cases (P.M., e.g., Dr., 3.5) without pretending to parse English.
+ *
+ * It is a heuristic and it will be wrong somewhere. The failure is bounded: the
+ * excerpt runs one sentence long, which reads fine, rather than one word short,
+ * which reads broken.
+ */
+const MIN_EXCERPT_CHARS = 40;
+
+export interface Excerpt {
+  /** The leading sentence(s), whitespace-collapsed. */
+  head: string;
+  /** Words NOT in `head`. Zero when `head` is the whole text. */
+  remainingWords: number;
+}
+
+/**
+ * The first sentence of a long answer, and an honest count of what is left.
+ *
+ * Shared so the under-sphere line and TRACE cannot disagree about where an
+ * answer's first sentence ends — the same reason `formatMetric` is shared.
+ *
+ * ─── why a sentence, and why the count ───
+ * A character truncation cuts mid-word and reads as breakage; a sentence is a
+ * complete thought and reads as information. But a first sentence shown ALONE
+ * is a lie by omission when eight paragraphs follow — it looks like the whole
+ * answer. That is the same class of error as a false zero: a real value
+ * rendered as an unreal one. So the count travels with the excerpt, always.
+ *
+ * Words, not sentences, as the unit: "+212 words" is something a person can
+ * size up instantly, where "+4 sentences" could be a line or a page.
+ */
+export function excerpt(text: string): Excerpt {
+  const clean = text.trim().replace(/\s+/g, ' ');
+  if (clean.length === 0) return { head: '', remainingWords: 0 };
+
+  const terminator = /[.!?](?=\s|$)/g;
+  let end = -1;
+  let match: RegExpExecArray | null;
+  while ((match = terminator.exec(clean)) !== null) {
+    if (match.index + 1 >= MIN_EXCERPT_CHARS) {
+      end = match.index + 1;
+      break;
+    }
+  }
+
+  // No terminator far enough in — the whole thing is one short utterance.
+  if (end < 0 || end >= clean.length) return { head: clean, remainingWords: 0 };
+
+  const rest = clean.slice(end).trim();
+  const remainingWords = rest.length === 0 ? 0 : rest.split(' ').length;
+  return remainingWords === 0
+    ? { head: clean, remainingWords: 0 }
+    : { head: clean.slice(0, end), remainingWords };
+}
+
 /** Compact uptime: 45s · 3m 12s · 2h 5m · 1d 4h. */
 export function formatUptime(seconds: number): string {
   const s = Math.floor(seconds);

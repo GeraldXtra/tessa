@@ -19,6 +19,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { AGENT_STATES, type AgentState } from '@zoey/protocol';
 
 import type { BootstrapInfo, SphereTier } from '../shared/ipc-contract.ts';
+import { parseDevScript, runDevScript } from './dev-drive.ts';
 import { tokenPx } from './design-tokens.ts';
 import { Drawer } from './layout/Drawer.tsx';
 import { DevOverlay } from './layout/DevOverlay.tsx';
@@ -212,6 +213,35 @@ export function App() {
     });
   }, [mic.mode, mic.chord, mic.chordRegistered]);
 
+  /**
+   * The dev driver. Runs the real click handlers, no OS involved.
+   *
+   * Deferred one frame past mount so the rails and any snapshot-fed content are
+   * in the DOM before a selector is resolved — a driver that raced the first
+   * paint would reintroduce exactly the timing guess the fixture just lost.
+   */
+  const devScript = bootstrap?.devScript ?? null;
+  useEffect(() => {
+    if (!isDev || !devScript) return;
+    const steps = parseDevScript(devScript);
+    window.zoey.reportMetrics(`DEV-DRIVE parsed ${steps.length} step(s)`);
+    const id = window.setTimeout(() => {
+      void runDevScript(
+        steps,
+        (line) => window.zoey.reportMetrics(line),
+        // Validated against the closed set, same as the socket path. A typo in
+        // a dev script must report REJECTED rather than quietly leaving the
+        // sphere on the previous state and being read as "no visible change".
+        (state) => {
+          if (!(AGENT_STATES as readonly string[]).includes(state)) return false;
+          agentStateStore.set(state as AgentState);
+          return true;
+        },
+      );
+    }, 0);
+    return () => window.clearTimeout(id);
+  }, [isDev, devScript]);
+
   /* ── push-to-talk, hold mode ───────────────────────────────────────────── */
 
   /**
@@ -370,7 +400,9 @@ export function App() {
       if (!r) return;
       window.zoey.reportMetrics(
         `PROBE-PULSE t=${performance.now().toFixed(0)} uPulse=${r.uPulse.toFixed(4)} ` +
-          `sum=${r.sum} lit=${r.lit} col=${r.x0}..${r.x1} h=${r.bufH} ` +
+          `sum=${r.sum} dpx=${Number.isFinite(r.pixelDelta) ? r.pixelDelta.toFixed(3) : 'na'} ` +
+          `lit=${r.lit} col=${r.x0}..${r.x1} h=${r.bufH} ` +
+          `held=${Math.round(r.heldMs)} focus=${r.focus.toFixed(3)} ` +
           `state=${agentStateStore.get()}`,
       );
     }, pulseMs);

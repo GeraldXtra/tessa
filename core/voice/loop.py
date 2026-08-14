@@ -26,7 +26,8 @@ from typing import Callable
 
 import numpy as np
 
-from core.brain.router import Intent, Router
+from core.brain.executor import Executor
+from core.brain.router import Intent, Router, action_failed
 from core.bus import AgentState, AudioBus
 
 
@@ -59,6 +60,11 @@ class Turn:
     said: str
     intent: Intent
     timing: TurnTiming = field(default_factory=TurnTiming)
+    #: (tool_name, executed_ok, error). Empty for conversational turns.
+    #: Without this a successful call, a failed call and a call that never
+    #: dispatched all looked identical in the log — which is why the tool path
+    #: being dead took three of Gerald's attempts to become visible.
+    tools: list = field(default_factory=list)
 
 
 class VoiceLoop:
@@ -88,6 +94,8 @@ class VoiceLoop:
         self._on_state = on_state
         self._on_message = on_message
         self._armed = False
+        self.executor = Executor(on_state=lambda st: self._state(AgentState(st)))
+        self.tool_outcomes: list = []
 
     def _state(self, s: AgentState) -> None:
         self.bus.set_state(s)
@@ -112,8 +120,10 @@ class VoiceLoop:
     def stop(self) -> Turn | None:
         """Key UP. Everything from here to first audio is the §4 budget."""
         if not self._armed:
+            self._state(AgentState.IDLE)
             return None
         self._armed = False
+        self.tool_outcomes = []
         cap = self.mic.disarm()
 
         self._state(AgentState.THINKING)
@@ -123,11 +133,49 @@ class VoiceLoop:
         t_stt = time.perf_counter()
 
         heard = tr.text.strip()
+        # An empty transcript (silence, or a prime echo) must still land on a
+        # state. Any path that returns without one leaves the sphere hanging,
+        # which is the same bug as the missing `idle` after speaking.
+        if not heard:
+            self._state(AgentState.IDLE)
+            return Turn(heard="", said="", intent=Intent.UNROUTED,
+                        timing=TurnTiming(stt_s=t_stt - t0, audio_s=cap.duration_s))
         routed = self.router.route(heard)
         t_route = time.perf_counter()
 
         if self._on_message is not None and heard:
             self._on_message("user", heard)
+
+        # ── THE TOOL PATH ────────────────────────────────────────────────────
+        #
+        # This was missing entirely. `route()` returns tool work in `.calls`
+        # with an EMPTY `.speech`, and this method went straight to
+        # `synthesise(routed.speech)` — synthesising "" for every tool turn.
+        # executor.py was imported by nothing at all. So "open my downloads"
+        # routed correctly in 0.3 ms, executed nothing, said nothing, and looked
+        # identical in the log to a turn that worked.
+        #
+        # EVERY TOOL PATH SPEAKS, always, success or failure. A tool that runs
+        # silently is indistinguishable from one that failed, which is why
+        # Gerald pressed the chord three times — he had no way to tell.
+        tool_results: list[str] = []
+        if routed.calls:
+            for call in routed.calls:
+                try:
+                    tool_results.append(self.executor.run(call))
+                    self.tool_outcomes.append((call.name, True, ""))
+                except Exception as exc:  # noqa: BLE001
+                    # The executor already catches its own failures; this is the
+                    # backstop for anything it cannot. Still speaks.
+                    tool_results.append(action_failed(
+                        f"{type(exc).__name__}: {exc}", "Say it again and I will retry."))
+                    self.tool_outcomes.append((call.name, False, f"{type(exc).__name__}: {exc}"))
+            routed.speech = " ".join(r for r in tool_results if r).strip()
+
+        # A tool that produced no words is still a bug, but she must not go
+        # silent because of it.
+        if not routed.speech:
+            routed.speech = "Done, Emperor."
 
         # STOP is not an answer, it is an instruction: comply and stay silent.
         if routed.halts_speech:
@@ -156,7 +204,8 @@ class VoiceLoop:
             playback_start_s=t_play - t_tts,
             audio_s=cap.duration_s,
         )
-        return Turn(heard=heard, said=routed.speech, intent=routed.intent, timing=timing)
+        return Turn(heard=heard, said=routed.speech, intent=routed.intent,
+                    timing=timing, tools=list(self.tool_outcomes))
 
     def idle(self) -> None:
         self._state(AgentState.IDLE)

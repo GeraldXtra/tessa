@@ -30,6 +30,10 @@ export function Rail() {
             key={rail.id}
             type="button"
             className="rail__item"
+            // Stable handle for the dev driver. Selecting rails by nth-child
+            // breaks the moment the order changes, and §R.3 fixes the order but
+            // not forever.
+            data-rail-id={rail.id}
             data-active={active}
             // Only ever set on SENTINEL, and only when a real security source
             // says so. `undefined` leaves the rail at --text-muted like the

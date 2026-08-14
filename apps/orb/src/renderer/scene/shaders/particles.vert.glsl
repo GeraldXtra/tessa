@@ -35,6 +35,10 @@ uniform float uSizeScale;   // canvasHeight / (2 * tan(fov/2)) — set on resize
 uniform float uPulse;
 uniform float uPulseGain;
 
+// The turbulence clock. Advances at 1x normally and faster while `thinking` is
+// sustained — see THINKING_TAU_MS in sphere-engine.
+uniform float uNoiseTime;
+
 varying float vRim;
 varying float vSeed;
 varying float vPulse;
@@ -51,7 +55,12 @@ float wobble(vec3 p, float t) {
 void main() {
   vec3 dir = normalize(position);
 
-  float noise  = wobble(position * 1.6 + aSeed, uTime);
+  // uNoiseTime, not uTime. The turbulence clock runs at its own RATE so that
+  // `thinking` can churn faster the longer it is held, and it is ACCUMULATED on
+  // the CPU rather than derived as uTime * factor — multiplying a shared clock
+  // by a changing factor jumps the phase on every frame the factor moves, which
+  // reads as a glitch rather than as acceleration.
+  float noise  = wobble(position * 1.6 + aSeed, uNoiseTime);
   float ripple = sin(dir.y * 9.0 - uTime * 6.0 + aSeed * 6.2831);
 
   float radius = uRadius

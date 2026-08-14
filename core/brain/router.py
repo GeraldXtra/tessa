@@ -1,40 +1,44 @@
 """
-core/brain/router.py — spec §5.3's FIRST BRANCH ONLY: exact local matches.
+core/brain/router.py — spec §5.3's first branch: local intents, answered free.
 
-WHAT THIS IS AND IS NOT
+TWO THINGS CHANGED HERE AFTER GERALD ACTUALLY USED HER.
 
-This is the branch that answers on-machine, in zero milliseconds, with no
-network and no API key. It exists because a large fraction of what anyone says
-to an assistant all day is "what time is it" and "are you there", and paying a
-round trip plus a token bill for those is absurd. It also means Zoey still
-answers those when the connection is down, which on a metered Lagos link is not
-a hypothetical.
+1. THE MATCHING WAS TOO LITERAL. An exact-phrase table missed three of his four
+   real utterances — "How are you running?" and "What's the date?" both went to
+   UNROUTED despite the intents existing. He will not learn my phrasings; the
+   router has to meet him. It now normalises hard (contractions, filler openers,
+   punctuation), scores KEYWORD SETS rather than matching whole strings, and
+   collapses a transcript that is one phrase repeated.
 
-It is NOT the agent loop, and it deliberately cannot become one by accident:
-there is no fall-through to a model, no tool dispatch, no plan step. Anything
-not matched here returns UNROUTED and the caller says so out loud.
+2. SHE SOUNDED LIKE A SYSTEM MESSAGE. Every word she speaks today is a fixed
+   string in this file — there is no model — so her character for the coming
+   weeks is written here, not in a prompt. Every string below follows
+   zoey.md: "Emperor" by default and "sir" when it is serious, a SHORT first
+   sentence because Piper streams per sentence and the opener is the whole
+   400 ms budget, and two or three phrasings per situation because one fixed
+   string becomes a tic by the fiftieth time he hears it.
 
-NO PERSONALITY. The sentences below are plain and correct. Character lands
-tomorrow, and writing it now would mean writing it twice — worse, it would mean
-tomorrow's voice being a rewrite of a voice Gerald had already started getting
-used to.
-
-UNROUTED SPEAKS. The alternative to "I do not have that yet" is silence, and
-silence is indistinguishable from a crash. Saying what she cannot do is more
-useful than saying nothing, and it is honest about the state of the system.
+THE POSSESSIVE REGISTER IS ON ACTIONS ONLY. "You opened this one yourself
+yesterday. Ask me next time." is right when she opens a folder and wrong as a
+response to "what time is it" — used everywhere it stops being character and
+becomes a verbal tic, which is the same failure as a single fixed string.
 """
 
 from __future__ import annotations
 
 import platform
-import time
-from dataclasses import dataclass
+import random
+import re
+from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
 from typing import Callable
 
+from .intents import IntentParser
+
 
 class Intent(str, Enum):
+    TOOL = "tool"          # resolved to a structured tool call, see `calls`
     TIME = "time"
     DATE = "date"
     PRESENCE = "presence"
@@ -43,134 +47,314 @@ class Intent(str, Enum):
     UNROUTED = "unrouted"
 
 
-@dataclass(frozen=True)
+@dataclass
 class Routed:
     intent: Intent
     speech: str
-    #: True only for STOP — the caller must halt the speaker rather than reply.
     halts_speech: bool = False
+    #: How confident the keyword match was, for reporting near-misses.
+    score: float = 0.0
+    #: Structured tool calls — NAME + ARGS, never a command string (invariant 4).
+    calls: list = field(default_factory=list)
 
     @property
     def handled_locally(self) -> bool:
         return self.intent is not Intent.UNROUTED
 
 
-def _normalise(text: str) -> str:
-    """
-    Lowercase, strip terminal punctuation and filler.
+# ── normalisation ────────────────────────────────────────────────────────────
 
-    Deliberately conservative: this is an EXACT-match branch, and a normaliser
-    that tries to be clever is how "delete the build folder" starts matching
-    "stop". Anything ambiguous should fall through to UNROUTED, where it is
-    visible, rather than be guessed at here.
-    """
+_CONTRACTIONS = {
+    "what's": "what is", "whats": "what is", "how's": "how is", "hows": "how is",
+    "it's": "it is", "its": "it is", "i'm": "i am", "you're": "you are",
+    "don't": "do not", "can't": "cannot", "won't": "will not", "that's": "that is",
+    "there's": "there is", "let's": "let us", "we're": "we are",
+}
+
+#: Dropped from the FRONT only. Stripping "please" anywhere would mangle a
+#: sentence that legitimately contains it.
+_FILLERS = [
+    "hello zoey", "hey zoey", "ok zoey", "okay zoey", "hi zoey",
+    "i want you to", "i would like you to", "can you please", "could you please",
+    "can you", "could you", "would you", "please", "hello", "hey", "hiya",
+    "ok", "okay", "zoey", "so", "um", "uh", "just",
+]
+
+
+def normalise(text: str) -> str:
     t = text.lower().strip()
-    for ch in ".,!?;:":
-        t = t.replace(ch, "")
+    t = re.sub(r"[^\w\s']", " ", t)          # punctuation out, apostrophes kept
     t = " ".join(t.split())
-    for lead in ("zoey ", "hey zoey ", "ok zoey "):
-        if t.startswith(lead):
-            t = t[len(lead):]
-            break
+    for src, dst in _CONTRACTIONS.items():
+        t = re.sub(rf"\b{re.escape(src)}\b", dst, t)
+    changed = True
+    while changed:                            # peel stacked openers
+        changed = False
+        for f in _FILLERS:
+            if t.startswith(f + " ") or t == f:
+                t = t[len(f):].strip()
+                changed = True
+                break
     return t.strip()
 
 
-#: Exact phrases only. A phrase appears here because Gerald says it, not because
-#: it seemed likely — the list grows from transcripts, not from imagination.
-_EXACT: dict[str, Intent] = {
-    "what time is it": Intent.TIME,
-    "whats the time": Intent.TIME,
-    "what is the time": Intent.TIME,
-    "the time": Intent.TIME,
-    "whats the date": Intent.DATE,
-    "what is the date": Intent.DATE,
-    "what day is it": Intent.DATE,
-    "todays date": Intent.DATE,
-    "are you there": Intent.PRESENCE,
-    "hello": Intent.PRESENCE,
-    "hi": Intent.PRESENCE,
-    "you there": Intent.PRESENCE,
-    "stop": Intent.STOP,
-    "mute": Intent.STOP,
-    "stand down": Intent.STOP,
-    "be quiet": Intent.STOP,
-    "how are you": Intent.STATUS,
-    "status": Intent.STATUS,
-    "hows it going": Intent.STATUS,
-    "system status": Intent.STATUS,
-}
+def collapse_repetition(text: str) -> str:
+    """
+    A transcript that is one phrase repeated IS that phrase.
+
+    He pressed the chord five times not knowing it toggled, and Whisper returned
+    "What time is it?" five times over. That is one question, not five, and
+    routing it as a 60-character string missed the intent entirely.
+    """
+    t = " ".join(text.split())
+    if not t:
+        return t
+    for n in range(1, 9):                     # try phrase lengths 1..8 words
+        words = t.split()
+        if len(words) < n * 2:
+            break
+        unit = " ".join(words[:n])
+        if len(words) % n == 0:
+            if all(" ".join(words[i:i + n]) == unit for i in range(0, len(words), n)):
+                return unit
+    # Sentence-level repetition, where punctuation was stripped unevenly.
+    parts = [p.strip() for p in re.split(r"(?<=[.?!])\s+", text) if p.strip()]
+    if len(parts) > 1 and len({p.lower().strip(" .?!") for p in parts}) == 1:
+        return parts[0]
+    return t
+
+
+# ── keyword intents ──────────────────────────────────────────────────────────
+#
+# ANY of `must_any` plus optional `boost` words. Scored rather than matched, so
+# "how are you running" hits STATUS on both "how are you" and "running" without
+# needing that exact string to have been imagined in advance.
+
+@dataclass(frozen=True)
+class IntentSpec:
+    intent: Intent
+    must_any: tuple[str, ...]
+    boost: tuple[str, ...] = ()
+    veto: tuple[str, ...] = ()
+
+
+_SPECS = (
+    IntentSpec(Intent.TIME, ("what time", "the time", "time is it", "clock"),
+               boost=("now",), veto=("date", "day", "long")),
+    IntentSpec(Intent.DATE, ("date", "what day", "day is it", "today"),
+               veto=("time is it",)),
+    IntentSpec(Intent.STATUS, ("how are you", "status", "how are things",
+                               "running", "how is it going", "doing"),
+               boost=("cpu", "memory", "uptime", "system", "yourself")),
+    IntentSpec(Intent.PRESENCE, ("are you there", "you there", "hello", "hi",
+                                 "are you awake", "you awake", "can you hear")),
+    IntentSpec(Intent.STOP, ("stop", "mute", "stand down", "be quiet", "shut up",
+                             "quiet", "enough", "cancel that")),
+)
+
+#: Below this, she does not guess. Deliberately not lower: a router that fires
+#: wrongly is worse than one that admits a miss, because the wrong thing has
+#: already happened by the time he notices.
+MATCH_THRESHOLD = 1.0
+
+
+def score_intents(norm: str) -> list[tuple[Intent, float]]:
+    out: list[tuple[Intent, float]] = []
+    for spec in _SPECS:
+        if any(v in norm for v in spec.veto):
+            continue
+        hits = sum(1 for k in spec.must_any if k in norm)
+        if not hits:
+            continue
+        score = float(hits) + 0.5 * sum(1 for b in spec.boost if b in norm)
+        out.append((spec.intent, score))
+    return sorted(out, key=lambda x: -x[1])
+
+
+# ── her voice ────────────────────────────────────────────────────────────────
+#
+# Two or three phrasings each. zoey.md's rules, and the FIRST SENTENCE IS SHORT
+# in every one of them — measured: 13 chars is 296 ms, 47 chars is 660 ms,
+# against a 400 ms budget.
+
+_PRESENCE = [
+    "Here, Emperor.",
+    "I am here, Emperor.",
+    "Right here. What do you need?",
+]
+
+# The UNROUTED line must describe what she can ACTUALLY do. The previous
+# version listed "time, date and how I am running" — true for one night, a lie
+# the moment the tools were reconnected, and a lie she would have kept telling
+# him. It names CATEGORIES rather than reciting sixteen tool names, because a
+# list is not something anyone can hold from a spoken sentence.
+_UNROUTED = [
+    "I heard you, Emperor. Not that one yet. Apps, folders, your system and the time are mine.",
+    "Heard, Emperor. That is not mine yet. I can open things, check your machine, tell you the time.",
+    "I caught that, Emperor. Not yet. Apps, folders, ports, your system — those I can do.",
+]
+
+_NEAR_MISS = [
+    "I half caught that, Emperor. Say it again?",
+    "Not quite, Emperor. Once more?",
+]
+
+_SILENCE = [
+    "I did not catch anything, Emperor.",
+    "Nothing came through, Emperor.",
+]
+
+
+def _pick(pool: list[str]) -> str:
+    return random.choice(pool)
 
 
 class Router:
     """
-    `health_sample` is injected rather than imported so STATUS reports the SAME
-    numbers `evt.daemon.health` broadcasts. Two sources for one fact is how a
-    status report starts quietly lying.
+    `health_sample` is injected so STATUS reports the SAME numbers
+    `evt.daemon.health` broadcasts. Two sources for one fact is how a status
+    report starts quietly lying.
     """
 
     def __init__(self, health_sample: Callable[[], dict] | None = None) -> None:
         self._health = health_sample
+        self._tools = IntentParser()
 
     def route(self, text: str) -> Routed:
-        norm = _normalise(text)
-        intent = _EXACT.get(norm, Intent.UNROUTED)
+        """
+        TOOLS FIRST, CONVERSATION SECOND, and the order is deliberate.
 
-        # %-I / %-d are glibc extensions and raise on Windows, so the leading
-        # zero is stripped in Python rather than in the format string.
+        Tool patterns are NARROW — an explicit verb, a port number, a version
+        word. Conversational matching is broad keyword scoring, which is what
+        made "How's it going" work, and broad scoring asked first would swallow
+        "open my downloads" on the word "open" appearing near something else.
+        Narrow-then-broad cannot mis-fire in that direction.
+
+        This is the reconnection: `route()` previously never reached the tool
+        layer at all, so every tool in tools_local.py was unreachable and she
+        told Gerald she could not open his downloads — which she could, and had
+        been able to for two days.
+        """
+        raw = collapse_repetition(text or "")
+        norm = normalise(raw)
+        if not norm:
+            return Routed(Intent.UNROUTED, _pick(_SILENCE))
+
+        parsed = self._tools.parse(raw)
+        if parsed.question:
+            return Routed(Intent.TOOL, parsed.question, score=1.0)
+        if parsed.calls:
+            return Routed(Intent.TOOL, "", score=1.0, calls=list(parsed.calls))
+
+        ranked = score_intents(norm)
+        if not ranked:
+            return Routed(Intent.UNROUTED, _pick(_UNROUTED))
+        intent, score = ranked[0]
+        if score < MATCH_THRESHOLD:
+            return Routed(Intent.UNROUTED, _pick(_NEAR_MISS), score=score)
+
+        return self._answer(intent, score)
+
+    def _answer(self, intent: Intent, score: float) -> Routed:
+        now = datetime.now()
+
         if intent is Intent.TIME:
-            now = datetime.now()
-            return Routed(intent, f"It is {now.strftime('%I:%M %p').lstrip('0')}.")
+            # %-I is a glibc extension and raises on Windows.
+            clock = now.strftime("%I:%M %p").lstrip("0")
+            return Routed(intent, _pick([
+                f"{clock}, Emperor.",
+                f"It is {clock}.",
+                f"{clock}. Still early enough." if now.hour < 22 else f"{clock}, Emperor. Late.",
+            ]), score=score)
 
-        # ── THE FIRST-SENTENCE RULE ──────────────────────────────────────────
-        #
-        # Piper streams at SENTENCE granularity, so time-to-first-audio is the
-        # cost of the first sentence alone. Measured on this machine: a 15-char
-        # opener is 235 ms, a 31-char opener is 685 ms, a 47-char opener is
-        # 660 ms — and spec §4 allows 400 ms.
-        #
-        # So every answer below opens SHORT and puts the detail in a second
-        # sentence, which synthesises while the first is already playing. This
-        # is a constraint on how Zoey talks, not on the TTS layer, and it is
-        # cheaper to honour here than to optimise around later.
         if intent is Intent.DATE:
-            now = datetime.now()
             day = str(now.day)
-            return Routed(intent, (
-                f"It is {now.strftime('%A')}. "
-                f"The date is {day} {now.strftime('%B %Y')}."
-            ))
+            return Routed(intent, _pick([
+                f"It is {now.strftime('%A')}. The {day}th of {now.strftime('%B')}, Emperor.",
+                f"{now.strftime('%A')}, Emperor. The {day}th of {now.strftime('%B %Y')}.",
+            ]), score=score)
 
         if intent is Intent.PRESENCE:
-            return Routed(intent, "Yes, I am here.")
+            return Routed(intent, _pick(_PRESENCE), score=score)
 
         if intent is Intent.STOP:
-            return Routed(intent, "", halts_speech=True)
+            return Routed(intent, "", halts_speech=True, score=score)
 
         if intent is Intent.STATUS:
             if self._health is None:
-                return Routed(intent, "I cannot read my own health right now.")
+                return Routed(intent, "I cannot read myself right now, sir.", score=score)
             h = self._health()
             up = float(h.get("uptimeS", 0.0))
             hours, rem = divmod(int(up), 3600)
             mins = rem // 60
             uptime = f"{hours} hours and {mins} minutes" if hours else f"{mins} minutes"
-            # Short opener first — see THE FIRST-SENTENCE RULE above.
-            return Routed(intent, (
-                "I am running. "
-                f"Uptime is {uptime}. "
-                f"CPU is at {float(h.get('cpuPct', 0)):.0f} percent, "
-                f"memory {float(h.get('memMB', 0)):.0f} megabytes. "
-                f"Today I have spent {float(h.get('budgetSpent', 0)):.0f} naira "
-                f"of a {float(h.get('budgetCap', 0)):.0f} naira cap."
-            ))
+            return Routed(intent, _pick([
+                (f"Running well, Emperor. Up {uptime}, "
+                 f"CPU {float(h.get('cpuPct', 0)):.0f} percent, "
+                 f"memory {float(h.get('memMB', 0)):.0f} megabytes. "
+                 f"Spent {float(h.get('budgetSpent', 0)):.0f} of {float(h.get('budgetCap', 0)):.0f} naira today."),
+                (f"All good, Emperor. {uptime} up, "
+                 f"CPU at {float(h.get('cpuPct', 0)):.0f} percent, "
+                 f"{float(h.get('memMB', 0)):.0f} megabytes of memory. "
+                 f"Nothing spent yet today." if float(h.get("budgetSpent", 0)) == 0 else
+                 f"All good, Emperor. Up {uptime}."),
+            ]), score=score)
 
-        # UNROUTED. No fall-through, no model, no tool. She says so.
-        # Short opener first — see THE FIRST-SENTENCE RULE above.
-        return Routed(Intent.UNROUTED, (
-            "I heard you. "
-            "I do not have that yet. "
-            "Right now I can tell you the time, the date, and how I am running."
-        ))
+        return Routed(Intent.UNROUTED, _pick(_UNROUTED), score=score)
+
+
+# ── action confirmations — the possessive register lives HERE ────────────────
+#
+# On ACTIONS only. She notices when he did a thing himself that she could have
+# done. Used on every reply it would be a tic; used when she opens something he
+# opened yesterday, it is the character Gerald asked for.
+
+_DONE = [
+    "Done, Emperor.",
+    "Open, Emperor.",
+    "There you go, Emperor.",
+]
+
+_DONE_POSSESSIVE = [
+    "Done, Emperor. You opened this one yourself yesterday, by the way. I noticed. Ask me next time.",
+    "Open, Emperor. You did this one by hand last time. I would rather it were mine.",
+    "There. You have been doing these yourself, Emperor. Give them to me.",
+]
+
+_FAILED = [
+    "That failed, sir. {reason} {alternative}",
+    "It did not open, sir. {reason} {alternative}",
+]
+
+_DESTRUCTIVE_HOLD = [
+    "That is destructive, sir. {detail} Say it again and I will do it.",
+    "Hold on, sir. {detail} Confirm once more and it is done.",
+]
+
+
+def action_done(*, he_did_it_himself: bool = False) -> str:
+    return _pick(_DONE_POSSESSIVE if he_did_it_himself else _DONE)
+
+
+def action_failed(reason: str, alternative: str) -> str:
+    # The period is restored, not just stripped. Without it the reason and the
+    # alternative ran together into one sentence — and Piper streams PER
+    # SENTENCE, so a missing full stop is not a typo, it is one long opener that
+    # blows the 400 ms first-sentence budget on exactly the turns where she is
+    # already delivering bad news.
+    return _pick(_FAILED).format(reason=reason.rstrip(". ") + ".", alternative=alternative)
+
+
+def destructive_hold(detail: str) -> str:
+    return _pick(_DESTRUCTIVE_HOLD).format(detail=detail.rstrip(".") + ".")
+
+
+def ambiguous(names: list[str]) -> str:
+    listed = ", ".join(n.title() for n in names[:3])
+    return _pick([
+        f"Two of those, Emperor. {listed}?",
+        f"Which one, Emperor? {listed}.",
+    ])
 
 
 def platform_note() -> str:
