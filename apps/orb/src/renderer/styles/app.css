@@ -20,7 +20,35 @@
 :root {
   --status-h: calc(var(--sp-4) + var(--sp-3)); /* 28px */
   --hairline: 1px;
+
+  /* The third step of the theme ladder, declared here so it EXISTS before
+     theme.ts runs. Every themed property has a generated default on :root from
+     the tokens package except this one, which is an Orb concept — a var with no
+     declaration resolves to nothing and would silently drop the colour on the
+     first frame. Cyan, because cyan is the default and the fallback. */
+  --sphere-idle: var(--theme-cyan-idle);
 }
+
+/* ───────────────────────────────────────────────────────── themed surface ──
+ * These follow --accent, which theme.ts rewrites at runtime. Written as
+ * derivations rather than as five copies so a new theme needs no CSS.
+ *
+ * What is deliberately NOT here: --status-error, --status-warn,
+ * --status-active. Alarm colours do not theme. SENTINEL red is red under all
+ * five palettes, and CONTRACT §4.1's amber `blocked` sphere survives a switch.
+ */
+.app,
+body {
+  /* The ambient radial behind the sphere, tinted by the accent instead of the
+     fixed navy. 14% keeps it a suggestion; the stage still reads as void. */
+  --bg-ambient: color-mix(in srgb, var(--accent) 14%, var(--theme-void));
+  /* §6.2's gutter for model-proposed text was a fixed orange at 75% alpha —
+     the accent's old value, hard-baked. Derived now, so it stays legible as
+     "the accent, muted" under every theme instead of clashing with four of
+     them. */
+  --prov-agent: color-mix(in srgb, var(--accent) 75%, transparent);
+}
+
 
 /* ───────────────────────────────────────────────────────────────── reset ── */
 
@@ -95,8 +123,11 @@ ol {
  * and AgentState is a closed set, so that is a contract change, not an edit.
  */
 
+/* The ladder's bottom step, not grey. The brief raises idle to ~45% lightness
+   precisely because low values vanish on pure black, and because the heartbeat
+   pulse rides on this tone. */
 [data-state='idle'] {
-  --state-color: var(--status-idle);
+  --state-color: var(--sphere-idle);
 }
 [data-state='listening'] {
   --state-color: var(--accent);
@@ -351,6 +382,328 @@ ol {
 .note__body {
   font-size: var(--fs-label);
   color: var(--text-muted);
+}
+
+/* ══════════════════════════════════════════════════ the approval card ══════
+   CONTRACT §4.1 / §5.1. A security surface, and the layout is part of that.
+
+   Three structural properties, each defending against a specific failure:
+
+     1. THE BUTTONS CANNOT BE PUSHED OFF SCREEN. `.approval` is a column with a
+        bounded height; `.approval__payload` is the only child that grows, and
+        it scrolls. A 5,000-character argument scrolls INSIDE the box while the
+        chrome band and the actions stay exactly where they were.
+
+     2. PAYLOAD CANNOT REACH THE CHROME. Everything the daemon sent is inside
+        `.approval__payload`, which has its own surface, its own hairline and a
+        literal PAYLOAD label. The band above it and the buttons below it are
+        outside that box and are the only interactive elements. Text cannot
+        escape a scroll container, so a payload that says "APPROVE" in
+        convincing words is still visibly inside the quoted region.
+
+     3. IT IS OBVIOUSLY THE ORB'S. The chrome band carries the wordmark in
+        --accent, so it follows the theme and matches the rails around it. */
+
+.approvals {
+  position: absolute;
+  top: var(--sp-4);
+  left: 50%;
+  transform: translateX(-50%);
+  /* Above the notification stack (3). A toast must never land on the buttons
+     of a red-tier action. */
+  z-index: 4;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+  width: min(460px, calc(100% - var(--sp-6)));
+  /* Never taller than the stage it floats over, so the third card in a stack
+     cannot run off the bottom edge of a 768px screen. */
+  max-height: calc(100% - var(--sp-6));
+  pointer-events: none;
+}
+
+.approval {
+  pointer-events: auto;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  background: var(--panel);
+  border: var(--hairline) solid var(--panel-border);
+  /* The tier, as a solid edge. The WORD is in the badge — §R.7 forbids colour
+     alone — and this is the across-the-room half of the same signal. */
+  border-left: 3px solid var(--status-idle);
+  border-radius: var(--radius-sm);
+  backdrop-filter: blur(12px);
+}
+
+.approval[data-tier='green'] {
+  border-left-color: var(--status-active);
+}
+.approval[data-tier='amber'] {
+  border-left-color: var(--status-warn);
+}
+.approval[data-tier='red'] {
+  border-left-color: var(--status-error);
+}
+
+/* Answered, void, or expired: the whole card recedes so a live one beside it
+   is unmistakably the one still asking. */
+.approval[data-live='false'] {
+  opacity: 0.62;
+}
+
+/* ── the chrome band: fixed text, no payload reaches it ── */
+.approval__chrome {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  flex: none;
+  padding: var(--sp-2) var(--sp-3);
+  border-bottom: var(--hairline) solid var(--panel-border);
+  font-size: var(--fs-label);
+  text-transform: var(--label-transform);
+  letter-spacing: var(--label-tracking);
+}
+
+.approval__mark {
+  color: var(--accent);
+}
+
+.approval__chrome-label {
+  color: var(--text-muted);
+}
+
+.approval__chrome .tier {
+  margin-left: auto;
+}
+
+/* A fabricated card says so. See --fixture-approval in main/index.ts. */
+.approval__fixture {
+  flex: none;
+  padding: var(--sp-2) var(--sp-3);
+  background: rgba(255, 255, 255, 0.04);
+  border-bottom: var(--hairline) solid var(--panel-border);
+  font-size: var(--fs-label);
+  line-height: var(--lh-tight);
+  color: var(--status-warn);
+}
+
+.approval__head {
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-2);
+  flex: none;
+  padding: var(--sp-3) var(--sp-3) var(--sp-2);
+}
+
+.approval__tool {
+  font-size: var(--fs-md);
+  color: var(--text);
+}
+
+/* §6.2 — `human` is the only trusted source, and `external` is the highest
+   risk. The word is shown, never only a tint, because three of the six
+   provenance values still have no token of their own. */
+.approval__prov {
+  margin-left: auto;
+  font-size: var(--fs-label);
+  text-transform: var(--label-transform);
+  letter-spacing: var(--label-tracking);
+  color: var(--text-muted);
+}
+.approval__prov[data-provenance='human'] {
+  color: var(--status-active);
+}
+.approval__prov[data-provenance='agent'] {
+  color: var(--accent);
+}
+.approval__prov[data-provenance='external'] {
+  color: var(--status-error);
+}
+
+/* ── THE FENCE ── */
+.approval__payload {
+  /* The only child that grows, and the only one that scrolls. */
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  margin: 0 var(--sp-3);
+  padding: var(--sp-2);
+  background: rgba(255, 255, 255, 0.03);
+  border: var(--hairline) solid var(--panel-border);
+  border-radius: var(--radius-sm);
+}
+
+.approval__payload-label {
+  display: block;
+  margin-bottom: var(--sp-2);
+  font-size: var(--fs-label);
+  text-transform: var(--label-transform);
+  letter-spacing: var(--label-tracking);
+  color: var(--text-muted);
+}
+
+.approval__empty {
+  font-size: var(--fs-sm);
+  color: var(--text-muted);
+}
+
+.approval__arg + .approval__arg {
+  margin-top: var(--sp-3);
+}
+
+.approval__arg-name {
+  display: block;
+  font-size: var(--fs-label);
+  letter-spacing: var(--label-tracking);
+  color: var(--text-muted);
+}
+
+.approval__arg-flag {
+  color: var(--status-warn);
+}
+
+.approval__field {
+  display: block;
+  width: 100%;
+  margin-top: var(--sp-1);
+  padding: var(--sp-2);
+  background: var(--bg-void);
+  border: var(--hairline) solid var(--panel-border);
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+  line-height: var(--lh-base);
+  /* Wrap, never clip. Nothing he is approving may be hidden, and a path with
+     no spaces must not be able to widen the card. */
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  resize: vertical;
+  /* The owner has to be able to select and retype this; the rest of the
+     surface sets user-select: none. */
+  user-select: text;
+  cursor: text;
+}
+
+.approval__field:disabled {
+  color: var(--text-muted);
+  cursor: default;
+}
+
+.approval__arg[data-edited='true'] .approval__field {
+  border-color: var(--status-warn);
+}
+
+/* Not a string. Read-only, and marked as such rather than made to look like
+   the editable fields. */
+.approval__field--fixed {
+  color: var(--text-muted);
+  resize: none;
+}
+
+.approval__arg-meta {
+  display: block;
+  margin-top: 2px;
+  font-size: var(--fs-label);
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ── the three explanatory bands, all flex:none so they never eat the payload ── */
+.approval__blocked,
+.approval__void,
+.approval__sent {
+  flex: none;
+  margin: var(--sp-2) var(--sp-3) 0;
+  font-size: var(--fs-label);
+  line-height: var(--lh-tight);
+}
+
+.approval__blocked {
+  color: var(--status-warn);
+}
+.approval__void {
+  color: var(--status-error);
+}
+.approval__sent {
+  color: var(--text-muted);
+}
+
+/* ── actions: outside the scroll container, always reachable ── */
+.approval__actions {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  flex: none;
+  padding: var(--sp-3);
+}
+
+.approval__btn {
+  padding: var(--sp-2) var(--sp-4);
+  border: var(--hairline) solid var(--panel-border);
+  border-radius: var(--radius-sm);
+  font-size: var(--fs-label);
+  text-transform: var(--label-transform);
+  letter-spacing: var(--label-tracking);
+  transition: color var(--motion-fast) var(--motion-easing);
+}
+
+/* REJECT is first in the DOM so tab order reaches it before APPROVE, and it is
+   pushed to the right visually so the two are not adjacent by accident. */
+.approval__btn--reject {
+  margin-left: auto;
+  color: var(--text);
+}
+.approval__btn--reject:hover:not(:disabled) {
+  border-color: var(--status-error);
+  color: var(--status-error);
+}
+
+.approval__btn--approve {
+  color: var(--accent);
+  border-color: var(--accent-dim);
+}
+.approval__btn--approve:hover:not(:disabled) {
+  border-color: var(--accent);
+}
+
+.approval__btn:disabled {
+  color: var(--text-muted);
+  border-color: var(--panel-border);
+  cursor: default;
+}
+
+.approval__revert,
+.approval__dismiss {
+  font-size: var(--fs-label);
+  text-transform: var(--label-transform);
+  letter-spacing: var(--label-tracking);
+  color: var(--text-muted);
+}
+.approval__revert:hover,
+.approval__dismiss:hover {
+  color: var(--text);
+}
+.approval__dismiss {
+  margin-left: auto;
+}
+
+.approvals__more,
+.approvals__overflow {
+  pointer-events: auto;
+  padding: var(--sp-2) var(--sp-3);
+  background: var(--panel);
+  border: var(--hairline) solid var(--panel-border);
+  border-radius: var(--radius-sm);
+  font-size: var(--fs-label);
+  text-transform: var(--label-transform);
+  letter-spacing: var(--label-tracking);
+  color: var(--text-muted);
+}
+
+.approvals__overflow {
+  color: var(--status-error);
 }
 
 /* ── §R.2 under the sphere: one line, fading ── */

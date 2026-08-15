@@ -59,9 +59,11 @@ import {
 } from '@zoey/protocol';
 
 import type {
+  ApprovalDecision,
   AuditEntry,
   ConnectionStatus,
   DaemonHealth,
+  PermissionRequest,
   PtySession,
   TranscriptLine,
 } from '../shared/ipc-contract.ts';
@@ -76,11 +78,23 @@ import { TranscriptAssembler, type TranscriptDelta } from './transcript-assemble
  * type before comparing, so `daemon.*` matches `evt.daemon.health` and
  * `agent.*` matches `evt.agent.state`.
  *
- * Only these two. The Orb has no use yet for job, transcript, permission or
- * audit traffic, and subscribing to events with nowhere to render them would
- * burn frames decoding JSON to drop it.
+ * Everything here has somewhere to render. `job.*` and `companion.*` are still
+ * absent for that reason — subscribing to events with nowhere to draw them
+ * would burn frames decoding JSON to drop it.
  */
-const TOPICS = ['daemon.*', 'agent.*', 'audit.*', 'pty.*', 'transcript.*'] as const;
+const TOPICS = [
+  'daemon.*',
+  'agent.*',
+  'audit.*',
+  'pty.*',
+  'transcript.*',
+  // Without this the approval card can never appear. `evt.permission.request`
+  // goes through the daemon's topic filter like everything else, so a surface
+  // that does not ask for it simply never learns a red action is waiting —
+  // it would see only the pending error, or hear the spoken refusal, and look
+  // like the card was broken.
+  'permission.*',
+] as const;
 
 /** How much audit history SENTINEL asks for on connect. */
 const AUDIT_HISTORY_LIMIT = 100;
@@ -197,8 +211,23 @@ export interface DaemonConnectionOptions {
    * indicator must not light.
    */
   onVoiceRefused: (action: 'start' | 'stop', detail: string) => void;
+  /** `evt.permission.request` — a red-tier action is waiting on the owner. */
+  onApprovalRequest: (request: PermissionRequest) => void;
+  /**
+   * `evt.permission.resolved` — someone answered, possibly the OTHER surface.
+   *
+   * CONTRACT §4.1 broadcasts this precisely so the Console and the Orb cannot
+   * both hold a live card for one action. `decision` may be `expired`, which
+   * only the daemon may produce.
+   */
+  onApprovalResolved: (requestId: string, decision: string, decidedBy: string) => void;
   log: (message: string) => void;
 }
+
+/** What `sendPermissionResponse` did, so the caller can log the literal frame. */
+export type SendResult =
+  | { ok: true; frame: string }
+  | { ok: false; detail: string };
 
 export class DaemonConnection {
   private readonly opts: DaemonConnectionOptions;
@@ -237,6 +266,17 @@ export class DaemonConnection {
    * microphone is not claimed".
    */
   private readonly pendingVoice = new Map<string, 'start' | 'stop'>();
+
+  /**
+   * In-flight `cmd.permission.respond` frame ids.
+   *
+   * Correlated for one reason: so the daemon's ANSWER is recorded verbatim
+   * rather than falling through to the silent-ignore at the bottom of
+   * `onMessage`. "The card sent something and nothing visible happened" is the
+   * exact failure mode this whole surface has to avoid, and it looks identical
+   * whether the daemon accepted, refused, or has no handler at all.
+   */
+  private readonly pendingPermission = new Map<string, string>();
 
   constructor(options: DaemonConnectionOptions) {
     this.opts = options;
@@ -292,6 +332,36 @@ export class DaemonConnection {
     this.pendingVoice.set(frame.id, action);
     this.socket.send(JSON.stringify(frame));
     return true;
+  }
+
+  /**
+   * CONTRACT §5.1 `cmd.permission.respond { requestId, decision, remember? }`.
+   *
+   * Built with `makeEnvelope`, not the reserved-command escape hatch used for
+   * push-to-talk: this type IS in `packages/protocol`'s PayloadMap, so the
+   * payload is compile-checked field by field and `decision` is typed
+   * `SendableDecision` — the protocol package will not let this surface send
+   * `expired` even by mistake.
+   *
+   * `remember` is deliberately NOT sent. It is optional in the contract and it
+   * means "apply this answer to future requests of this shape"; a surface that
+   * quietly opted the owner into standing approval for a red tool would undo
+   * the entire point of the card. If it is ever wanted it needs its own
+   * checkbox and its own thought.
+   *
+   * NOTE what this cannot carry: an EDITED payload. There is no field for one.
+   * See ApprovalCard.tsx — an edited card refuses to approve rather than
+   * sending this frame and authorising the original text.
+   */
+  sendPermissionResponse(requestId: string, decision: ApprovalDecision): SendResult {
+    if (!this.socket || this.socket.readyState !== WebSocket.OPEN) {
+      return { ok: false, detail: 'not connected to the daemon' };
+    }
+    const frame = makeEnvelope('cmd.permission.respond', { requestId, decision });
+    const text = JSON.stringify(frame);
+    this.pendingPermission.set(frame.id, requestId);
+    this.socket.send(text);
+    return { ok: true, frame: text };
   }
 
   dispose(): void {
@@ -481,6 +551,20 @@ export class DaemonConnection {
       return;
     }
 
+    /**
+     * The daemon's answer to `cmd.permission.respond`, logged WHOLE.
+     *
+     * Whole rather than summarised because the question this answers is "what
+     * does the daemon actually do with this command", and any summary I write
+     * here is a summary of what I expected it to say.
+     */
+    if (parsed.corr && this.pendingPermission.has(parsed.corr)) {
+      const requestId = this.pendingPermission.get(parsed.corr) as string;
+      this.pendingPermission.delete(parsed.corr);
+      this.opts.log(`APPROVAL-REPLY for ${requestId}: ${scrub(JSON.stringify(parsed))}`);
+      return;
+    }
+
     if (parsed.type === 'evt.daemon.health') {
       // Log the first frame verbatim. Session 1 is filling these fields with
       // real values, so what actually arrives will change under us; a literal
@@ -524,6 +608,86 @@ export class DaemonConnection {
     if (parsed.type === 'evt.audit.appended') {
       const entry = this.toAuditEntry(parsed.payload as Record<string, unknown>);
       if (entry) this.opts.onAuditAppended(entry);
+      return;
+    }
+
+    /**
+     * A red-tier action is waiting. CONTRACT §4.1 specifies all six fields as
+     * required, `provenance` explicitly so (§6.2).
+     *
+     * Validated field by field rather than cast, and the reason is specific to
+     * this event: `evt.agent.state` was cast with `as unknown as` and rendered
+     * correctly off a malformed frame for days because nothing checked the
+     * fields the sphere did not read. On an approval card there is no field the
+     * owner does not read — a missing `provenance` would leave him authorising
+     * an action with no indication of whether it came from him or from a web
+     * page, which is the one distinction §6.2 exists to make.
+     *
+     * A frame that fails this is DROPPED and logged loudly. It is not rendered
+     * with defaults: a card showing `provenance: human` because the field was
+     * absent would be a fabrication, and this is the surface where that matters
+     * most.
+     */
+    if (parsed.type === 'evt.permission.request') {
+      const p = parsed.payload as Record<string, unknown>;
+      const str = (k: string): string | null => (typeof p[k] === 'string' && (p[k] as string).length > 0 ? (p[k] as string) : null);
+      const requestId = str('requestId');
+      const tier = str('tier');
+      const tool = str('tool');
+      const provenance = str('provenance');
+      const expiresAt = str('expiresAt');
+      const args = p['args'];
+      const argsOk = typeof args === 'object' && args !== null && !Array.isArray(args);
+
+      if (!requestId || !tier || !tool || !provenance || !expiresAt || !argsOk) {
+        this.opts.log(
+          `!! evt.permission.request does not match CONTRACT §4.1 — keys ` +
+            `[${Object.keys(p).join(', ')}]; requestId=${requestId ? 'ok' : 'MISSING'} ` +
+            `tier=${tier ? 'ok' : 'MISSING'} tool=${tool ? 'ok' : 'MISSING'} ` +
+            `provenance=${provenance ? 'ok' : 'MISSING'} expiresAt=${expiresAt ? 'ok' : 'MISSING'} ` +
+            `args=${argsOk ? 'ok' : 'MISSING/not an object'}. Dropping it — a card with ` +
+            `invented fields is worse than no card.`,
+        );
+        return;
+      }
+
+      // Identity and SHAPE only. The argument VALUES are never logged: they are
+      // the tweet body, the path, the command line — exactly the content the
+      // audit layer redacts before write, and a debug line is not a place to
+      // put a second unredacted copy of it.
+      this.opts.log(
+        `PERMISSION-IN requestId=${requestId} tier=${tier} tool=${tool} ` +
+          `provenance=${provenance} args=[${Object.keys(args as object).join(',')}] ` +
+          `expiresAt=${expiresAt}`,
+      );
+
+      this.opts.onApprovalRequest({
+        requestId,
+        tier,
+        tool,
+        args: args as Record<string, unknown>,
+        provenance,
+        expiresAt,
+        receivedAt: Date.now(),
+      });
+      return;
+    }
+
+    /**
+     * Someone answered — possibly the Console, possibly the daemon itself with
+     * `expired`. Either way this card is no longer live (CONTRACT §4.1).
+     */
+    if (parsed.type === 'evt.permission.resolved') {
+      const p = parsed.payload as Record<string, unknown>;
+      const requestId = typeof p['requestId'] === 'string' ? p['requestId'] : '';
+      const decision = typeof p['decision'] === 'string' ? p['decision'] : 'unknown';
+      const decidedBy = typeof p['decidedBy'] === 'string' ? p['decidedBy'] : 'unknown';
+      if (!requestId) {
+        this.opts.log('!! evt.permission.resolved with no requestId — cannot clear a card');
+        return;
+      }
+      this.opts.log(`PERMISSION-RESOLVED ${requestId} → ${decision} by ${decidedBy}`);
+      this.opts.onApprovalResolved(requestId, decision, decidedBy);
       return;
     }
 
@@ -756,6 +920,18 @@ export class DaemonConnection {
       this.opts.onVoiceRefused(action, `connection closed (${code}) before the daemon answered`);
     }
     this.pendingVoice.clear();
+
+    // An unanswered permission response is a decision that may or may not have
+    // landed. Main has already dropped the request from its pending map, so the
+    // card is gone either way; this only makes the ambiguity visible instead of
+    // leaving a silent entry behind.
+    for (const [, requestId] of this.pendingPermission) {
+      this.opts.log(
+        `!! cmd.permission.respond for ${requestId} was never answered — socket closed (${code}). ` +
+          `Whether the daemon acted on it is UNKNOWN.`,
+      );
+    }
+    this.pendingPermission.clear();
 
     if (this.stopped) return;
 

@@ -47,6 +47,28 @@ from typing import Any, Callable
 APPROVAL_WINDOW_S = 30 * 60.0
 
 
+#: How many bytes of edited arguments a surface may send back.
+#:
+#: CONTRACT §1 caps a FRAME at 1 MiB and `serve(max_size=...)` enforces it, so
+#: the transport already refuses anything larger — but 1 MiB is a cap on
+#: WebSocket abuse, not a sane bound on a tweet. 16 KB is ~60x the longest thing
+#: any red tool accepts (a 280-character post, a shell line, a path) and small
+#: enough that a hostile surface cannot use the approval path to grow the
+#: daemon's memory. Over it, the decision is REFUSED and the request stays
+#: pending — never truncated, because a silently shortened tweet is a wrong
+#: tweet that looks approved.
+MAX_EDITED_ARGS_BYTES = 16 * 1024
+
+
+class ApprovalError(ValueError):
+    """A decision frame that cannot be honoured. Carries the wire error code."""
+
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
+        self.message = message
+
+
 @dataclass
 class PendingApproval:
     request_id: str
@@ -56,10 +78,79 @@ class PendingApproval:
     provenance: str
     detail: str
     at: float = field(default_factory=time.monotonic)
+    #: True when untrusted external content was in context at request time.
+    #: Recorded so the audit shows it and so the decision can be judged against
+    #: what she was looking at — see `resolve_edit` and the fence ruling.
+    external_at_request: bool = False
 
     @property
     def expired(self) -> bool:
         return (time.monotonic() - self.at) > APPROVAL_WINDOW_S
+
+
+def resolve_edit(pending: PendingApproval, edited: Any) -> dict[str, Any]:
+    """
+    Merge a surface's edited arguments onto a pending request, or refuse.
+
+    THIS FUNCTION IS THE SECURITY BOUNDARY OF THE WHOLE APPROVAL PATH. An
+    editable payload is a route from a surface into a red-tier execution, so
+    everything that is NOT an argument is taken from the stored request and
+    never from the frame:
+
+      * THE TOOL IS NOT READABLE FROM THE WIRE. There is no code path here that
+        reads a tool name out of `edited`. "Approve this tweet" cannot become
+        "approve this shell command", not because a check rejects it but because
+        nothing ever looks.
+      * THE TIER IS NOT READABLE EITHER, for the same reason. Tiers are
+        permissions.yaml's alone (CONTRACT §6.4).
+      * KEYS ARE A SUBSET OF THE ORIGINAL. A surface may correct a value he can
+        see; it may not introduce a parameter that was never in the request. An
+        unexpected keyword reaching a handler is how `x.post(text=...)` would
+        become `x.post(text=..., _approved_by_surface=True)`.
+      * TYPES MUST MATCH the original argument. A string stays a string.
+      * SIZE IS BOUNDED, and over the bound is a refusal rather than a
+        truncation.
+
+    Returns the argument dict to execute. Raises `ApprovalError` otherwise.
+    """
+    if edited is None:
+        return dict(pending.args)
+
+    if not isinstance(edited, dict):
+        raise ApprovalError("protocol.badEnvelope",
+                            "editedArgs must be an object")
+
+    import json as _json
+
+    try:
+        size = len(_json.dumps(edited, ensure_ascii=False).encode("utf-8"))
+    except (TypeError, ValueError):
+        raise ApprovalError("protocol.badEnvelope",
+                            "editedArgs is not JSON-serialisable") from None
+    if size > MAX_EDITED_ARGS_BYTES:
+        raise ApprovalError(
+            "protocol.badEnvelope",
+            f"editedArgs is {size} bytes, over the {MAX_EDITED_ARGS_BYTES} limit")
+
+    unknown = sorted(set(edited) - set(pending.args))
+    if unknown:
+        raise ApprovalError(
+            "protocol.badEnvelope",
+            f"editedArgs may only change existing arguments; {unknown} were not "
+            f"in the request")
+
+    merged = dict(pending.args)
+    for key, value in edited.items():
+        original = pending.args.get(key)
+        # `bool` before `int`: in Python `isinstance(True, int)` is True, so a
+        # bare int check would let `confirmed: true` through as a number.
+        if original is not None and type(original) is not type(value):
+            raise ApprovalError(
+                "protocol.badEnvelope",
+                f"editedArgs['{key}'] is {type(value).__name__}, "
+                f"the request had {type(original).__name__}")
+        merged[key] = value
+    return merged
 
 
 class ApprovalGate:

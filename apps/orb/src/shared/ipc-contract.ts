@@ -99,6 +99,16 @@ export const IPC = {
    * Main will not forward an id it never issued a card for.
    */
   approvalRespond: 'zoey:approval-respond',
+  /**
+   * renderer → main, send. One of five theme ids, for persistence only.
+   *
+   * The renderer already OWNS what is on screen — it sets the custom properties
+   * itself. This channel exists solely so the choice survives a restart, which
+   * needs the filesystem, which the renderer does not have. Main validates the
+   * id against its own list and refuses anything else, so a compromised
+   * renderer's worst outcome here is a file containing a word.
+   */
+  themeSet: 'zoey:theme-set',
   /** renderer → main, send. Owner pressed RETRY after a terminal failure. */
   retryConnection: 'zoey:retry-connection',
   /**
@@ -227,6 +237,53 @@ export interface OrbNotification {
   body: string;
 }
 
+/* ───────────────────────────────────────────────────── approval (§4.1/§5.1) */
+
+/**
+ * `evt.permission.request`, carried whole.
+ *
+ * CONTRACT §4.1: `{ requestId, tier, tool, args, provenance, expiresAt }`, all
+ * six required — `provenance` explicitly so, per §6.2.
+ *
+ * `args` is `unknown`-valued on purpose. It is arbitrary tool input the owner
+ * is being asked to authorise, it may contain anything a model produced, and
+ * the card's whole job is to show it as it is rather than as the surface would
+ * prefer it. Nothing here narrows or reshapes it.
+ */
+export interface PermissionRequest {
+  requestId: string;
+  tier: string;
+  tool: string;
+  args: Record<string, unknown>;
+  provenance: string;
+  /** ISO. The daemon's own 30-minute window (core/brain/approvals.py). */
+  expiresAt: string;
+  /** Wall clock of arrival, so the countdown survives a clock skew. */
+  receivedAt: number;
+  /**
+   * DEV ONLY. Set by `--fixture-approval=`, never by the socket.
+   *
+   * A fabricated card on a security surface has to announce itself, or a
+   * screenshot of one becomes evidence for a claim it cannot support. When this
+   * is true the card renders a banner saying so, and main will not forward a
+   * decision for it to the daemon — there is no daemon request behind it.
+   */
+  fixture?: true;
+}
+
+/** A surface may send these two and no others. CONTRACT §5.1. */
+export type ApprovalDecision = 'approve' | 'deny';
+
+/** Why a card left the screen. Only `resolved` came from the daemon. */
+export type ApprovalClearReason = 'resolved' | 'expired' | 'disconnected';
+
+export interface ApprovalCleared {
+  requestId: string;
+  reason: ApprovalClearReason;
+  /** Present when the daemon resolved it: approve | deny | expired. */
+  decision?: string;
+}
+
 /* ─────────────────────────────────────────────────── SENTINEL / TRACE data */
 
 /**
@@ -340,6 +397,18 @@ export interface BootstrapInfo {
    * clicked without the Orb ever needing the foreground. See dev-drive.ts.
    */
   devScript: string | null;
+  /**
+   * The theme to paint on first frame — restored from disk, or `cyan` when
+   * there is nothing valid to restore.
+   *
+   * It rides the bootstrap rather than a push channel for the same reason the
+   * audit history rides the snapshot: a push arrives at whatever listener
+   * exists, and on first paint there is none. A theme applied one frame late is
+   * a visible flash of the wrong palette on every launch.
+   */
+  theme: string;
+  /** Why that theme. Logged, so a silent fallback to cyan cannot look chosen. */
+  themeReason: string;
 }
 
 /* ───────────────────────────────────────────────────── the bridge, in types */
@@ -357,6 +426,16 @@ export interface Snapshot {
    * claimed must not paint a dark indicator.
    */
   mic: MicState;
+  /**
+   * Approvals main is still holding.
+   *
+   * Same race as the audit history, with a worse consequence: a red-tier
+   * request that arrived while the renderer was still parsing its bundle would
+   * leave main holding a pending action with no card on screen for it. The
+   * owner would see nothing, the daemon would wait 30 minutes, and both sides
+   * would look correct.
+   */
+  approvals: PermissionRequest[];
 }
 
 export interface ZoeyBridge {
@@ -383,6 +462,14 @@ export interface ZoeyBridge {
   onMicState(listener: (state: MicState) => void): () => void;
   /** Returns an unsubscribe function. One notification for the §R.2 stack. */
   onNotification(listener: (note: OrbNotification) => void): () => void;
+  /** Returns an unsubscribe function. A new approval card. */
+  onApprovalRequested(listener: (request: PermissionRequest) => void): () => void;
+  /** Returns an unsubscribe function. A card that must leave the screen. */
+  onApprovalCleared(listener: (cleared: ApprovalCleared) => void): () => void;
+  /** The owner's answer. Main validates the id against what it holds. */
+  respondToApproval(requestId: string, decision: ApprovalDecision): void;
+  /** Persist the theme choice. Display has already changed; this only saves it. */
+  setTheme(theme: string): void;
   /** Report a push-to-talk key edge. Main decides what it means. */
   pushToTalkEdge(edge: 'down' | 'up'): void;
   setPushToTalkMode(mode: PttMode): void;

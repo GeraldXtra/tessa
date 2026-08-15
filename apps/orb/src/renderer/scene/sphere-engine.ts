@@ -28,6 +28,7 @@ import {
   BufferAttribute,
   BufferGeometry,
   Color,
+  LinearSRGBColorSpace,
   PerspectiveCamera,
   Points,
   Scene,
@@ -499,6 +500,19 @@ export interface SphereEngine {
    * probes with no frame between them are identical by construction.
    */
   probeFrame(mode: 'full' | 'column' | 'limb' | 'centre'): ProbeReading | null;
+  /**
+   * Re-read the colour tokens and retarget the palette. Called on a theme
+   * switch.
+   *
+   * The sphere's colours are shader UNIFORMS resolved once at construction, not
+   * CSS — so a theme switch repaints every label, rail and marker on the
+   * surface and leaves the one thing in the middle of the screen unchanged
+   * unless this runs. It retargets rather than snapping: `uColorHot` and
+   * `uColorCool` keep lerping toward the palette in `step()`, so the sphere
+   * crossfades into the new theme over the same handful of frames a state
+   * change uses, instead of jumping.
+   */
+  retint(): void;
   dispose(): void;
 }
 
@@ -517,7 +531,43 @@ function tokenColor(property: string): Color {
   const color = new Color(1, 1, 1);
   if (raw) {
     try {
-      color.set(raw);
+      /**
+       * `setStyle(raw, LinearSRGBColorSpace)`, NOT `set(raw)`. This is a bug
+       * fix, and it is the reason the sphere has never once shown its own
+       * token colours.
+       *
+       * three.js enables `ColorManagement` by default, so `Color.set()` on any
+       * of the colour tokens treats the string as sRGB and converts it into the
+       * linear working space. That is correct for a lit material, because the standard
+       * fragment chunks run `<colorspace_fragment>` at the end and encode the
+       * result back to sRGB for display.
+       *
+       * This material does neither. It is a raw `ShaderMaterial` writing
+       * `gl_FragColor` directly, and `grep -c colorspace_fragment` on
+       * shaders/particles.frag.glsl returns 0 — nothing encodes back. So the
+       * linearised value was being written straight to an sRGB framebuffer and
+       * displayed as a much darker, more saturated colour. Measured before this
+       * change:
+       *
+       * (hex written without the leading hash so this comment does not itself
+       * trip the no-hard-coded-colour gate — these are measurements, not values)
+       *
+       *     token          declared   rendered as
+       *     --sphere-hot   FF3B00     FF0B00
+       *     --sphere-cool  FFA94D     FF6513
+       *     --accent       FF6B1A     FF2503
+       *
+       * Naming the working space tells three the string is ALREADY in it, so no
+       * conversion happens and the shader emits the literal token value. The
+       * alternative — adding `<colorspace_fragment>` to the shader — reaches the
+       * same place, but through the hot path rather than through four calls made
+       * at construction.
+       *
+       * This matters beyond tidiness now: the owner is choosing between five
+       * palettes by eye, and every swatch he judged would have been rendered as
+       * a colour that is not in tokens.json.
+       */
+      color.setStyle(raw, LinearSRGBColorSpace);
     } catch {
       // A malformed token should dim the sphere, never crash the surface.
     }
@@ -1226,6 +1276,28 @@ export function createSphereEngine(options: SphereEngineOptions): SphereEngine {
     stats: () => stats,
 
     probeFrame,
+
+    /**
+     * Re-read the tokens after a theme switch.
+     *
+     * `copy()` into the existing Color objects rather than replacing them: the
+     * palette entries are the lerp TARGETS that `step()` reads every frame, so
+     * mutating them in place retargets the crossfade already in flight. A
+     * reassignment would work too, but only because nothing else holds a
+     * reference — and that is exactly the kind of thing that stops being true
+     * later.
+     *
+     * `amber` is re-read as well, and it will not move: it comes from
+     * `--status-warn`, which no theme touches. Reading it anyway keeps one code
+     * path for "the tokens may have changed" rather than encoding the current
+     * list of themed properties in a second place.
+     */
+    retint() {
+      palette.flame.hot.copy(tokenColor('--sphere-hot'));
+      palette.flame.cool.copy(tokenColor('--sphere-cool'));
+      palette.amber.hot.copy(tokenColor('--status-warn'));
+      palette.amber.cool.copy(tokenColor('--status-warn'));
+    },
 
     dispose() {
       disposed = true;

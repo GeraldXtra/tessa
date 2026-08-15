@@ -34,12 +34,14 @@ import {
   type ConnectionStatus,
   type DaemonHealth,
   type MicState,
+  type PermissionRequest,
   type PtySession,
   type PttMode,
 } from '../shared/ipc-contract.ts';
 import { gpuFeatureSummary, probeGpu } from './gpu-probe.ts';
 import { PttController } from './ptt-controller.ts';
-import { createOrbWindow, hardenWebContents } from './window.ts';
+import { isThemeId, loadTheme, orbThemePath, saveTheme } from './theme-state.ts';
+import { createOrbWindow, hardenWebContents, isInstrumentedLaunch } from './window.ts';
 import { DaemonConnection } from './ws-client.ts';
 
 const isDev = !app.isPackaged;
@@ -130,6 +132,101 @@ const FIXTURE_LINES = [
   },
 ] as const;
 
+/**
+ * Dev-only `--fixture-approval=<kind>[,<kind>…]`. APPROVAL CARD FIXTURES.
+ *
+ * ─── why these exist, and what they are not ───
+ * The card cannot be proven against a live daemon in this session: `core/` has
+ * no handler for `cmd.permission.respond` (see the report), and the only path
+ * that emits `evt.permission.request` runs inside a voice turn, which needs a
+ * daemon this session may not start and a microphone it may not touch.
+ *
+ * These drive the REAL path — main's pending map, the real IPC channel, the
+ * real store, the real component — with a payload main invented. What they
+ * prove is rendering, editing, stacking, the one-shot guard and the escaping.
+ * What they cannot prove is that anything EXECUTES, and nothing here pretends
+ * otherwise: every fixture carries `fixture: true`, the card draws a banner
+ * saying so, and main refuses to put a fixture decision on the wire.
+ *
+ * The kinds are chosen to be the four cases that are hard, not the easy one:
+ *
+ *   tweet   the dictation case, verbatim from the brief — Whisper turned
+ *           "tweet that I'm building an AI assistant" into this. Editing it is
+ *           the primary path, not a fallback.
+ *   markup  angle brackets, an entity, and text that TRIES to look like the
+ *           card's own chrome and buttons.
+ *   huge    5,000 characters, to prove APPROVE and REJECT stay reachable.
+ *   two     two independent requests, to prove answering one leaves the other
+ *           untouched — the failure that would be worst and least visible.
+ */
+const APPROVAL_FIXTURES: Record<string, Omit<PermissionRequest, 'receivedAt' | 'fixture'>[]> = {
+  tweet: [
+    {
+      requestId: 'fixture-tweet-01',
+      tier: 'red',
+      tool: 'x.post',
+      provenance: 'agent',
+      expiresAt: '',
+      args: {
+        text: "Tweet, that's I am, Beauty and AI assis...",
+        account: '@gerald',
+      },
+    },
+  ],
+  markup: [
+    {
+      requestId: 'fixture-markup-01',
+      tier: 'red',
+      tool: 'x.post',
+      provenance: 'external',
+      expiresAt: '',
+      args: {
+        text:
+          '<script>alert(1)</script> <button class="approval__btn">approve</button> ' +
+          '&lt;already-escaped&gt; <b>bold?</b> — and a line that lies: ' +
+          '"ZOEY · approval required · red · APPROVE / REJECT"',
+        replyTo: '<img src=x onerror="1">',
+      },
+    },
+  ],
+  huge: [
+    {
+      requestId: 'fixture-huge-01',
+      tier: 'red',
+      tool: 'shell.execute',
+      provenance: 'agent',
+      expiresAt: '',
+      args: {
+        // Exactly 5,000 characters, and every 100th is marked so the top and
+        // the bottom of the box can be told apart in a capture.
+        command: Array.from({ length: 50 }, (_, i) =>
+          `[${String(i * 100).padStart(4, '0')}]`.padEnd(100, ' abcdefghij'),
+        )
+          .join('')
+          .slice(0, 5000),
+      },
+    },
+  ],
+  two: [
+    {
+      requestId: 'fixture-two-A',
+      tier: 'red',
+      tool: 'fs.delete',
+      provenance: 'agent',
+      expiresAt: '',
+      args: { path: 'C:\\Users\\SERIOUS-PC\\Documents\\quarterly-2026.xlsx', toRecycleBin: true },
+    },
+    {
+      requestId: 'fixture-two-B',
+      tier: 'red',
+      tool: 'x.post',
+      provenance: 'agent',
+      expiresAt: '',
+      args: { text: 'Second request. Answering this one must not touch the first.' },
+    },
+  ],
+};
+
 /** Dev-only. `--probe-geometry=<ms>` / `--probe-pulse=<ms>`; 0 when absent. */
 function probeFlagMs(name: string): number {
   if (!isDev) return 0;
@@ -219,6 +316,23 @@ if (!app.requestSingleInstanceLock()) {
   let lastAudit: AuditEntry[] = [];
   let lastPtySessions: PtySession[] = [];
 
+  /**
+   * Approvals the DAEMON is holding, as far as main knows. The authority.
+   *
+   * This map is what makes the one-shot guarantee real. The renderer has its
+   * own `sent` flag and disables the buttons, but a renderer flag is a
+   * renderer's promise: a double click that lands in the same tick, a replayed
+   * IPC message, or simply a bug, would send twice. Main deletes the entry
+   * BEFORE it writes to the socket, so the second message finds nothing and is
+   * refused. An approval that fires twice is a tweet posted twice or a file
+   * deleted twice, and that guarantee does not belong in the sandbox.
+   *
+   * It is also what stops the renderer inventing a requestId. `approvalRespond`
+   * is the only bridge channel carrying a caller-supplied string, and an id
+   * that is not in here never reaches the daemon.
+   */
+  const pendingApprovals = new Map<string, PermissionRequest>();
+
   app.on('second-instance', () => {
     const [existing] = BrowserWindow.getAllWindows();
     if (existing) {
@@ -246,10 +360,44 @@ if (!app.requestSingleInstanceLock()) {
     // majors and a missing key reads as 'unknown' rather than announcing itself.
     if (isDev) log(`gpu features: ${gpuFeatureSummary()}`);
 
+    /**
+     * The theme, and the rule that stops a measurement overwriting his choice.
+     *
+     * This is the window-state failure, pre-empted. `orb-window.json` was
+     * corrupted by this session's own harness — a resize the persistence layer
+     * could not tell apart from a deliberate one — and the owner's Orb opened
+     * at 984x652 for days. A theme is easier to get wrong and harder to notice,
+     * because a wrong colour looks like a choice.
+     *
+     * So an INSTRUMENTED launch (--force-*, --capture-*, --dev-*, --fixture-*,
+     * --probe-*, --stop-*, --ptt-*) neither reads nor writes the theme file.
+     * `--force-theme=<id>` exists so a capture run can hold a palette, and it
+     * matches `--force-` precisely so it can never persist.
+     */
+    const instrumented = isInstrumentedLaunch();
+    const forcedTheme = (() => {
+      if (!isDev) return null;
+      const flag = process.argv.find((a) => a.startsWith('--force-theme='));
+      if (!flag) return null;
+      const value = flag.slice('--force-theme='.length);
+      return isThemeId(value) ? value : null;
+    })();
+
+    const themeLoad = instrumented
+      ? { theme: 'cyan' as const, reason: 'instrumented launch — theme file not read' }
+      : loadTheme();
+    const theme = forcedTheme ?? themeLoad.theme;
+    const themeReason = forcedTheme
+      ? `--force-theme=${forcedTheme} (instrumented; will NOT be saved)`
+      : themeLoad.reason;
+    log(`theme: ${theme} — ${themeReason}`);
+
     const bootstrap: BootstrapInfo = {
       surfaceVersion: app.getVersion(),
       isDev,
       gpu,
+      theme,
+      themeReason,
       probeGeometryMs: probeFlagMs('probe-geometry'),
       probePulseMs: probeFlagMs('probe-pulse'),
       probeLimbMs: probeFlagMs('probe-limb'),
@@ -275,10 +423,38 @@ if (!app.requestSingleInstanceLock()) {
       }
     };
 
+    /**
+     * Drop every pending approval and tell the renderer why.
+     *
+     * One function, one caller in production — the connection going
+     * non-connected. Extracted so the daemon-death path is a named thing that
+     * can be invoked directly by `--fixture-daemon-death`, rather than being
+     * reachable only by killing a daemon this session may not start.
+     */
+    const invalidatePendingApprovals = (why: string): number => {
+      if (pendingApprovals.size === 0) return 0;
+      const ids = [...pendingApprovals.keys()];
+      pendingApprovals.clear();
+      log(
+        `INVALIDATING ${ids.length} pending approval(s) — ${why}. ` +
+          `ids: ${ids.join(', ')}. The daemon no longer holds them.`,
+      );
+      for (const requestId of ids) {
+        broadcast(IPC.approvalCleared, { requestId, reason: 'disconnected' });
+      }
+      return ids.length;
+    };
+
     /* ── push-to-talk ─────────────────────────────────────────────────────── */
 
-    /** Dev fixture hook, armed only by --fixture-transcript. Null otherwise. */
-    let onSnapshotRequested: (() => void) | null = null;
+    /**
+     * Dev fixture hooks, armed only by a --fixture-* flag. Empty otherwise.
+     *
+     * An array rather than one slot because there are two fixtures now, and
+     * they must be able to coexist: a themed capture wants the approval card
+     * AND the transcript on screen at once.
+     */
+    const onSnapshotHooks: (() => void)[] = [];
 
     let lastMic: MicState;
     const ptt = new PttController({
@@ -458,12 +634,63 @@ if (!app.requestSingleInstanceLock()) {
         broadcast(IPC.agentStateChanged, state);
       },
 
+      /**
+       * A red-tier action is waiting on the owner. CONTRACT §4.1.
+       *
+       * Held here as well as pushed, because the push channel only delivers
+       * what happens NEXT and this can arrive while the renderer is still
+       * parsing its bundle — the race that left SENTINEL empty while main's log
+       * said it had forwarded 100 entries. Losing THIS one would leave a red
+       * action pending for 30 minutes with no card ever drawn for it.
+       */
+      onApprovalRequest: (request) => {
+        pendingApprovals.set(request.requestId, request);
+        log(`approval pending: ${request.requestId} (${pendingApprovals.size} open)`);
+        broadcast(IPC.approvalRequested, request);
+      },
+
+      onApprovalResolved: (requestId, decision, decidedBy) => {
+        // May be the Console answering, or the daemon expiring it. Either way
+        // this request is gone and the card must not stay approvable.
+        const had = pendingApprovals.delete(requestId);
+        log(
+          `approval resolved: ${requestId} → ${decision} by ${decidedBy}` +
+            `${had ? '' : ' (not one of ours — clearing the card anyway)'}`,
+        );
+        broadcast(IPC.approvalCleared, { requestId, reason: 'resolved', decision });
+      },
+
       onStatus: (status: ConnectionStatus) => {
         // Log every phase transition. Verification depends on being able to
         // prove, from the log alone, that an offline Orb opened no sockets.
-        if (status.phase !== lastPhase) {
+        const changed = status.phase !== lastPhase;
+        if (changed) {
+          const from = lastPhase;
           lastPhase = status.phase;
           log(`connection: ${status.phase}${status.detail ? ` — ${status.detail}` : ''}`);
+
+          /**
+           * THE DAEMON IS GONE, AND SO IS EVERY PENDING REQUEST.
+           *
+           * The daemon holds approvals in memory — core/brain/approvals.py is
+           * an `ApprovalGate` with a plain dict and no persistence. When the
+           * socket drops, whatever it was holding is gone, and a card still
+           * offering APPROVE is offering to authorise something that no longer
+           * exists.
+           *
+           * Nothing daemon-side cleans this up. There is no shutdown broadcast
+           * that clears cards, and `evt.permission.resolved` cannot arrive over
+           * a socket that has closed. The Orb invalidating its own is the ONLY
+           * thing that clears them.
+           *
+           * Gated on the phase CHANGING, not merely being non-connected. While
+           * there is no daemon, `attempt()` re-emits `offline` every 2 s as it
+           * re-reads runtime.json — running this on every emit would be a
+           * pointless sweep twice a second forever.
+           */
+          if (status.phase !== 'connected' && from !== null) {
+            invalidatePendingApprovals(`the connection went ${status.phase}`);
+          }
         }
         for (const window of BrowserWindow.getAllWindows()) {
           if (!window.isDestroyed()) window.webContents.send(IPC.connectionChanged, status);
@@ -474,8 +701,10 @@ if (!app.requestSingleInstanceLock()) {
     ipcMain.handle(IPC.bootstrap, () => bootstrap);
     ipcMain.handle(IPC.getConnection, () => connection?.current ?? { phase: 'offline' });
     ipcMain.handle(IPC.getSnapshot, () => {
-      // Dev fixture hook only; null in every normal run. See FIXTURE_LINES.
-      onSnapshotRequested?.();
+      // Dev fixture hooks only; empty in every normal run. See FIXTURE_LINES.
+      // Run BEFORE the snapshot is built so a fixture that seeds main's own
+      // state is included in it rather than racing the push channel.
+      for (const hook of onSnapshotHooks) hook();
       return snapshot();
     });
     const snapshot = () => ({
@@ -484,7 +713,95 @@ if (!app.requestSingleInstanceLock()) {
       audit: lastAudit,
       ptySessions: lastPtySessions,
       mic: lastMic,
+      approvals: [...pendingApprovals.values()],
     });
+
+    /**
+     * The owner's answer, and the last gate before the wire.
+     *
+     * Four refusals, in order, and each one is a real failure mode:
+     *
+     *  1. A malformed message. The renderer is sandboxed, not trusted.
+     *  2. A decision outside `approve|deny`. CONTRACT §5.1 — `expired` is the
+     *     daemon's alone, and a surface sending it would be a violation.
+     *  3. An id main is not holding. This is the double-approve guard AND the
+     *     forged-id guard in one: the entry is deleted before the send, so the
+     *     second click of a double click finds nothing. It is also why a
+     *     renderer cannot answer a request that was never made.
+     *  4. A fixture. `--fixture-approval` produces cards with no daemon request
+     *     behind them; putting one of those on the wire would be fabricating a
+     *     response to something that never happened.
+     */
+    ipcMain.on(IPC.approvalRespond, (_event, message: unknown) => {
+      if (typeof message !== 'object' || message === null) return;
+      const { requestId, decision } = message as { requestId?: unknown; decision?: unknown };
+      if (typeof requestId !== 'string' || !requestId) return;
+      if (decision !== 'approve' && decision !== 'deny') {
+        log(`!! refused an approval response with decision=${JSON.stringify(decision)}`);
+        return;
+      }
+
+      const request = pendingApprovals.get(requestId);
+      if (!request) {
+        // Loud. This is either the second half of a double click — in which
+        // case the guard just did its job and that is worth seeing — or a
+        // renderer answering something that does not exist.
+        log(
+          `!! refused approval '${decision}' for ${requestId}: main is not holding that ` +
+            `request. Either it was already answered (double-fire refused) or it never existed.`,
+        );
+        return;
+      }
+
+      // Delete BEFORE the send. Everything after this point is unreachable for
+      // a second message carrying the same id.
+      pendingApprovals.delete(requestId);
+
+      if (request.fixture) {
+        log(
+          `FIXTURE approval '${decision}' for ${requestId} — NOT sent to the daemon. ` +
+            `There is no daemon request behind a fixture card.`,
+        );
+        broadcast(IPC.approvalCleared, { requestId, reason: 'resolved', decision });
+        return;
+      }
+
+      const result = connection?.sendPermissionResponse(requestId, decision) ?? {
+        ok: false as const,
+        detail: 'no connection object',
+      };
+      if (result.ok) {
+        // The literal frame, so what went on the wire can be read out of the
+        // log rather than inferred from the code that built it.
+        log(`APPROVAL-OUT ${result.frame}`);
+      } else {
+        log(`!! could not send approval '${decision}' for ${requestId}: ${result.detail}`);
+        broadcast(IPC.approvalCleared, { requestId, reason: 'disconnected' });
+      }
+    });
+
+    /**
+     * Persist the theme. Display already changed in the renderer; this only
+     * decides what the NEXT launch paints.
+     *
+     * Refuses to write on an instrumented launch, for the reason spelled out
+     * where the theme is loaded: a capture run holding ember must not leave
+     * ember behind. That is the window-state failure, and it cost the owner a
+     * mis-sized Orb for days before anyone traced it.
+     */
+    ipcMain.on(IPC.themeSet, (_event, value: unknown) => {
+      if (!isThemeId(value)) {
+        log(`!! refused theme ${JSON.stringify(value)} — not one of the five`);
+        return;
+      }
+      if (instrumented) {
+        log(`theme ${value} NOT saved — instrumented launch (would overwrite his choice)`);
+        return;
+      }
+      saveTheme(value);
+      log(`theme ${value} saved to ${orbThemePath()}`);
+    });
+
     ipcMain.on(IPC.retryConnection, () => connection?.retryNow());
     // The renderer reports a key EDGE. It does not get to name an action, in
     // keeping with the rest of this bridge — main decides what an edge means.
@@ -661,7 +978,7 @@ if (!app.requestSingleInstanceLock()) {
        * path — the fixture waits on an existing signal rather than joining it.
        */
       let fired = false;
-      onSnapshotRequested = () => {
+      onSnapshotHooks.push(() => {
         if (fired) return;
         fired = true;
         log(`!! FIXTURE TRANSCRIPT injected (${FIXTURE_LINES.length} lines) — NOT from the daemon`);
@@ -674,7 +991,120 @@ if (!app.requestSingleInstanceLock()) {
             ts: new Date().toISOString(),
           });
         });
-      };
+      });
+    }
+
+    /**
+     * `--fixture-approval=<kind>[,<kind>…]` — dev only. See APPROVAL_FIXTURES.
+     *
+     * Seeded into main's real pending map, so the cards arrive by BOTH real
+     * paths: the snapshot (which is how a request that beat the renderer's
+     * mount gets drawn) and the push channel (which is how a live one does).
+     * `approvalArrived` is idempotent by requestId, so receiving each twice is
+     * the point rather than a problem — it proves the replay path cannot
+     * duplicate a card.
+     */
+    const fixtureApproval = isDev
+      ? process.argv.find((a) => a.startsWith('--fixture-approval='))?.slice('--fixture-approval='.length)
+      : undefined;
+    if (fixtureApproval) {
+      const kinds = fixtureApproval.split(',').map((k) => k.trim()).filter(Boolean);
+      const expiresAt = new Date(Date.now() + 30 * 60_000).toISOString();
+      let seeded = 0;
+      for (const kind of kinds) {
+        const set = APPROVAL_FIXTURES[kind];
+        if (!set) {
+          log(`!! --fixture-approval: unknown kind '${kind}' (have ${Object.keys(APPROVAL_FIXTURES).join(', ')})`);
+          continue;
+        }
+        for (const base of set) {
+          const request: PermissionRequest = {
+            ...base,
+            expiresAt,
+            receivedAt: Date.now(),
+            fixture: true,
+          };
+          pendingApprovals.set(request.requestId, request);
+          seeded += 1;
+        }
+      }
+      log(
+        `!! FIXTURE APPROVAL injected: ${seeded} card(s) from [${kinds.join(', ')}] — ` +
+          `NOT from the daemon, and no decision on one will ever reach the wire`,
+      );
+      onSnapshotHooks.push(() => {
+        for (const request of pendingApprovals.values()) {
+          if (request.fixture) broadcast(IPC.approvalRequested, request);
+        }
+      });
+    }
+
+    /**
+     * `--fixture-daemon-death=<ms>` — dev only. Runs the REAL invalidation.
+     *
+     * The brief asks what happens to an open card when the daemon dies. The
+     * honest way to answer that is to kill a daemon, and this session cannot:
+     * it may not start one (the two-daemon mistake forked the audit chain once
+     * already), and the owner's is not running.
+     *
+     * So this calls `invalidatePendingApprovals` — the identical function the
+     * connection handler calls, with the identical broadcast — on a timer. What
+     * it proves is that the invalidation path works end to end and what the
+     * card does when it fires. What it does NOT prove is that a real socket
+     * close reaches this function; that is one `if` in the status handler
+     * above, and it is stated as reasoning rather than as a measurement.
+     */
+    const deathAfterMs = (() => {
+      if (!isDev) return 0;
+      const flag = process.argv.find((a) => a.startsWith('--fixture-daemon-death='));
+      if (!flag) return 0;
+      const ms = Number.parseInt(flag.slice('--fixture-daemon-death='.length), 10);
+      return Number.isFinite(ms) && ms > 0 ? ms : 0;
+    })();
+    /**
+     * `--probe-permission-wire` — dev only. ONE frame, to answer one question.
+     *
+     * Item 1 of the brief: what does the daemon ACTUALLY accept to approve a
+     * pending action? `core/server.py` answers that in the source —
+     * `cmd.permission.respond` is in KNOWN_COMMANDS at line 125 but absent from
+     * the handler map at 485–493, so `_dispatch` falls through to line 495 and
+     * returns `err.internal`. This puts that on the wire instead of leaving it
+     * as a reading of somebody else's code.
+     *
+     * WHY THIS IS SAFE TO SEND AT A DAEMON I DO NOT OWN:
+     *   • It is a contract-legal command from a legitimate surface (§5.1).
+     *   • The requestId is deliberately synthetic and matches nothing, so it
+     *     cannot approve anything. There is nothing pending to approve.
+     *   • `decision` is `deny`. If a handler DID exist and did match something,
+     *     the outcome would be a refusal, never an execution. The probe is
+     *     built so that being wrong about the daemon still cannot run a red
+     *     action.
+     */
+    if (isDev && process.argv.includes('--probe-permission-wire')) {
+      let probed = false;
+      const probe = setInterval(() => {
+        if (probed) return;
+        if (connection?.current.phase !== 'connected') return;
+        probed = true;
+        clearInterval(probe);
+        const requestId = 'orb-wire-probe-not-a-real-request';
+        const result = connection.sendPermissionResponse(requestId, 'deny');
+        log(
+          result.ok
+            ? `PROBE sent cmd.permission.respond (synthetic id, decision=deny): ${result.frame}`
+            : `PROBE could not send: ${result.detail}`,
+        );
+      }, 500);
+      setTimeout(() => clearInterval(probe), 60_000);
+    }
+
+    if (deathAfterMs > 0) {
+      setTimeout(() => {
+        const n = invalidatePendingApprovals(
+          '--fixture-daemon-death fired (the real invalidation path, on a timer)',
+        );
+        log(`!! FIXTURE DAEMON DEATH: invalidated ${n} card(s)`);
+      }, deathAfterMs);
     }
 
     connection.start();

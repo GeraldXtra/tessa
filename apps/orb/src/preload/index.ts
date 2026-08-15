@@ -17,12 +17,15 @@ import { contextBridge, ipcRenderer, type IpcRendererEvent } from 'electron';
 
 import {
   IPC,
+  type ApprovalCleared,
+  type ApprovalDecision,
   type AuditEntry,
   type BootstrapInfo,
   type ConnectionStatus,
   type DaemonHealth,
   type MicState,
   type OrbNotification,
+  type PermissionRequest,
   type PtySession,
   type PttMode,
   type Snapshot,
@@ -92,6 +95,27 @@ const bridge: ZoeyBridge = {
   onTranscriptLine: subscribe<TranscriptLine>(IPC.transcriptLine),
   onMicState: subscribe<MicState>(IPC.micState),
   onNotification: subscribe<OrbNotification>(IPC.notify),
+  onApprovalRequested: subscribe<PermissionRequest>(IPC.approvalRequested),
+  onApprovalCleared: subscribe<ApprovalCleared>(IPC.approvalCleared),
+
+  /**
+   * The one channel on this bridge that carries a caller-supplied string.
+   *
+   * Narrowed here to the two values CONTRACT §5.1 lets a surface send —
+   * `expired` is the daemon's alone — and the requestId is passed through as a
+   * plain string because this side has no way to know which ids are real. That
+   * check belongs to main, which holds the pending map and will drop an id it
+   * never issued a card for. Narrowing here is defence in depth, not the guard.
+   */
+  respondToApproval: (requestId: string, decision: ApprovalDecision): void => {
+    if (decision !== 'approve' && decision !== 'deny') return;
+    if (typeof requestId !== 'string' || requestId.length === 0) return;
+    ipcRenderer.send(IPC.approvalRespond, { requestId, decision });
+  },
+
+  // Persistence only — the renderer has already repainted itself. Main
+  // re-validates the id, so the worst a bad value achieves is being ignored.
+  setTheme: (theme: string): void => ipcRenderer.send(IPC.themeSet, String(theme).slice(0, 32)),
 
   /**
    * An EDGE, not an action. Note what is NOT here: no `startRecording`, no way

@@ -21,7 +21,14 @@ import { AGENT_STATES, type AgentState } from '@zoey/protocol';
 import type { BootstrapInfo, SphereTier } from '../shared/ipc-contract.ts';
 import { parseDevScript, runDevScript } from './dev-drive.ts';
 import { tokenPx } from './design-tokens.ts';
+import { applyTheme, currentTheme, isThemeId, themeForKey, type ThemeId } from './theme.ts';
+import {
+  approvalArrived,
+  approvalCleared,
+  approvalsSweepExpired,
+} from './state/approval-store.ts';
 import { StateDwell } from './state/state-dwell.ts';
+import { ApprovalStack } from './layout/ApprovalCard.tsx';
 import { Drawer } from './layout/Drawer.tsx';
 import { DevOverlay } from './layout/DevOverlay.tsx';
 import { LastLine } from './layout/LastLine.tsx';
@@ -113,6 +120,23 @@ export function App() {
       if (!alive) return;
       setBootstrap(info);
 
+      /**
+       * Paint the theme before anything else in this callback.
+       *
+       * It rides the bootstrap rather than a push channel because a push
+       * arrives at whatever listener exists, and on first paint there is none —
+       * the theme would land a frame late and every launch would flash cyan
+       * before turning ember. Main has already validated the id; `isThemeId`
+       * here is the second half of that, because a main that sent something
+       * unexpected must produce a NAMED fallback rather than an unset accent.
+       */
+      const wanted: ThemeId = isThemeId(info.theme) ? info.theme : 'cyan';
+      const steps = applyTheme(wanted);
+      window.zoey.reportMetrics(
+        `THEME applied=${wanted} core=${steps.core} body=${steps.body} idle=${steps.idle} ` +
+          `reason="${info.themeReason}"${isThemeId(info.theme) ? '' : ` FALLBACK from ${JSON.stringify(info.theme)}`}`,
+      );
+
       // Validated against AGENT_STATES in main before it got here.
       if (info.forcedState) agentStateStore.set(info.forcedState as AgentState);
       if (info.devOverlay) setShowOverlay(true);
@@ -142,6 +166,9 @@ export function App() {
       // Unconditional, unlike the two above: `claimed: false` is a real answer
       // and must overwrite the placeholder, not be skipped as "empty".
       micStore.set(snap.mic);
+      // Approvals main was already holding. A red action that arrived while
+      // this bundle was parsing must not be left with no card.
+      for (const request of snap.approvals) approvalArrived(request);
     });
     const offConnection = window.zoey.onConnection((status) => {
       connectionStore.set(status);
@@ -165,6 +192,10 @@ export function App() {
     const offPty = window.zoey.onPtySessions((sessions) => ptySessionsStore.set(sessions));
     const offMic = window.zoey.onMicState((state) => micStore.set(state));
     const offNote = window.zoey.onNotification((note) => pushNotification(note));
+    const offApproval = window.zoey.onApprovalRequested((request) => approvalArrived(request));
+    const offApprovalCleared = window.zoey.onApprovalCleared((cleared) =>
+      approvalCleared(cleared.requestId, cleared.reason, cleared.decision),
+    );
     const offTranscript = window.zoey.onTranscriptLine((line) =>
       transcriptStore.set([...transcriptStore.get(), line].slice(-TRANSCRIPT_MAX)),
     );
@@ -207,6 +238,8 @@ export function App() {
       offTranscript();
       offMic();
       offNote();
+      offApproval();
+      offApprovalCleared();
       // A pending dwell timer outliving the listener would release a state
       // into a store nobody is reading and leave the sphere on it.
       dwell.dispose();
@@ -237,6 +270,62 @@ export function App() {
       body: `${mic.chord} is already held by another application. Push-to-talk still works while the Orb has focus.`,
     });
   }, [mic.mode, mic.chord, mic.chordRegistered]);
+
+  /**
+   * Ctrl+Shift+<letter> — the theme switcher. NOT dev-gated: this is the
+   * owner's display preference, not an instrument.
+   *
+   * A renderer keydown listener, deliberately not a `globalShortcut`. Taking
+   * five OS-wide chords away from every other application on the machine so the
+   * Orb can change colour would be indefensible, and the push-to-talk work
+   * already established what a global grab costs — it consumes the key even for
+   * the app the owner is typing into.
+   *
+   * `event.code` rather than `event.key`, so the letter is the PHYSICAL key and
+   * Shift does not turn it into an uppercase character that has to be matched
+   * separately.
+   */
+  useEffect(() => {
+    function onThemeKey(event: KeyboardEvent) {
+      if (!event.ctrlKey || !event.shiftKey || event.altKey) return;
+      const next = themeForKey(event.code, event.key);
+      if (!next || next === currentTheme()) return;
+      event.preventDefault();
+      const steps = applyTheme(next);
+      // Display first, persistence second, and they are separate concerns: the
+      // renderer owns what is on screen, main owns what survives a restart, and
+      // main refuses to write on an instrumented launch.
+      window.zoey.setTheme(next);
+      window.zoey.reportMetrics(
+        `THEME switched=${next} core=${steps.core} body=${steps.body} idle=${steps.idle}`,
+      );
+      // The sphere's colours are uniforms resolved once at construction, not
+      // CSS. Without this the chrome changes and the sphere does not.
+      engine?.retint();
+    }
+    window.addEventListener('keydown', onThemeKey);
+    return () => window.removeEventListener('keydown', onThemeKey);
+  }, [engine]);
+
+  /**
+   * Expiry sweep. CONTRACT §5.1 — the surface sends NOTHING when a window
+   * lapses; `expired` is a value only the daemon may produce.
+   *
+   * One interval over the whole list rather than a timer per card: the daemon's
+   * window is 30 minutes, so second-resolution is far finer than needed, and a
+   * timer per card is a timer to leak.
+   */
+  useEffect(() => {
+    const id = window.setInterval(() => {
+      const expired = approvalsSweepExpired();
+      for (const requestId of expired) {
+        window.zoey.reportMetrics(
+          `APPROVAL-EXPIRED ${requestId} — invalidated locally, nothing sent (CONTRACT §5.1)`,
+        );
+      }
+    }, 1000);
+    return () => window.clearInterval(id);
+  }, []);
 
   /**
    * The dev driver. Runs the real click handlers, no OS involved.
@@ -553,7 +642,13 @@ export function App() {
           )}
 
           {/* §R.2 — the HUD sits over the stage, never inside a drawer.
-              Both render nothing until they have something true to show. */}
+              All three render nothing until they have something true to show.
+
+              The approval stack is FIRST and sits above the others: it is the
+              only one of the three that is interrupting rather than ambient,
+              and a notification toast must never overlap the buttons of a red
+              action. */}
+          <ApprovalStack />
           <NotificationStack />
           <LastLine />
         </main>
