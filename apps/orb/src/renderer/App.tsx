@@ -25,6 +25,7 @@ import { applyTheme, currentTheme, isThemeId, themeForKey, type ThemeId } from '
 import {
   approvalArrived,
   approvalCleared,
+  approvalRefused,
   approvalsSweepExpired,
 } from './state/approval-store.ts';
 import { StateDwell } from './state/state-dwell.ts';
@@ -196,6 +197,18 @@ export function App() {
     const offApprovalCleared = window.zoey.onApprovalCleared((cleared) =>
       approvalCleared(cleared.requestId, cleared.reason, cleared.decision),
     );
+    const offApprovalRefused = window.zoey.onApprovalRefused((refusal) => {
+      approvalRefused(
+        refusal.requestId,
+        refusal.code,
+        refusal.message,
+        refusal.requestStillPending,
+      );
+      window.zoey.reportMetrics(
+        `APPROVAL-REFUSED ${refusal.requestId} code=${refusal.code} ` +
+          `stillPending=${refusal.requestStillPending}`,
+      );
+    });
     const offTranscript = window.zoey.onTranscriptLine((line) =>
       transcriptStore.set([...transcriptStore.get(), line].slice(-TRANSCRIPT_MAX)),
     );
@@ -240,6 +253,7 @@ export function App() {
       offNote();
       offApproval();
       offApprovalCleared();
+      offApprovalRefused();
       // A pending dwell timer outliving the listener would release a state
       // into a store nobody is reading and leave the sphere on it.
       dwell.dispose();

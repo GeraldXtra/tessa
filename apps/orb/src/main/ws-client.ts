@@ -221,6 +221,19 @@ export interface DaemonConnectionOptions {
    * only the daemon may produce.
    */
   onApprovalResolved: (requestId: string, decision: string, decidedBy: string) => void;
+  /** The daemon refused a decision. `code` is a CONTRACT §5.4 error code. */
+  onApprovalRefused: (requestId: string, code: string, message: string) => void;
+  /**
+   * A handshake completed. `instance` identifies the daemon PROCESS —
+   * `pid@startedAt` from runtime.json — not the connection.
+   *
+   * `res.hello`'s `sessionId` is per-connection and changes on every reconnect,
+   * so it cannot answer "is this the same daemon I was talking to". That
+   * question is the whole of Session 1's two rulings: a pending request
+   * survives MY disconnect but not the DAEMON's restart, and the only way to
+   * tell those apart is to know which process is on the other end.
+   */
+  onDaemonInstance: (instance: string, changed: boolean) => void;
   log: (message: string) => void;
 }
 
@@ -254,6 +267,12 @@ export class DaemonConnection {
 
   /** Digest of the (port, token) that was rejected with 4401. Never retried. */
   private rejectedCredential: string | null = null;
+
+  /** The runtime.json this socket was opened against. Holds pid + startedAt. */
+  private openedAgainst: RuntimeInfo | null = null;
+
+  /** `pid@startedAt` of the last daemon that completed a handshake. */
+  private lastDaemonInstance: string | null = null;
 
   /**
    * In-flight `cmd.voice.pushToTalk` frames, by correlation id.
@@ -353,12 +372,45 @@ export class DaemonConnection {
    * See ApprovalCard.tsx — an edited card refuses to approve rather than
    * sending this frame and authorising the original text.
    */
-  sendPermissionResponse(requestId: string, decision: ApprovalDecision): SendResult {
+  sendPermissionResponse(
+    requestId: string,
+    decision: ApprovalDecision,
+    editedArgs?: Record<string, unknown>,
+  ): SendResult {
     if (!this.socket || this.socket.readyState !== WebSocket.OPEN) {
       return { ok: false, detail: 'not connected to the daemon' };
     }
-    const frame = makeEnvelope('cmd.permission.respond', { requestId, decision });
+    /**
+     * `editedArgs` is spread in rather than always present.
+     *
+     * `makeEnvelope` is keyed on `PayloadMap`, and `CmdPermissionRespond` in
+     * packages/protocol does not yet declare the field — Session 1 added it to
+     * the daemon and CONTRACT §5.1, and `packages/protocol` is shared and
+     * locked, so this surface does not get to edit it. The cast is confined to
+     * this one object literal and the frame is still validated below.
+     *
+     * OMITTED, not sent as null or as an empty object, when he changed nothing:
+     * `resolve_edit` returns the original args untouched for `None`
+     * (approvals.py:116), and that is the path that produces a plain APPROVED
+     * audit line rather than APPROVED (EDITED).
+     */
+    const payload = {
+      requestId,
+      decision,
+      ...(editedArgs ? { editedArgs } : {}),
+    } as unknown as Parameters<typeof makeEnvelope<'cmd.permission.respond'>>[1];
+
+    const frame = makeEnvelope('cmd.permission.respond', payload);
+    if (!isEnvelope(frame)) {
+      return { ok: false, detail: 'built an invalid envelope' };
+    }
     const text = JSON.stringify(frame);
+    if (Buffer.byteLength(text, 'utf8') > MAX_FRAME_BYTES) {
+      // CONTRACT §1 caps a frame at 1 MiB. Refusing here rather than letting the
+      // daemon drop the connection: a closed socket over an oversized tweet
+      // would look like a crash and would take every other pending card with it.
+      return { ok: false, detail: 'the edited payload makes the frame too large to send' };
+    }
     this.pendingPermission.set(frame.id, requestId);
     this.socket.send(text);
     return { ok: true, frame: text };
@@ -423,6 +475,7 @@ export class DaemonConnection {
   }
 
   private open(info: RuntimeInfo): void {
+    this.openedAgainst = info;
     this.emit({ phase: 'connecting', detail: `port ${info.port}` });
 
     const socket = new WebSocket(`ws://127.0.0.1:${info.port}/v1`, {
@@ -562,6 +615,20 @@ export class DaemonConnection {
       const requestId = this.pendingPermission.get(parsed.corr) as string;
       this.pendingPermission.delete(parsed.corr);
       this.opts.log(`APPROVAL-REPLY for ${requestId}: ${scrub(JSON.stringify(parsed))}`);
+
+      if (parsed.type === 'res.ok') {
+        // The action RAN. `evt.permission.resolved` is broadcast by the daemon
+        // before this reply (server.py:1176) and clears the card, so there is
+        // nothing to do here but record what she said about it.
+        const spoken = (parsed.payload as { spoken?: unknown }).spoken;
+        if (typeof spoken === 'string' && spoken) this.opts.log(`  she said: ${spoken}`);
+        return;
+      }
+
+      const payload = parsed.payload as { code?: unknown; message?: unknown };
+      const code = typeof payload.code === 'string' ? payload.code : parsed.type.replace(/^err\./, '');
+      const message = typeof payload.message === 'string' ? payload.message : parsed.type;
+      this.opts.onApprovalRefused(requestId, code, scrub(message));
       return;
     }
 
@@ -827,6 +894,34 @@ export class DaemonConnection {
     this.opts.log(
       `connected — daemon ${payload.daemonVersion}, session ${payload.sessionId.slice(0, 8)}`,
     );
+
+    /**
+     * WHICH DAEMON IS THIS, and is it the one I was talking to before?
+     *
+     * Identity is `pid@startedAt` from runtime.json. Both halves are needed:
+     * Windows reuses pids, and `startedAt` alone would collide if two daemons
+     * were ever launched in the same millisecond. The token would also work —
+     * it rotates per launch (CONTRACT §2.3) — but it must never leave
+     * runtime-file.ts, and building an identity out of a secret invites it into
+     * a log line eventually.
+     *
+     * Announced on EVERY handshake, with `changed` telling main which of
+     * Session 1's two rulings applies. Same instance: the requests it is holding
+     * are still live, keep the cards. Different instance: everything the old one
+     * held is gone with the process.
+     */
+    const instance = this.openedAgainst
+      ? `${this.openedAgainst.pid}@${this.openedAgainst.startedAt}`
+      : 'unknown';
+    const changed = this.lastDaemonInstance !== null && this.lastDaemonInstance !== instance;
+    if (changed) {
+      this.opts.log(
+        `daemon instance changed: was ${this.lastDaemonInstance}, now ${instance} — ` +
+          `anything it was holding is gone`,
+      );
+    }
+    this.lastDaemonInstance = instance;
+    this.opts.onDaemonInstance(instance, changed);
 
     // Subscribe only after the handshake is accepted. A cmd.* before a
     // successful cmd.hello earns err.auth.required (CONTRACT §5.4), and the

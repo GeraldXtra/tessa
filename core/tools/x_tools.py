@@ -327,8 +327,11 @@ def post(text: str, _approved_by_surface: bool = False) -> dict[str, Any]:
     if not _approved_by_surface:
         # Defence in depth. The executor already stopped this; if a future
         # caller reaches the handler directly, it still refuses.
-        raise ToolError("posting needs the approval card, which does not exist yet",
-                        "Nothing was published.")
+        # The card EXISTS now (Session 2 shipped it); what this branch means is
+        # that the handler was reached WITHOUT going through it. Defence in
+        # depth, and the message says which of the two it is.
+        raise ToolError("that reached the post handler without an approval",
+                        "Nothing was published. Approve it on the card.")
 
     _require_signed_in()
     page = _page()
@@ -357,8 +360,8 @@ def reply(text: str, index: int = 1, _approved_by_surface: bool = False) -> dict
         raise ToolError(f"that is {len(body)} characters, over X's {MAX_POST_CHARS}",
                         "Shorten it and I will hold it again.")
     if not _approved_by_surface:
-        raise ToolError("replying needs the approval card, which does not exist yet",
-                        "Nothing was published.")
+        raise ToolError("that reached the reply handler without an approval",
+                        "Nothing was published. Approve it on the card.")
 
     _require_signed_in()
     page = _page()

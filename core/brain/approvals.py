@@ -166,16 +166,48 @@ class ApprovalGate:
         self._on_request = on_request
         self.pending: dict[str, PendingApproval] = {}
 
+    #: How many requests may be outstanding at once.
+    #:
+    #: BOUNDED FOR THE SAME REASON THE EDITED PAYLOAD IS. Every red-tier
+    #: utterance creates a PendingApproval that lives thirty minutes, and
+    #: nothing was capping them — say "tweet that" forty times and forty
+    #: records sit in memory holding forty argument dicts. It is not a large
+    #: leak and it is still an unbounded one, in a daemon that holds his
+    #: microphone.
+    #:
+    #: 32 is far more than he can generate deliberately and small enough that
+    #: the card list stays readable. Over it, the OLDEST is dropped: the newest
+    #: request is the one he is looking at, and a thirty-minute-old approval he
+    #: never answered is one he has moved on from.
+    MAX_PENDING = 32
+
     def request(self, *, tool: str, args: dict[str, Any], tier: str,
                 provenance: str = "human", detail: str = "") -> PendingApproval:
+        # 128 BITS, NOT A ULID, and this is where I differ from Session 2's
+        # proposal. A ULID is the right shape for an envelope `id` — sortable,
+        # timestamped, and CONTRACT §3 already mandates one there. It is the
+        # wrong shape for THIS, because a requestId is a capability handle for a
+        # red-tier execution: its timestamp prefix leaks when the request was
+        # made, and its 80 bits of randomness are chosen for collision
+        # resistance rather than for being unguessable.
+        #
+        # `token_hex(16)` is 128 bits from the CSPRNG, and it was 64 — doubled,
+        # because the cost is sixteen characters on the wire and the property
+        # asked for was "unguessable enough that one surface cannot decide
+        # another's request by accident."
         req = PendingApproval(
-            request_id=secrets.token_hex(8), tool=tool,
+            request_id=secrets.token_hex(16), tool=tool,
             # The token is never in here, but arguments can carry a path or a
             # command he would not want echoed to a log twice. They are recorded
             # once, on the request, and the audit layer redacts before write.
             args=dict(args), tier=tier, provenance=provenance, detail=detail,
         )
         self.pending[req.request_id] = req
+        # Sweep the dead, then bound the living. Oldest out.
+        self.sweep()
+        while len(self.pending) > self.MAX_PENDING:
+            oldest = min(self.pending.values(), key=lambda r: r.at)
+            self.pending.pop(oldest.request_id, None)
         if self._on_request is not None:
             try:
                 self._on_request({
@@ -185,7 +217,7 @@ class ApprovalGate:
                     "args": req.args,
                     # CONTRACT §6.2: provenance is REQUIRED, never optional.
                     "provenance": provenance,
-                    "expiresAt": _iso_in(APPROVAL_WINDOW_S),
+                    "expiresAt": iso_in(APPROVAL_WINDOW_S),
                 })
             except Exception:  # noqa: BLE001
                 # A broadcast failure must not become an execution.
@@ -198,8 +230,27 @@ class ApprovalGate:
             self.pending.pop(r.request_id, None)
         return gone
 
+    def sweep_and_list(self) -> list[PendingApproval]:
+        """
+        The live ones, oldest first, with the dead removed on the way past.
 
-def _iso_in(seconds: float) -> str:
+        WHAT HAPPENS WHEN THE REQUESTING SURFACE DISCONNECTS: nothing. The
+        request is NOT bound to the socket that caused it. CONTRACT §4.1 says
+        either surface may render the approval card, so tying a pending action
+        to one connection would mean the Console could not answer a request the
+        Orb raised — and would also mean a reconnect silently destroyed a
+        decision he was in the middle of making.
+
+        It therefore survives the disconnect and lives until one of three
+        things: he decides it, the 30-minute window closes (§5 rule 5), or the
+        daemon stops. It is never orphaned, because nothing owns it but the
+        clock.
+        """
+        self.sweep()
+        return sorted(self.pending.values(), key=lambda r: r.at)
+
+
+def iso_in(seconds: float) -> str:
     from datetime import datetime, timedelta, timezone
 
     return (datetime.now(timezone.utc) + timedelta(seconds=seconds)) \
@@ -213,7 +264,22 @@ def _iso_in(seconds: float) -> str:
 #: deliberate rather than a failure, and say what would change it. A refusal he
 #: reads as a bug gets worked around; a refusal he understands gets respected.
 def red_refusal(tool: str, detail: str) -> str:
+    """
+    THE OLD VERSION SAID "the approval card does not exist yet", AND THAT
+    BECAME FALSE.
+
+    It was true when written — the card was P5 and unbuilt. Session 2 has since
+    shipped `ApprovalCard.tsx`, the Orb subscribes to `permission.*`, and this
+    daemon now answers `cmd.permission.respond`. The broadcast fires from
+    `ApprovalGate.request` BEFORE this sentence is returned, so the card is
+    already on his screen at the moment Piper tells him the mechanism is
+    unbuilt.
+
+    A control the owner has been told is not real is a control he will not use.
+    Found by an adversarial review reading both sides of the repo, which is
+    exactly the kind of drift a single session cannot see.
+    """
     what = detail.strip().rstrip(".") if detail else tool
     return (f"I have it ready, Emperor — {what}. I am not doing it on your voice alone. "
-            f"That one needs the approval card, and it does not exist yet. "
-            f"It is logged and waiting.")
+            f"Check it on the card and approve it there. You can correct the wording "
+            f"before it goes.")

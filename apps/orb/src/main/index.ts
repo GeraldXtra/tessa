@@ -333,6 +333,21 @@ if (!app.requestSingleInstanceLock()) {
    */
   const pendingApprovals = new Map<string, PermissionRequest>();
 
+  /**
+   * Decisions that are on the wire and have not been answered yet.
+   *
+   * The one-shot rule deletes from `pendingApprovals` BEFORE the send, so a
+   * second message with the same id finds nothing. That is still exactly right,
+   * and it left a gap: when the daemon refuses an edit it puts the request back
+   * on ITS side, and main had already thrown away the only copy it had of the
+   * request — so the card could not be restored and he would lose a correction
+   * he had already typed once.
+   *
+   * This holds it for the round trip and nothing longer. An entry leaves on the
+   * reply, on a resolution, or with the daemon instance.
+   */
+  const refusableApprovals = new Map<string, PermissionRequest>();
+
   app.on('second-instance', () => {
     const [existing] = BrowserWindow.getAllWindows();
     if (existing) {
@@ -433,14 +448,18 @@ if (!app.requestSingleInstanceLock()) {
      */
     const invalidatePendingApprovals = (why: string): number => {
       if (pendingApprovals.size === 0) return 0;
-      const ids = [...pendingApprovals.keys()];
+      const ids = [...new Set([...pendingApprovals.keys(), ...refusableApprovals.keys()])];
       pendingApprovals.clear();
+      // Anything mid-flight dies with the daemon too — its reply can never
+      // arrive over a socket that closed, and the process it was addressed to
+      // no longer exists.
+      refusableApprovals.clear();
       log(
         `INVALIDATING ${ids.length} pending approval(s) — ${why}. ` +
           `ids: ${ids.join(', ')}. The daemon no longer holds them.`,
       );
       for (const requestId of ids) {
-        broadcast(IPC.approvalCleared, { requestId, reason: 'disconnected' });
+        broadcast(IPC.approvalCleared, { requestId, reason: 'daemonRestarted' });
       }
       return ids.length;
     };
@@ -649,9 +668,72 @@ if (!app.requestSingleInstanceLock()) {
         broadcast(IPC.approvalRequested, request);
       },
 
+      /**
+       * A handshake completed. Apply whichever of Session 1's two rulings fits.
+       *
+       * `changed === false` on a reconnect is the case that used to be handled
+       * wrongly: the same daemon is still holding the same requests, so the
+       * cards that survived the outage are legitimate and become actionable
+       * again with no further ceremony.
+       */
+      onDaemonInstance: (instance, changed) => {
+        if (!changed) {
+          if (pendingApprovals.size > 0) {
+            log(
+              `daemon instance ${instance} unchanged — ${pendingApprovals.size} card(s) are ` +
+                `still live and actionable again`,
+            );
+          }
+          return;
+        }
+        invalidatePendingApprovals(
+          `the daemon restarted (now ${instance}); a new process has forgotten every ` +
+            `request the old one held`,
+        );
+      },
+
+      /**
+       * The daemon refused. Whether the card comes back depends entirely on
+       * whether the daemon put the request back, and that is not guesswork —
+       * `core/brain/executor.py::execute_approved` pops the request first and
+       * restores it on exactly one path.
+       *
+       *   protocol.badEnvelope  `resolve_edit` rejected the edit — a key that
+       *                         was not in the request, a changed type, or over
+       *                         the 16 KB cap. executor.py restores the request
+       *                         (`self.approvals.pending[request_id] = pending`)
+       *                         so he does not lose a correction he already
+       *                         made. The card MUST come back, with his text.
+       *   notFound              never was, or already answered. Gone.
+       *   permission.expired    the 30-minute window closed. Gone.
+       *   internal              two sub-cases, both gone: the tool ran and
+       *                         failed on its own terms (NOT restored — an
+       *                         attempted action must not be re-offered), or
+       *                         the tool has no executor wired.
+       */
+      onApprovalRefused: (requestId, code, message) => {
+        const stillPending = code === 'protocol.badEnvelope';
+        if (stillPending) {
+          const request = refusableApprovals.get(requestId);
+          if (request) pendingApprovals.set(requestId, request);
+        }
+        refusableApprovals.delete(requestId);
+        log(
+          `approval REFUSED ${requestId}: ${code} — ${message} ` +
+            `(request ${stillPending ? 'is still pending, card restored' : 'is gone'})`,
+        );
+        broadcast(IPC.approvalRefused, {
+          requestId,
+          code,
+          message,
+          requestStillPending: stillPending,
+        });
+      },
+
       onApprovalResolved: (requestId, decision, decidedBy) => {
         // May be the Console answering, or the daemon expiring it. Either way
         // this request is gone and the card must not stay approvable.
+        refusableApprovals.delete(requestId);
         const had = pendingApprovals.delete(requestId);
         log(
           `approval resolved: ${requestId} → ${decision} by ${decidedBy}` +
@@ -670,26 +752,31 @@ if (!app.requestSingleInstanceLock()) {
           log(`connection: ${status.phase}${status.detail ? ` — ${status.detail}` : ''}`);
 
           /**
-           * THE DAEMON IS GONE, AND SO IS EVERY PENDING REQUEST.
+           * A DROPPED SOCKET NO LONGER CLEARS ANYTHING, and that reversal is
+           * the important part of this revision.
            *
-           * The daemon holds approvals in memory — core/brain/approvals.py is
-           * an `ApprovalGate` with a plain dict and no persistence. When the
-           * socket drops, whatever it was holding is gone, and a card still
-           * offering APPROVE is offering to authorise something that no longer
-           * exists.
+           * The previous build invalidated every card the moment the link went
+           * down. Session 1 has since ruled that a pending request SURVIVES the
+           * deciding surface's disconnect: the daemon keeps holding it and any
+           * surface may decide it. So clearing here destroyed cards for actions
+           * that were still live and still waiting on him — and worse, it did
+           * so silently enough to look correct.
            *
-           * Nothing daemon-side cleans this up. There is no shutdown broadcast
-           * that clears cards, and `evt.permission.resolved` cannot arrive over
-           * a socket that has closed. The Orb invalidating its own is the ONLY
-           * thing that clears them.
+           * What actually kills a request is the DAEMON restarting, because
+           * `ApprovalGate.pending` is an in-memory dict rebuilt per process.
+           * That is detected on the next handshake by comparing the daemon
+           * instance, not here. See `onDaemonInstance`.
            *
-           * Gated on the phase CHANGING, not merely being non-connected. While
-           * there is no daemon, `attempt()` re-emits `offline` every 2 s as it
-           * re-reads runtime.json — running this on every emit would be a
-           * pointless sweep twice a second forever.
+           * The cards stay, and go un-actionable instead: main will refuse to
+           * send with no socket, and the renderer greys them and says the link
+           * is down rather than pretending they can still be answered.
            */
-          if (status.phase !== 'connected' && from !== null) {
-            invalidatePendingApprovals(`the connection went ${status.phase}`);
+          if (status.phase !== 'connected' && from !== null && pendingApprovals.size > 0) {
+            log(
+              `connection is ${status.phase} with ${pendingApprovals.size} approval(s) open — ` +
+                `KEEPING them. A pending request survives this surface's disconnect ` +
+                `(it dies only if the daemon restarts).`,
+            );
           }
         }
         for (const window of BrowserWindow.getAllWindows()) {
@@ -734,10 +821,36 @@ if (!app.requestSingleInstanceLock()) {
      */
     ipcMain.on(IPC.approvalRespond, (_event, message: unknown) => {
       if (typeof message !== 'object' || message === null) return;
-      const { requestId, decision } = message as { requestId?: unknown; decision?: unknown };
+      const { requestId, decision, editedArgs } = message as {
+        requestId?: unknown;
+        decision?: unknown;
+        editedArgs?: unknown;
+      };
       if (typeof requestId !== 'string' || !requestId) return;
       if (decision !== 'approve' && decision !== 'deny') {
         log(`!! refused an approval response with decision=${JSON.stringify(decision)}`);
+        return;
+      }
+      /**
+       * `editedArgs` must be a plain object or absent. Arrays excluded on
+       * purpose: `resolve_edit` does `set(edited) - set(pending.args)` on it,
+       * and an array's "keys" are indices, so `["x"]` would reach the daemon as
+       * an unknown-key refusal rather than as the type error it is. Refusing it
+       * here says the true thing one hop earlier.
+       */
+      const edited =
+        typeof editedArgs === 'object' && editedArgs !== null && !Array.isArray(editedArgs)
+          ? (editedArgs as Record<string, unknown>)
+          : undefined;
+      if (editedArgs !== undefined && edited === undefined) {
+        log(`!! refused an approval response whose editedArgs was not a plain object`);
+        return;
+      }
+      if (edited && decision === 'deny') {
+        // Nonsensical, and worth refusing rather than quietly dropping: a deny
+        // executes nothing, so edited arguments attached to one can only mean
+        // the surface has confused two code paths.
+        log(`!! refused a 'deny' carrying editedArgs for ${requestId}`);
         return;
       }
 
@@ -754,29 +867,45 @@ if (!app.requestSingleInstanceLock()) {
       }
 
       // Delete BEFORE the send. Everything after this point is unreachable for
-      // a second message carrying the same id.
+      // a second message carrying the same id. Kept aside so a refused edit can
+      // put the card back — see refusableApprovals.
       pendingApprovals.delete(requestId);
+      refusableApprovals.set(requestId, request);
 
       if (request.fixture) {
         log(
-          `FIXTURE approval '${decision}' for ${requestId} — NOT sent to the daemon. ` +
-            `There is no daemon request behind a fixture card.`,
+          `FIXTURE approval '${decision}'${edited ? ' (EDITED)' : ''} for ${requestId} — ` +
+            `NOT sent to the daemon. There is no daemon request behind a fixture card.`,
         );
+        refusableApprovals.delete(requestId);
         broadcast(IPC.approvalCleared, { requestId, reason: 'resolved', decision });
         return;
       }
 
-      const result = connection?.sendPermissionResponse(requestId, decision) ?? {
+      const result = connection?.sendPermissionResponse(requestId, decision, edited) ?? {
         ok: false as const,
         detail: 'no connection object',
       };
       if (result.ok) {
         // The literal frame, so what went on the wire can be read out of the
-        // log rather than inferred from the code that built it.
+        // log rather than inferred from the code that built it. The ARGUMENT
+        // VALUES are in it, and that is deliberate here and only here: this is
+        // the record of what he authorised, and it is the one line that answers
+        // "what did the Orb actually send".
         log(`APPROVAL-OUT ${result.frame}`);
       } else {
+        // Nothing left the machine, so the request is untouched daemon-side.
+        // Put it straight back rather than clearing: under Session 1's ruling 2
+        // it is still pending and still his to answer once the link returns.
         log(`!! could not send approval '${decision}' for ${requestId}: ${result.detail}`);
-        broadcast(IPC.approvalCleared, { requestId, reason: 'disconnected' });
+        refusableApprovals.delete(requestId);
+        pendingApprovals.set(requestId, request);
+        broadcast(IPC.approvalRefused, {
+          requestId,
+          code: 'unavailable',
+          message: result.detail,
+          requestStillPending: true,
+        });
       }
     });
 
@@ -1080,18 +1209,65 @@ if (!app.requestSingleInstanceLock()) {
      *     built so that being wrong about the daemon still cannot run a red
      *     action.
      */
-    if (isDev && process.argv.includes('--probe-permission-wire')) {
+    const wireProbe = isDev
+      ? process.argv.find((a) => a === '--probe-permission-wire' || a.startsWith('--probe-permission-wire='))
+      : undefined;
+    if (wireProbe) {
+      /**
+       * Optional value: `--probe-permission-wire=<requestId>`.
+       *
+       * With no value it sends a synthetic id and `deny`. With one it sends
+       * `approve` AND an `editedArgs` object for that id, which is how the
+       * card's refusal rendering gets exercised by a real daemon error rather
+       * than by a store call: point it at a fixture card's id, and the reply
+       * comes back through `onApprovalRefused` and lands on that actual card.
+       *
+       * SAFE TO AIM AT A LIVE DAEMON, and the ordering is why. The handler
+       * looks the request up BEFORE it looks at anything else
+       * (`core/server.py:1108`), so a `requestId` that is not pending returns
+       * `err.notFound` and never reaches `execute_approved`. The ids used here
+       * are `fixture-…` strings, and a real one is `secrets.token_hex(16)` —
+       * 32 hex characters — so a collision is not merely unlikely, it is
+       * structurally impossible.
+       */
+      const target = wireProbe.includes('=')
+        ? wireProbe.slice(wireProbe.indexOf('=') + 1)
+        : '';
+      /**
+       * Wait for the RENDERER, not just for the socket.
+       *
+       * The first run of this probe fired ~4 ms after the handshake, which is
+       * long before the 725 kB bundle has parsed and registered
+       * `onApprovalRefused`. The daemon's refusal arrived, main classified it
+       * correctly, and it was broadcast at a window with no listener — so the
+       * log said REFUSED and the card showed nothing. That is the same race
+       * that once lost the audit history and half the transcript fixture.
+       *
+       * It is a PROBE artefact and not a product defect: in the real flow the
+       * only thing that can provoke a refusal is a decision the renderer just
+       * sent, so the renderer is mounted by construction. The probe is the one
+       * caller that can talk to the daemon with nobody listening, so the probe
+       * is what has to wait.
+       */
+      let rendererUp = false;
+      onSnapshotHooks.push(() => {
+        rendererUp = true;
+      });
       let probed = false;
       const probe = setInterval(() => {
-        if (probed) return;
+        if (probed || !rendererUp) return;
         if (connection?.current.phase !== 'connected') return;
         probed = true;
         clearInterval(probe);
-        const requestId = 'orb-wire-probe-not-a-real-request';
-        const result = connection.sendPermissionResponse(requestId, 'deny');
+        const requestId = target || 'orb-wire-probe-not-a-real-request';
+        const result = target
+          ? connection.sendPermissionResponse(requestId, 'approve', {
+              text: 'PROBE edited value — this request does not exist daemon-side',
+            })
+          : connection.sendPermissionResponse(requestId, 'deny');
         log(
           result.ok
-            ? `PROBE sent cmd.permission.respond (synthetic id, decision=deny): ${result.frame}`
+            ? `PROBE sent cmd.permission.respond${target ? ' WITH editedArgs' : ''}: ${result.frame}`
             : `PROBE could not send: ${result.detail}`,
         );
       }, 500);

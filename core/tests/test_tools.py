@@ -92,14 +92,19 @@ def main() -> int:
     ex_red = Executor(session=SessionContext())
     for attempt in range(3):          # saying it again must NOT unlock it
         said_red = ex_red.run(ToolCall(name="fs.delete", args={"path": str(victim2)}))
+    # ASSERT THE BEHAVIOUR, NOT THE SENTENCE. The refusal used to say "the
+    # approval card does not exist yet", which became false once Session 2
+    # shipped the card. What must stay true is that she did NOT do it and she
+    # pointed him at the card.
     check("fs.delete via the executor refuses on voice alone",
-          "approval card" in said_red, said_red[:70])
+          "not doing it on your voice alone" in said_red and "card" in said_red,
+          said_red[:70])
     check("...and the file is untouched after three attempts", victim2.exists())
     check("...and every attempt raised a permission request",
           len(ex_red.approvals.pending) == 3)
     said_yes = ex_red.answer_confirmation("yes")
     check("...and a bare 'yes' does not execute it either",
-          said_yes is None or "approval card" in said_yes)
+          said_yes is None or "voice alone" in said_yes)
     check("...file STILL untouched", victim2.exists())
     victim2.unlink(missing_ok=True)
 
@@ -109,7 +114,9 @@ def main() -> int:
                                ("browser.submit", {})]:
         out_red = Executor(session=SessionContext()).run(
             ToolCall(name=red_tool, args=red_args))
-        check(f"{red_tool} is gated the same way", "approval card" in out_red, out_red[:60])
+        check(f"{red_tool} is gated the same way",
+              "not doing it on your voice alone" in out_red and "card" in out_red,
+              out_red[:60])
     # AST, NOT GREP. The first version of this check searched the source text
     # and failed on files.py's own docstring, which NAMES the calls it promises
     # never to make. A test that cannot tell a prohibition from a violation is

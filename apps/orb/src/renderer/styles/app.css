@@ -610,17 +610,36 @@ ol {
   font-variant-numeric: tabular-nums;
 }
 
-/* ── the three explanatory bands, all flex:none so they never eat the payload ── */
-.approval__blocked,
+/* ── the explanatory bands, all flex:none so they never eat the payload ── */
+.approval__size,
+.approval__refused,
 .approval__void,
-.approval__sent {
+.approval__sent,
+.approval__waiting {
   flex: none;
   margin: var(--sp-2) var(--sp-3) 0;
   font-size: var(--fs-label);
   line-height: var(--lh-tight);
 }
 
-.approval__blocked {
+/* Neutral while the edit is within budget; a warning once it is not. The size
+   is stated BEFORE he presses approve, because a limit he can see coming is a
+   limit and a refusal that arrives afterwards is a bug as far as he is
+   concerned. */
+.approval__size {
+  color: var(--text-muted);
+}
+.approval__size[data-over='true'] {
+  color: var(--status-warn);
+}
+
+.approval__refused {
+  color: var(--status-error);
+}
+
+/* The link is down but the request is not. Muted rather than alarming: nothing
+   has gone wrong with the ACTION, only with this window's ability to answer. */
+.approval__waiting {
   color: var(--status-warn);
 }
 .approval__void {

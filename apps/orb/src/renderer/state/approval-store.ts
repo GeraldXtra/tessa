@@ -70,6 +70,15 @@ export interface ApprovalEntry {
   resolved: string | null;
   /** Why this card can no longer be acted on. Rule 5. */
   invalidated: ApprovalClearReason | null;
+  /**
+   * The daemon's last refusal of a decision on THIS card, if any.
+   *
+   * Kept on the entry rather than shown as a notification, because the refusal
+   * is about this specific payload and he is about to edit that payload again.
+   * A toast that fades in eight seconds is the wrong place for the reason his
+   * correction was rejected.
+   */
+  refusal: { code: string; message: string } | null;
 }
 
 /** Oldest first — the order they arrived, which is the order they expire. */
@@ -111,8 +120,35 @@ export function approvalArrived(request: PermissionRequest): void {
   }
   approvalsStore.set([
     ...list,
-    { request, edits: {}, sent: null, resolved: null, invalidated: null },
+    { request, edits: {}, sent: null, resolved: null, invalidated: null, refusal: null },
   ]);
+}
+
+/**
+ * The daemon refused a decision on this card.
+ *
+ * When the request is still pending — a rejected edit, which
+ * `execute_approved` restores before re-raising — `sent` is cleared so the card
+ * becomes actionable again, and **the edits are kept**. He corrected a mangled
+ * dictation once; making him do it twice because the first attempt was one byte
+ * over a limit would be the surface punishing him for its own message.
+ *
+ * When it is not pending, the card is invalidated instead and the message stays
+ * on screen so the refusal is readable rather than inferred from a card that
+ * simply disappeared.
+ */
+export function approvalRefused(
+  requestId: string,
+  code: string,
+  message: string,
+  requestStillPending: boolean,
+): void {
+  update(requestId, (entry) => ({
+    ...entry,
+    refusal: { code, message },
+    sent: requestStillPending ? null : entry.sent,
+    invalidated: requestStillPending ? null : (entry.invalidated ?? 'resolved'),
+  }));
 }
 
 export function approvalEdited(requestId: string, key: string, value: string): void {
@@ -220,9 +256,51 @@ export function isFieldEdited(entry: ApprovalEntry, key: string): boolean {
   return edit !== entry.request.args[key];
 }
 
-/** Has ANY argument been changed? Gates APPROVE — see ApprovalCard.tsx. */
+/** Has ANY argument been changed? */
 export function isEdited(entry: ApprovalEntry): boolean {
   return Object.keys(entry.edits).some((key) => isFieldEdited(entry, key));
+}
+
+/**
+ * The `editedArgs` payload for CONTRACT §5.1, or `undefined` when nothing
+ * changed.
+ *
+ * ONLY THE KEYS HE ACTUALLY CHANGED. `resolve_edit` merges into a copy of the
+ * original (`core/brain/approvals.py:142`), so sending the untouched ones adds
+ * nothing but bytes against the 16 KB cap — and every key sent is a key that
+ * has to pass the subset and type checks, so a smaller payload is a smaller
+ * surface for a refusal he did not cause.
+ *
+ * `undefined` rather than `{}` when unchanged: the daemon's `was_edited` is
+ * computed by comparing merged args to the original, and an empty object would
+ * still be a present field. Absent is what produces a plain `APPROVED` audit
+ * line instead of `APPROVED (EDITED)`.
+ */
+export function editedArgsFor(entry: ApprovalEntry): Record<string, unknown> | undefined {
+  const out: Record<string, unknown> = {};
+  let any = false;
+  for (const key of Object.keys(entry.edits)) {
+    if (!isFieldEdited(entry, key)) continue;
+    out[key] = entry.edits[key];
+    any = true;
+  }
+  return any ? out : undefined;
+}
+
+/**
+ * Bytes `editedArgs` would occupy, measured the way the daemon measures it.
+ *
+ * `core/brain/approvals.py:126` does `len(json.dumps(edited,
+ * ensure_ascii=False).encode('utf-8'))` against a 16 KB cap. Shown on the card
+ * as it approaches, because a refusal he can see coming is a limit; a refusal
+ * that arrives after he presses APPROVE is a bug as far as he is concerned.
+ */
+export const MAX_EDITED_ARGS_BYTES = 16 * 1024;
+
+export function editedArgsBytes(entry: ApprovalEntry): number {
+  const edited = editedArgsFor(entry);
+  if (!edited) return 0;
+  return new TextEncoder().encode(JSON.stringify(edited)).length;
 }
 
 /** Can this card still be acted on at all? */

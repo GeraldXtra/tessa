@@ -306,7 +306,7 @@ Every captured byte and every action carries a provenance tag:
 ### 6.3 Filesystem
 
 - **Indexing is metadata-only.** Name, size, mtime, attributes, reparse tag. **Never open a file to read content during indexing.**
-- **Never read content from a reparse point.** The owner's OneDrive tree contains **17,340** of them; reading a dehydrated placeholder triggers a download on a metered connection with limited free disk.
+- **Never read content from a reparse point.** the target machine's cloud-sync tree tree contains **17,340** of them; reading a dehydrated placeholder triggers a download on a metered connection with limited free disk.
 - **OneDrive is excluded from content indexing by default.** Opt-in per folder, never recursive-by-default.
 - **Hydration is an amber-tier action.** Cost is computed from attributes alone as `EndOfFile − AllocationSize`, surfaced via `evt.fs.hydrationWarning` before any recall happens.
 - Deletion is **Recycle Bin only. Never hard delete.** *(ZOEY_OS-spec §3.3.)*

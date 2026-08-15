@@ -410,7 +410,7 @@ _BROWSER = [
         phrasings=("submit the form", "send that form"),
         success="Submitted, Emperor.",
         audit="SUBMIT form on {url}",
-        note="RED (spec §7.2). Gated on the approval surface — does not execute.",
+        note="RED (spec §7.2). Gated on the approval surface: executes ONLY via cmd.permission.respond.",
     ),
 ]
 
@@ -464,7 +464,7 @@ _X = [
         phrasings=("tweet that", "post this to x", "put that on twitter"),
         success="Posted, Emperor. {chars} characters.",
         audit="POST to x: {text}",
-        note="RED. Fully built, gated on the approval surface — does not execute.",
+        note="RED. Executes ONLY via cmd.permission.respond, never from voice.",
     ),
     _spec(
         name="x.reply", tier="red", capability="x.publish",
@@ -472,7 +472,7 @@ _X = [
         phrasings=("reply to that", "answer post two", "respond to the first one"),
         success="Replied, Emperor.",
         audit="REPLY to x post {index}: {text}",
-        note="RED. Fully built, gated on the approval surface — does not execute.",
+        note="RED. Executes ONLY via cmd.permission.respond, never from voice.",
     ),
 ]
 

@@ -213,7 +213,7 @@ See `CONTRACT.md` §6 for the invariants binding **both** surfaces. Console-spec
 1. **WS auth** — loopback bind + Origin allowlist + per-launch token + 3 s handshake deadline (CONTRACT §2). Without this any webpage commands the agent.
 2. **Electron hardening** — `contextIsolation: true`, `nodeIntegration: false`, `sandbox: true`, no remote module, strict CSP. Token stays in main.
 3. **Audit log from commit one** — append-only, hash-chained, every command tagged `actor ∈ {user, agent, schedule}`. **Retrofitting provenance is impossible — the information is gone by then.**
-4. **Protected paths** — `C:\dev\zoey`, `C:\Users\SERIOUS-PC\OneDrive`, and system directories, marked in `permissions.yaml`. Writes/deletes there confirm regardless of origin.
+4. **Protected paths** — `C:\dev\zoey`, `C:\Users\<user>\OneDrive`, and system directories, marked in `permissions.yaml`. Writes/deletes there confirm regardless of origin.
 5. **Secret redaction before any write** — history, logs, session records. A secret written unredacted once is leaked permanently.
 
 ### 5.2 Honest residual risk ⚪
@@ -314,7 +314,7 @@ Rejected deliberately. Do not re-litigate.
 - Unknown-type test: `cmd.nonexistent.thing` → `err.protocol.unknownType`, **connection stays open**. An unknown field in a known payload is ignored.
 
 **Phase 1 — it actually works**
-- `npm install` in a scratch dir; **`npm install -g <pkg>` lands in `C:\Users\SERIOUS-PC\AppData\Roaming\npm\node_modules`**; `pip install --user` succeeds.
+- `npm install` in a scratch dir; **`npm install -g <pkg>` lands in `C:\Users\<user>\AppData\Roaming\npm\node_modules`**; `pip install --user` succeeds.
 - `claude` runs interactively in a tab and renders correctly.
 - Ctrl+C interrupts `ping -t`. Closing a tab running a dev server frees port 3000 (`netstat -ano | findstr :3000` empty).
 - Every profile launches: cmd, PowerShell 5.1, Git Bash, `Ubuntu-22.04`, `docker-desktop`.

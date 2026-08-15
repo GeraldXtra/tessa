@@ -622,9 +622,10 @@ def submit(confirmed: bool = False) -> dict[str, Any]:
     """
     RED (spec §7.2), and it HOLDS — and then it still does not run.
 
-    See `core/tools/__init__.py`: red tools are gated on an approval surface
-    that does not exist yet. The hold below is what he hears; the gate above it
-    is what actually stops it.
+    See `core/tools/__init__.py`: red tools execute ONLY through
+    `cmd.permission.respond`, never from voice. The hold below is what he hears
+    if this handler is ever reached directly; the gate above it is what actually
+    stops it.
     """
     page = SESSION.page()
     if not confirmed:

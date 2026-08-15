@@ -215,7 +215,7 @@ check("...and actually clears it", _ex.session.external_content_in_context == 0)
 # RED STAYS BLOCKED EVEN WITH A CLEAN FENCE — it needs the approval surface.
 _after = _ex.run(ToolCall(name="x.post", args={"text": "hello"}))
 check("x.post is STILL refused with no external content (the red gate, not the fence)",
-      "approval card" in _after, _after[:80])
+      "not doing it on your voice alone" in _after, _after[:80])
 check("...and it was recorded as a pending approval",
       len(_ex.approvals.pending) == 1)
 

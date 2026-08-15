@@ -32,15 +32,23 @@
  * does nothing. Expiry invalidates the card (see approvalsSweepExpired) and
  * sends NOTHING — CONTRACT §5.1 reserves `expired` to the daemon.
  *
- * ─── editing, and the wire that cannot carry it ───
+ * ─── editing, and the wire that now carries it ───
  * The fields are editable because dictation is unbounded arbitrary text and
- * the card is the mechanism that fixes it, not a safety net. But CONTRACT §5.1
- * defines `cmd.permission.respond` as `{ requestId, decision, remember? }` —
- * there is no field for edited arguments, and this session may not invent one.
- * So an edited card FAILS CLOSED: APPROVE is refused with the reason named on
- * screen, REJECT stays live. Sending `approve` after an edit would authorise
- * the ORIGINAL text while he reads his correction, which is the single worst
- * outcome this card can produce.
+ * the card is the mechanism that fixes it, not a safety net.
+ *
+ * The previous build had to FAIL CLOSED here: §5.1 was
+ * `{ requestId, decision, remember? }` with no field for edited arguments, so
+ * approving an edited card would have authorised the original mangled text
+ * while he read his correction. Session 1 has since added `editedArgs?`, so
+ * APPROVE now sends what is in the boxes and the daemon executes THAT. Only the
+ * changed keys go — see `editedArgsFor`.
+ *
+ * The daemon's own guards are worth knowing while reading this file, because
+ * the card is written not to provoke them: the tool and the tier are never read
+ * from the frame, keys must be a subset of the request, types must match, and
+ * the payload is capped at 16 KB (`core/brain/approvals.py::resolve_edit`).
+ * A refusal from any of those puts the request BACK daemon-side, so the card
+ * returns with his edit intact rather than making him type it again.
  */
 
 import { useCallback } from 'react';
@@ -53,21 +61,23 @@ import {
   approvalReverted,
   approvalsStore,
   approvalOverflowStore,
+  editedArgsBytes,
+  editedArgsFor,
   effectiveValue,
   isActionable,
   isEdited,
   isEditable,
   isFieldEdited,
+  MAX_EDITED_ARGS_BYTES,
   STACK_VISIBLE,
   type ApprovalEntry,
 } from '../state/approval-store.ts';
-import { useStore } from '../state/store.ts';
+import { connectionStore, useStore } from '../state/store.ts';
 
-/** Why APPROVE is refused after an edit. Names the field that does not exist. */
-const EDIT_BLOCKED =
-  'CONTRACT §5.1 defines cmd.permission.respond as { requestId, decision, remember? }. ' +
-  'It has no field for edited arguments, so approving now would authorise the ORIGINAL ' +
-  'text, not yours. Reject this and re-issue it.';
+/** Shown once an edit would exceed what the daemon will accept. */
+const OVERSIZE =
+  `Your edit is over the ${Math.round(MAX_EDITED_ARGS_BYTES / 1024)} KB the daemon accepts ` +
+  `for edited arguments. Shorten it — approving now would be refused.`;
 
 function tierWord(tier: string): string {
   // §R.7: a tier is always shown as the WORD. Colour alone is not a label, and
@@ -125,10 +135,24 @@ function ArgumentRow({ entry, name }: { entry: ApprovalEntry; name: string }) {
   );
 }
 
-function Card({ entry, onDecide }: { entry: ApprovalEntry; onDecide: (id: string, d: ApprovalDecision) => void }) {
+function Card({
+  entry,
+  linkUp,
+  onDecide,
+}: {
+  entry: ApprovalEntry;
+  linkUp: boolean;
+  onDecide: (id: string, d: ApprovalDecision) => void;
+}) {
   const { request } = entry;
-  const live = isActionable(entry);
   const edited = isEdited(entry);
+  const bytes = editedArgsBytes(entry);
+  const oversize = bytes > MAX_EDITED_ARGS_BYTES;
+  // Actionable needs the LINK as well as the card's own state. A card with no
+  // socket behind it must not offer a button that silently does nothing —
+  // Session 1's ruling 2 means the request is still alive, so the honest
+  // rendering is "still pending, cannot answer from here yet".
+  const live = isActionable(entry) && linkUp && !oversize;
   const names = Object.keys(request.args);
 
   return (
@@ -174,16 +198,39 @@ function Card({ entry, onDecide }: { entry: ApprovalEntry; onDecide: (id: string
         )}
       </div>
 
-      {edited && live ? <p className="approval__blocked">{EDIT_BLOCKED}</p> : null}
+      {edited ? (
+        <p className="approval__size" data-over={oversize}>
+          {oversize
+            ? OVERSIZE
+            : `Approving sends your edit — ${bytes} of ${MAX_EDITED_ARGS_BYTES} bytes. ` +
+              `The daemon executes what is in these boxes, and audits both versions.`}
+        </p>
+      ) : null}
 
-      {entry.invalidated ? (
+      {/* The daemon said no. Kept ON the card, not in a toast: the reason is
+          about this payload and he is about to edit this payload again. */}
+      {entry.refusal ? (
+        <p className="approval__refused">
+          The daemon refused this ({entry.refusal.code}): {entry.refusal.message}
+          {entry.invalidated ? '' : ' — your edit is intact; correct it and try again.'}
+        </p>
+      ) : null}
+
+      {/* Suppressed when a refusal is showing. Both bands rendering at once
+          produced "The daemon refused this (notFound): …" immediately above
+          "Recorded locally: unknown. Nothing was sent" — two sentences about
+          the same event, one of them false: something WAS sent, and it was
+          refused. The refusal is the specific, true account; this generic band
+          is for the paths that have no refusal to report. */}
+      {entry.invalidated && !entry.refusal ? (
         <p className="approval__void">
-          {entry.invalidated === 'disconnected'
-            ? 'The daemon connection dropped. This request no longer exists — nothing will run.'
+          {entry.invalidated === 'daemonRestarted'
+            ? 'The daemon restarted. It does not carry approvals across a restart, so this ' +
+              'request is gone — nothing ran, and nothing is queued. Ask again if you still want it.'
             : entry.invalidated === 'expired'
               ? 'The 30-minute approval window lapsed. Treated as REJECTED; nothing was sent.'
               : // A fixture has no daemon behind it, so it must not claim one.
-                // The first run of this card said "Resolved by the daemon: deny"
+                // An earlier run of this card said "Resolved by the daemon: deny"
                 // over a card main had explicitly refused to put on the wire —
                 // true-sounding, and false. On this surface that is not a
                 // cosmetic difference.
@@ -197,8 +244,17 @@ function Card({ entry, onDecide }: { entry: ApprovalEntry; onDecide: (id: string
         <p className="approval__sent">Sent {entry.sent} — waiting for the daemon.</p>
       ) : null}
 
+      {/* Link down, request alive. The distinction Session 1's ruling 2 makes,
+          said in words: this did not go away, you just cannot answer it yet. */}
+      {!linkUp && !entry.invalidated && !entry.sent ? (
+        <p className="approval__waiting">
+          No connection to the daemon. This request is still pending on its side — it survives
+          this window closing — but it cannot be answered from here until the link returns.
+        </p>
+      ) : null}
+
       <div className="approval__actions">
-        {edited && live ? (
+        {edited && isActionable(entry) ? (
           <button
             type="button"
             className="approval__revert"
@@ -231,11 +287,11 @@ function Card({ entry, onDecide }: { entry: ApprovalEntry; onDecide: (id: string
             <button
               type="button"
               className="approval__btn approval__btn--approve"
-              disabled={!live || edited}
-              title={edited ? EDIT_BLOCKED : undefined}
+              disabled={!live}
+              title={oversize ? OVERSIZE : undefined}
               onClick={() => onDecide(request.requestId, 'approve')}
             >
-              approve
+              {edited ? 'approve edited' : 'approve'}
             </button>
           </>
         )}
@@ -247,13 +303,24 @@ function Card({ entry, onDecide }: { entry: ApprovalEntry; onDecide: (id: string
 export function ApprovalStack() {
   const entries = useStore(approvalsStore);
   const overflow = useStore(approvalOverflowStore);
+  const connection = useStore(connectionStore);
+  const linkUp = connection.phase === 'connected';
 
   const onDecide = useCallback((requestId: string, decision: ApprovalDecision) => {
-    // Claim FIRST. `approvalClaim` is a check-and-set: if it returns false the
+    // Read the edit BEFORE claiming: `approvalClaim` mutates the entry, and
+    // reading the store afterwards would race its own write.
+    const entry = approvalsStore.get().find((e) => e.request.requestId === requestId);
+    if (!entry) return;
+    // A deny executes nothing, so it never carries edited arguments — main
+    // refuses that combination anyway, and sending it would be asking for a
+    // refusal the surface itself created.
+    const edited = decision === 'approve' ? editedArgsFor(entry) : undefined;
+
+    // Claim SECOND. `approvalClaim` is a check-and-set: if it returns false the
     // card was already decided or already void, and nothing goes on the wire.
     // This is the fast layer; main refuses an unknown id independently.
     if (!approvalClaim(requestId, decision)) return;
-    window.zoey.respondToApproval(requestId, decision);
+    window.zoey.respondToApproval(requestId, decision, edited);
   }, []);
 
   if (entries.length === 0) return null;
@@ -264,7 +331,12 @@ export function ApprovalStack() {
   return (
     <ul className="approvals" aria-label="Approval requests">
       {shown.map((entry) => (
-        <Card key={entry.request.requestId} entry={entry} onDecide={onDecide} />
+        <Card
+          key={entry.request.requestId}
+          entry={entry}
+          linkUp={linkUp}
+          onDecide={onDecide}
+        />
       ))}
       {queued > 0 ? (
         <li className="approvals__more">

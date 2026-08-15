@@ -19,6 +19,7 @@ import {
   IPC,
   type ApprovalCleared,
   type ApprovalDecision,
+  type ApprovalRefusal,
   type AuditEntry,
   type BootstrapInfo,
   type ConnectionStatus,
@@ -97,6 +98,7 @@ const bridge: ZoeyBridge = {
   onNotification: subscribe<OrbNotification>(IPC.notify),
   onApprovalRequested: subscribe<PermissionRequest>(IPC.approvalRequested),
   onApprovalCleared: subscribe<ApprovalCleared>(IPC.approvalCleared),
+  onApprovalRefused: subscribe<ApprovalRefusal>(IPC.approvalRefused),
 
   /**
    * The one channel on this bridge that carries a caller-supplied string.
@@ -107,10 +109,24 @@ const bridge: ZoeyBridge = {
    * check belongs to main, which holds the pending map and will drop an id it
    * never issued a card for. Narrowing here is defence in depth, not the guard.
    */
-  respondToApproval: (requestId: string, decision: ApprovalDecision): void => {
+  respondToApproval: (
+    requestId: string,
+    decision: ApprovalDecision,
+    editedArgs?: Record<string, unknown>,
+  ): void => {
     if (decision !== 'approve' && decision !== 'deny') return;
     if (typeof requestId !== 'string' || requestId.length === 0) return;
-    ipcRenderer.send(IPC.approvalRespond, { requestId, decision });
+    // Structured-cloned across the bridge, so only JSON-ish values survive
+    // anyway; the shape check is re-done in main, which is the actual guard.
+    const edited =
+      typeof editedArgs === 'object' && editedArgs !== null && !Array.isArray(editedArgs)
+        ? editedArgs
+        : undefined;
+    ipcRenderer.send(IPC.approvalRespond, {
+      requestId,
+      decision,
+      ...(edited ? { editedArgs: edited } : {}),
+    });
   },
 
   // Persistence only — the renderer has already repainted itself. Main

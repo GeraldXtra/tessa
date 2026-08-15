@@ -24,7 +24,7 @@ from core.tools import REGISTRY
 from core.tools.base import ToolError, ToolHold
 
 from . import memory
-from .approvals import ApprovalGate, red_refusal
+from .approvals import ApprovalError, ApprovalGate, red_refusal, resolve_edit
 from .confirm import ConfirmLedger
 from .provenance import ExternalContent, InjectionRefusal
 from .router import action_done, action_failed, destructive_hold
@@ -154,6 +154,198 @@ class Executor:
         # which is the correct shape — confirming a kill IS work.
         return self.run(ToolCall(name=held.tool, args=args))
 
+    # ── the approval path: a decision arriving from a surface ────────────────
+
+    def execute_approved(self, request_id: str, edited: Any = None) -> dict[str, Any]:
+        """
+        Run a red-tier action the OWNER approved on a surface he can see.
+
+        This is the only route by which a red tool ever executes. It is reached
+        from `cmd.permission.respond` (CONTRACT §5.1) and from nowhere else —
+        not from a voice confirmation, not from a repeat, not from the ledger.
+
+        THE FENCE RULING IS HERE, AND IT IS DELIBERATE. See `_ruling` below.
+
+        Returns a record for the caller to audit and broadcast. Raises
+        `ApprovalError` for anything it will not honour.
+        """
+        # ── CLAIM IT ATOMICALLY, BEFORE ANYTHING ELSE ────────────────────────
+        #
+        # `pop` rather than `get`. The first version read the request, ran the
+        # handler, and popped afterwards — a check-then-act window in a daemon
+        # where the handler runs under `asyncio.to_thread`, so two
+        # `cmd.permission.respond` frames carrying the same requestId could both
+        # pass the lookup and BOTH EXECUTE. On `x.post` that is the same tweet
+        # published twice; on `fs.delete` it is a second delete against a path
+        # that may since have been recreated.
+        #
+        # `dict.pop` is atomic under the GIL, so the loser of the race gets None
+        # and is told `notFound`. Claiming first also fixes the other half: a
+        # handler that raises something other than ToolError used to leave the
+        # request pending and replayable.
+        #
+        # Anything that refuses BEFORE execution puts it back, so a rejected
+        # edit does not cost him the card.
+        pending = self.approvals.pending.pop(request_id, None)
+        if pending is None:
+            raise ApprovalError("notFound", f"no pending approval {request_id}")
+        if pending.expired:
+            raise ApprovalError("permission.expired",
+                                "that approval window has closed")
+
+        spec = REGISTRY.get(pending.tool)
+        if spec is None:
+            # `pty.spawn` reaches here: the PTY grant flow raises a real approval
+            # request but its EXECUTION lives in the grant registry, not in
+            # `core/tools`. Denying works; approving does not, and it says so
+            # rather than failing as though the request had gone stale.
+            raise ApprovalError(
+                "internal",
+                f"{pending.tool} approval is not wired to an executor yet - "
+                f"deny works, approve does not")
+
+        # Raises ApprovalError on anything it will not accept. The TOOL and the
+        # TIER come from `pending`, never from the frame.
+        #
+        # A REJECTED EDIT PUTS THE REQUEST BACK. He mistyped, or the surface sent
+        # something malformed — the decision failed, the REQUEST did not, and
+        # destroying the card would make him re-dictate a tweet he has already
+        # corrected once.
+        try:
+            args = resolve_edit(pending, edited)
+        except ApprovalError:
+            self.approvals.pending[request_id] = pending
+            raise
+        was_edited = args != pending.args
+
+        # ── THE FENCE AND THE APPROVAL ───────────────────────────────────────
+        #
+        # A red action requested while a hostile page was in context is refused
+        # by `SessionContext.check_tool`. Does his approval clear that?
+        #
+        # YES — AND ONLY FOR THIS ONE REQUEST.
+        #
+        # The reason it is safe here, and would not be in general, is that a
+        # page CANNOT PROVOKE AN APPROVAL PROMPT IN THIS ARCHITECTURE. Red tools
+        # are selected by the local router from HIS SPEECH; the model never
+        # picks a tool (CLAUDE.md invariant 4), so there is no path from page
+        # text to a pending request. Every pending approval already originated
+        # with him.
+        #
+        # So the approval is a SECOND human act, on a payload he has read and
+        # may have corrected, about an action he asked for. That is precisely
+        # the judgement the fence exists to require.
+        #
+        # WHAT IS DELIBERATELY NOT DONE: `session.owner_approved_red` is never
+        # set. That flag is a MODE — it would open every red action for the rest
+        # of the session, and one approval would silently disarm the fence for
+        # everything after it. The bypass below is scoped to this call and dies
+        # with it.
+        if self.session is not None:
+            try:
+                self.session.check_tool(spec.name, spec.tier)
+            except InjectionRefusal:
+                self._log("APPROVED-OVER-FENCE", spec.name,
+                          f"requestId={request_id} approved while external content "
+                          f"from {', '.join(getattr(self.session, 'sources', []) or [])} "
+                          f"was in context", spec.tier)
+
+        # PASS ONLY THE FLAGS THIS HANDLER ACCEPTS.
+        #
+        # An adversarial review flagged exactly this and a verifier refuted it
+        # as "reachable only from a direct call" — which was true, because the
+        # caller did not exist yet. Building the approval path made it
+        # reachable, and the first end-to-end run died on
+        # `delete() got an unexpected keyword argument '_approved_by_surface'`.
+        #
+        # `x.post` and `x.reply` take `_approved_by_surface` as defence in depth;
+        # `fs.delete`, `shell.execute` and `browser.submit` take `confirmed`.
+        # Inspecting the signature rather than maintaining a list means a red
+        # tool added later cannot silently break this path.
+        import inspect
+
+        accepted = set(inspect.signature(spec.handler).parameters)
+        for flag in ("_approved_by_surface", "confirmed"):
+            if flag in accepted:
+                args[flag] = True
+        # ── AUDIT BEFORE EXECUTING, NOT AFTER ────────────────────────────────
+        #
+        # The pair used to be written after `spec.handler(**args)` returned, so
+        # the executed string was recorded ONLY on the success path. An
+        # adversarial review found the hole and it is deterministically
+        # forceable, not merely unlucky:
+        #
+        #   he approves `npm install -g X` with an edit appending `& timeout
+        #   /t 200`. `shell.execute` runs it as him for the full 120 s, then
+        #   `subprocess.run` raises `TimeoutExpired` — which is neither
+        #   ToolError nor ToolHold, so it escapes both handlers and the audit
+        #   lines never run. The log then holds `APPROVAL FAILED
+        #   shell.execute: TimeoutExpired` and, from the earlier
+        #   PENDING-APPROVAL entry, the ORIGINAL pre-edit command. The string
+        #   that actually ran as him exists nowhere.
+        #
+        # Worse on `x.post`, which publishes and THEN waits 1200 ms: a
+        # Playwright error after publication would lose the text of a tweet that
+        # is already public — on the least reversible tool in the build.
+        #
+        # `core/tools/base.py` already states the principle this violated: the
+        # audit template exists "so the log records what was ASKED even when the
+        # tool then failed." Recording intent before acting is the only ordering
+        # that survives a crash, and CLAUDE.md invariant 7 is about exactly
+        # that.
+        executed_args = {k: v for k, v in args.items()
+                         if k not in ("_approved_by_surface", "confirmed")}
+        self._log("REQUESTED", spec.name,
+                  f"requestId={request_id} {pending.detail} args={pending.args}"
+                  + (" [external content in context]" if pending.external_at_request else ""),
+                  spec.tier)
+        self._log("APPROVED" + (" (EDITED)" if was_edited else ""), spec.name,
+                  f"requestId={request_id} args={executed_args}", spec.tier)
+
+        try:
+            result = spec.handler(**args)
+        except ToolHold:
+            # A red handler that still wants a confirmation has already had one:
+            # the approval card IS the confirmation.
+            args["confirmed"] = True
+            result = spec.handler(**args)
+        # ORDER MATTERS AND I GOT IT WRONG ONCE. A bare
+        # `except (ToolError, InjectionRefusal): raise` placed ABOVE the
+        # ToolError branch shadowed it, so a handler's own refusal escaped as a
+        # raw ToolError instead of being converted to ApprovalError — and the
+        # test suite crashed rather than failing an assertion. Specific first,
+        # catch-all last.
+        except ToolError as err:
+            # NOT restored. The handler ran and refused on its own terms — X was
+            # not signed in, the path was gone. That is an attempted action, and
+            # re-offering the card would invite him to approve it again against
+            # a world that has not changed.
+            #
+            # The args are already on the chain, written before the call, so
+            # this only has to record the outcome.
+            self._log("APPROVED-BUT-FAILED", spec.name,
+                      f"requestId={request_id} {err.reason}", spec.tier)
+            raise ApprovalError("internal", err.reason) from None
+        except InjectionRefusal:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            # ANYTHING ELSE — a subprocess timeout, a Playwright error, a driver
+            # crash. The action may have half-happened or fully happened; the
+            # `x.post` case publishes and only THEN waits. Recorded against args
+            # that are already on the chain, then re-raised.
+            self._log("APPROVED-THEN-CRASHED", spec.name,
+                      f"requestId={request_id} {type(exc).__name__}: {exc}",
+                      spec.tier)
+            raise
+
+        self._absorb_external(spec, result)
+
+        spoken = spec.success.format(**result) if isinstance(result, dict) else ""
+        return {"tool": spec.name, "tier": spec.tier, "requestId": request_id,
+                "requested_args": dict(pending.args),
+                "executed_args": executed_args,
+                "edited": was_edited, "spoken": spoken, "result": result}
+
     # ── the red gate and the fence ───────────────────────────────────────────
 
     @staticmethod
@@ -278,6 +470,8 @@ class Executor:
                 tool=spec.name, args=args, tier="red",
                 provenance=str(args.get("provenance", "human")), detail=detail,
             )
+            req.external_at_request = bool(
+                getattr(self.session, "external_content_in_context", 0))
             self._log("PENDING-APPROVAL", spec.name,
                       f"requestId={req.request_id} {self._audit_line(spec, args)}",
                       "red")

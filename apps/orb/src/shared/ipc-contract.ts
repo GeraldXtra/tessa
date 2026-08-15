@@ -90,6 +90,16 @@ export const IPC = {
   /** main → renderer, push. A requestId that is no longer pending. */
   approvalCleared: 'zoey:approval-cleared',
   /**
+   * main → renderer, push. The daemon REFUSED a decision.
+   *
+   * Separate from `approvalCleared` because the two mean opposite things about
+   * whether the card should still be on screen. A refusal from `resolve_edit`
+   * leaves the request pending daemon-side (core/brain/executor.py restores it
+   * on the way out), so the card must come BACK with his edit intact. A refusal
+   * from the pending lookup means the request is gone and the card must not.
+   */
+  approvalRefused: 'zoey:approval-refused',
+  /**
    * renderer → main, send. `{ requestId, decision }` — the owner's answer.
    *
    * The ONE channel on this bridge that carries a caller-supplied string, and
@@ -274,14 +284,43 @@ export interface PermissionRequest {
 /** A surface may send these two and no others. CONTRACT §5.1. */
 export type ApprovalDecision = 'approve' | 'deny';
 
-/** Why a card left the screen. Only `resolved` came from the daemon. */
-export type ApprovalClearReason = 'resolved' | 'expired' | 'disconnected';
+/**
+ * Why a card left the screen.
+ *
+ * `disconnected` is GONE, and its removal is the point. Session 1 ruled that a
+ * pending request SURVIVES the deciding surface's disconnect — the daemon keeps
+ * it and any surface may decide it — so clearing on a dropped socket would
+ * destroy a card for an action that is still live and still waiting on him.
+ *
+ * What does kill a request is the DAEMON restarting: `ApprovalGate.pending` is
+ * an in-memory dict rebuilt per process (core/brain/approvals.py:167), so a new
+ * daemon has forgotten everything the old one held. Those two rules pull in
+ * opposite directions, and `daemonRestarted` is how they are told apart — see
+ * the instance check in main/index.ts.
+ */
+export type ApprovalClearReason = 'resolved' | 'expired' | 'daemonRestarted';
 
 export interface ApprovalCleared {
   requestId: string;
   reason: ApprovalClearReason;
   /** Present when the daemon resolved it: approve | deny | expired. */
   decision?: string;
+}
+
+/**
+ * The daemon refused a decision. CONTRACT §5.4 error codes.
+ *
+ * `requestStillPending` is derived in main from the code, by reading what
+ * `core/brain/executor.py::execute_approved` actually does on each failure
+ * path — it pops the request first and puts it back only for a rejected edit.
+ * Getting this backwards either strands a live request with no card, or leaves
+ * an approvable card for something the daemon has already discarded.
+ */
+export interface ApprovalRefusal {
+  requestId: string;
+  code: string;
+  message: string;
+  requestStillPending: boolean;
 }
 
 /* ─────────────────────────────────────────────────── SENTINEL / TRACE data */
@@ -466,8 +505,21 @@ export interface ZoeyBridge {
   onApprovalRequested(listener: (request: PermissionRequest) => void): () => void;
   /** Returns an unsubscribe function. A card that must leave the screen. */
   onApprovalCleared(listener: (cleared: ApprovalCleared) => void): () => void;
-  /** The owner's answer. Main validates the id against what it holds. */
-  respondToApproval(requestId: string, decision: ApprovalDecision): void;
+  /** Returns an unsubscribe function. The daemon refused a decision. */
+  onApprovalRefused(listener: (refusal: ApprovalRefusal) => void): () => void;
+  /**
+   * The owner's answer. Main validates the id against what it holds.
+   *
+   * `editedArgs` is CONTRACT §5.1's new optional field. Send it ONLY when he
+   * actually changed something: the daemon computes `was_edited` by comparing
+   * the merged args to the original, and an unchanged copy would ride through
+   * as a no-op while still costing the 16 KB budget and an extra audit line.
+   */
+  respondToApproval(
+    requestId: string,
+    decision: ApprovalDecision,
+    editedArgs?: Record<string, unknown>,
+  ): void;
   /** Persist the theme choice. Display has already changed; this only saves it. */
   setTheme(theme: string): void;
   /** Report a push-to-talk key edge. Main decides what it means. */

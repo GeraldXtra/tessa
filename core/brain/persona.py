@@ -41,7 +41,6 @@ are Python and none of which consult the model.
 
 from __future__ import annotations
 
-from functools import lru_cache
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -84,7 +83,15 @@ daemon do it. Never invent the result of an action.
 
 #: (mtime, size) of the last read, so an edit is noticed without re-reading the
 #: file on every single turn.
-_CACHE: dict[str, object] = {"stamp": None, "text": ""}
+#: Below this many characters, a read is treated as a TRUNCATED SAVE rather
+#: than as his edit. Low on purpose — this catches a half-written file, not a
+#: short personality.
+MIN_PERSONA_CHARS = 200
+
+_FALLBACK = ("You are Zoey, Gerald's assistant. Address him as Emperor. "
+             "Be brief and direct. The first sentence must be short. No emoji.")
+
+_CACHE: dict[str, object] = {"stamp": None, "text": "", "error": None}
 
 
 def system_prompt() -> str:
@@ -110,15 +117,43 @@ def system_prompt() -> str:
         st = PERSONA_PATH.stat()
         stamp = (st.st_mtime_ns, st.st_size)
         if _CACHE["stamp"] != stamp:
-            _CACHE["text"] = PERSONA_PATH.read_text(encoding="utf-8").strip() + _ADDENDUM
+            body = PERSONA_PATH.read_text(encoding="utf-8").strip()
+            # ── A BAD EDIT MUST NOT COST HIM HER VOICE ───────────────────────
+            #
+            # He is going to tune this file by ear with the daemon running, and
+            # a half-saved file, an empty save, or a stray Ctrl-A Delete must
+            # not turn her into a generic assistant mid-conversation. Anything
+            # implausibly short is treated as a bad save: the LAST GOOD version
+            # stays in force and the failure is logged.
+            #
+            # The floor is deliberately low. This is not validating his prose —
+            # it is catching a truncated write. Anything with real content in it
+            # passes, however much he has cut.
+            if len(body) < MIN_PERSONA_CHARS:
+                _CACHE["error"] = (
+                    f"zoey.md is {len(body)} chars, under the {MIN_PERSONA_CHARS} "
+                    f"floor - looks like a truncated save. Keeping the last good "
+                    f"version.")
+                _CACHE["stamp"] = stamp        # do not re-read the same bad file
+                if _CACHE["text"]:
+                    return str(_CACHE["text"])
+                return _FALLBACK + _ADDENDUM
+            _CACHE["text"] = body + _ADDENDUM
             _CACHE["stamp"] = stamp
+            _CACHE["error"] = None
         return str(_CACHE["text"])
-    except OSError:
-        return ("You are Zoey, Gerald's assistant. Address him as Emperor. "
-                "Be brief and direct. The first sentence must be short. "
-                "No emoji." + _ADDENDUM)
+    except OSError as exc:
+        _CACHE["error"] = f"{type(exc).__name__}: {exc}"
+        if _CACHE["text"]:
+            return str(_CACHE["text"])
+        return _FALLBACK + _ADDENDUM
 
 
 def loaded() -> tuple[bool, str]:
     """(was zoey.md actually read, path) — reported at daemon boot."""
     return PERSONA_PATH.exists(), str(PERSONA_PATH)
+
+
+def last_error() -> str | None:
+    """The most recent bad read, or None. Logged so a bad edit is visible."""
+    return _CACHE.get("error")  # type: ignore[return-value]

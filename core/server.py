@@ -51,6 +51,8 @@ from zoey_protocol import (  # noqa: E402
     CLOSE_PROTOCOL_MISMATCH,
     CLOSE_RATE_LIMITED,
 )
+from core.brain.approvals import (APPROVAL_WINDOW_S, ApprovalError,  # noqa: E402
+                                  iso_in as _iso_in)
 from core.brain.conversation import Conversation  # noqa: E402
 from core.brain.llm import describe_engines, make_engine  # noqa: E402
 from core.tools.browser import close_browser as close_browser_on_shutdown  # noqa: E402
@@ -489,6 +491,7 @@ class ZoeyDaemon:
             "cmd.pty.requestSpawn": self._h_pty_request_spawn,
             "cmd.pty.report": self._h_pty_report,
             "cmd.audit.query": self._h_audit_query,
+            "cmd.permission.respond": self._h_permission_respond,
             "cmd.voice.pushToTalk": self._h_voice_push_to_talk,
         }.get(mtype)
 
@@ -512,6 +515,30 @@ class ZoeyDaemon:
         if isinstance(topics, list):
             state["subs"].update(str(t) for t in topics)
         await ws.send(envelope("res.subscribe", {"topics": sorted(state["subs"])}, corr=corr))
+
+        # ── RE-ANNOUNCE WHAT IS STILL PENDING ────────────────────────────────
+        #
+        # Session 2 found this: a card raised before a reconnect vanished, and
+        # the Orb came back with an empty list while Gerald believed something
+        # was queued. Same class as the PTY roster gap — broadcast-only, never
+        # snapshot-on-subscribe. Every `evt.*` that represents STATE rather than
+        # an EVENT needs both, and a pending approval is state.
+        #
+        # Sent only to the subscriber that just asked, not broadcast, so a
+        # second surface connecting does not re-flash a card the first is
+        # already showing.
+        gate = getattr(getattr(self, "voice", None), "executor", None)
+        gate = getattr(gate, "approvals", None)
+        if gate is not None and topic_matches(state["subs"], "evt.permission.request"):
+            for req in gate.sweep_and_list():
+                await ws.send(envelope("evt.permission.request", {
+                    "requestId": req.request_id,
+                    "tier": req.tier,
+                    "tool": req.tool,
+                    "args": req.args,
+                    "provenance": req.provenance,
+                    "expiresAt": _iso_in(APPROVAL_WINDOW_S - (time.monotonic() - req.at)),
+                }))
 
     async def _h_unsubscribe(self, ws, state, payload, corr) -> None:
         for t in payload.get("topics") or []:
@@ -547,6 +574,30 @@ class ZoeyDaemon:
 
         if decision.verdict is Verdict.CONFIRM:
             request_id = ulid()
+            # REGISTER IT, or the card cannot be answered.
+            #
+            # This path minted a requestId, audited it and broadcast
+            # `evt.permission.request` — and never told the ApprovalGate. So a
+            # surface rendering the card and replying `cmd.permission.respond`
+            # got `err.notFound`, and the request sat there until it aged out of
+            # nothing, because nothing was holding it. Broadcast-only again, the
+            # same shape as the PTY roster gap and the pending-approval
+            # snapshot.
+            #
+            # Registering it makes DENY work correctly and makes the request
+            # visible to `sweep_and_list`, so it re-announces on subscribe and
+            # expires on the timer like every other one. APPROVE is refused with
+            # an honest message — the grant flow behind it is not wired to the
+            # approval path yet, and an approve that silently did nothing would
+            # be worse than one that says so.
+            _gate = getattr(getattr(self, "voice", None), "executor", None)
+            _gate = getattr(_gate, "approvals", None)
+            if _gate is not None:
+                _req = _gate.request(
+                    tool="pty.spawn", args={"cwd": cwd, "profileId": profile_id},
+                    tier=decision.tier or "amber", provenance=actor,
+                    detail=f"shell in {cwd}: {decision.reason}")
+                request_id = _req.request_id
             self.audit.append(
                 actor=actor, tool="pty.spawn", tier=decision.tier or "amber",
                 summary=f"Awaiting owner approval for shell in {cwd}: {decision.reason}",
@@ -1015,6 +1066,121 @@ class ZoeyDaemon:
             "changed": was != self.ptt_active,
         }, corr=corr))
 
+    async def _h_permission_respond(self, ws, state, payload, corr) -> None:
+        """
+        CONTRACT §5.1 — `cmd.permission.respond { requestId, decision, remember?,
+        editedArgs? }`.
+
+        THE COMMAND NAME IS `respond`, NOT `decide`. Session 2 built against
+        `cmd.permission.decide`, which is not in the contract and would have come
+        back `err.protocol.unknownType`. `respond` is what §5.1 defines and what
+        this handler answers to.
+
+        `editedArgs` IS THE NEW, OPTIONAL FIELD, and it is additive under §7.2 —
+        a surface that never sends it behaves exactly as before.
+
+        WHAT THIS HANDLER WILL NOT DO, stated as code rather than as comment:
+        it never reads a tool, a tier, or a capability from the frame. Those come
+        from the stored request. See `core/brain/approvals.resolve_edit`.
+        """
+        request_id = payload.get("requestId")
+        decision = payload.get("decision")
+        edited = payload.get("editedArgs")
+
+        if not isinstance(request_id, str) or not request_id:
+            await ws.send(envelope("err.protocol.badEnvelope", {
+                "code": "protocol.badEnvelope",
+                "message": "requestId is required", "retryable": False}, corr=corr))
+            return
+
+        # §7.4: a surface may only ever SEND approve or deny. `expired` is
+        # daemon-emitted and a surface claiming it would be asserting a fact
+        # about a clock it does not own.
+        if decision not in ("approve", "deny"):
+            await ws.send(envelope("err.protocol.badEnvelope", {
+                "code": "protocol.badEnvelope",
+                "message": "decision must be 'approve' or 'deny'",
+                "retryable": False}, corr=corr))
+            return
+
+        executor = getattr(getattr(self, "voice", None), "executor", None)
+        gate = getattr(executor, "approvals", None)
+        pending = gate.pending.get(request_id) if gate else None
+        if pending is None:
+            await ws.send(envelope("err.notFound", {
+                "code": "notFound",
+                "message": f"no pending approval {request_id}",
+                "retryable": False}, corr=corr))
+            return
+
+        if decision == "deny":
+            gate.pending.pop(request_id, None)
+            self.audit.append(
+                actor="human", tool=pending.tool, tier=pending.tier,
+                summary=f"DENIED {pending.tool}: {pending.detail}",
+                detail={"requestId": request_id, "requestedArgs": pending.args},
+                provenance="human")
+            # BROADCAST FIRST, REPLY SECOND, and the order is the fix.
+            #
+            # The reply goes to ONE socket; the broadcast tells the OTHER
+            # surface to dismiss its card. Replying first meant that if the
+            # decider's socket had dropped between the decision and the answer,
+            # `ws.send` raised and the broadcast never ran — so the Console kept
+            # showing a card for a request that had already been resolved, with
+            # no way to learn otherwise. §4.1 says the resolution is broadcast
+            # precisely so the other surface dismisses; that must not depend on
+            # the decider still being there.
+            await self.broadcast("evt.permission.resolved", {
+                "requestId": request_id, "decision": "deny",
+                "decidedBy": state.get("surface", "unknown"),
+                "remembered": bool(payload.get("remember", False))})
+            log(f"permission DENIED {pending.tool} ({request_id[:8]})")
+            await ws.send(envelope("res.ok", {}, corr=corr))
+            return
+
+        # ── APPROVE ──────────────────────────────────────────────────────────
+        #
+        # TWO AUDIT ENTRIES, ALWAYS. What was REQUESTED and what was APPROVED
+        # are different records and the second is the one that says what he
+        # actually authorised. If he corrected a mangled tweet before sending,
+        # the log holds both strings — the garbage Whisper produced and the
+        # sentence he meant.
+        # The REQUESTED/APPROVED pair is written by `execute_approved` itself,
+        # so the record is identical whichever caller reached it.
+        try:
+            record = await asyncio.to_thread(
+                executor.execute_approved, request_id, edited)
+        except ApprovalError as err:
+            self.audit.append(
+                actor="system", tool=pending.tool, tier=pending.tier,
+                summary=f"APPROVAL REFUSED {pending.tool}: {err.message}",
+                detail={"requestId": request_id}, provenance="system")
+            await ws.send(envelope(f"err.{err.code}", {
+                "code": err.code, "message": err.message,
+                "retryable": False}, corr=corr))
+            log(f"permission REFUSED {pending.tool} ({request_id[:8]}): {err.message}")
+            return
+        except Exception as exc:  # noqa: BLE001
+            self.audit.append(
+                actor="system", tool=pending.tool, tier=pending.tier,
+                summary=f"APPROVAL FAILED {pending.tool}: {type(exc).__name__}",
+                detail={"requestId": request_id}, provenance="system")
+            await ws.send(envelope("err.internal", {
+                "code": "internal", "message": f"{type(exc).__name__}",
+                "retryable": False}, corr=corr))
+            return
+
+        # Broadcast first — see the deny branch. The action has ALREADY run by
+        # this point, so a dropped decider socket must not leave the other
+        # surface showing a card for something that has happened.
+        await self.broadcast("evt.permission.resolved", {
+            "requestId": request_id, "decision": "approve",
+            "decidedBy": state.get("surface", "unknown"),
+            "remembered": bool(payload.get("remember", False))})
+        log(f"permission APPROVED{' (EDITED)' if record['edited'] else ''} "
+            f"{record['tool']} ({request_id[:8]})")
+        await ws.send(envelope("res.ok", {"spoken": record["spoken"]}, corr=corr))
+
     async def _h_audit_query(self, ws, state, payload, corr) -> None:
         limit = int(payload.get("limit", 100))
         # CONTRACT 4.1 names the identity field `entryId`. On disk it is `seq`,
@@ -1045,6 +1211,39 @@ class ZoeyDaemon:
                 dead.append(ws)
         for ws in dead:
             self.clients.pop(ws, None)
+
+    async def sweep_approvals(self) -> None:
+        """
+        Drop approval requests whose 30-minute window has closed.
+
+        WITHOUT THIS, `sweep()` only ran when a surface subscribed. Expiry was
+        still enforced at execution time — a stale requestId could never be
+        acted on — but the records themselves lingered until someone connected,
+        which on a headless run is never.
+
+        ZOEY_OS-spec §5 rule 5: a lapsed approval is `needsReview`, not
+        `failed`. Nothing broke; nobody answered. So each one is audited as it
+        goes rather than vanishing, and the surfaces are told so a card that can
+        no longer be actioned stops being shown.
+        """
+        while True:
+            await asyncio.sleep(60.0)
+            gate = getattr(getattr(self, "voice", None), "executor", None)
+            gate = getattr(gate, "approvals", None)
+            if gate is None:
+                continue
+            for req in gate.sweep():
+                self.audit.append(
+                    actor="system", tool=req.tool, tier=req.tier,
+                    summary=f"EXPIRED unanswered approval {req.tool}: {req.detail}",
+                    detail={"requestId": req.request_id, "requestedArgs": req.args},
+                    provenance="system")
+                # CONTRACT §4.1: `expired` is daemon-emitted only, and this is
+                # the daemon emitting it.
+                await self.broadcast("evt.permission.resolved", {
+                    "requestId": req.request_id, "decision": "expired",
+                    "decidedBy": "daemon", "remembered": False})
+                log(f"approval EXPIRED {req.tool} ({req.request_id[:8]})")
 
     async def heartbeat(self) -> None:
         """
@@ -1347,11 +1546,13 @@ async def main() -> None:
     ):
         hb = asyncio.create_task(daemon.heartbeat())
         sweeper = asyncio.create_task(daemon.sweep_grants())
+        approval_sweeper = asyncio.create_task(daemon.sweep_approvals())
         try:
             await stop.wait()
         finally:
             hb.cancel()
             sweeper.cancel()
+            approval_sweeper.cancel()
 
     _closed = close_browser_on_shutdown(reason="daemon shutdown")
     if _closed.get("was_open"):
