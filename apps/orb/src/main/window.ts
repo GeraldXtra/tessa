@@ -53,6 +53,40 @@ export interface WindowOptions {
 }
 
 /**
+ * Is this launch carrying measurement instrumentation?
+ *
+ * ─── why this exists ───
+ * The owner's Orb opened as a ~1000x660 floating window with gaps on every side
+ * of a 1366x768 screen, and the cause was this file working exactly as designed.
+ * `orb-window.json` held:
+ *
+ *     { "width": 984, "height": 652, "x": 188, "y": 50, "isMaximized": true }
+ *
+ * 984x652 at 188,50 is not a size he ever chose. It is the exact client rect
+ * produced by `MoveWindow(180, 50, 1000, 660)` in a verification harness — a
+ * measurement artefact, written to his config by a resize the persistence layer
+ * could not tell apart from a deliberate one, and restored on every launch
+ * since.
+ *
+ * `isDev` cannot be the discriminator: he runs `npm run dev`, so it is true for
+ * him too. What separates a measurement run from his is the instrumentation
+ * flags, so those are what gate persistence.
+ *
+ * Matched by PREFIX rather than an exact list, because an exact list rots and
+ * the failure mode of a missed entry is silently corrupting his config again.
+ * The prefixes cover every dev flag this app currently defines —
+ * --force-state, --force-tier, --probe-geometry, --probe-pulse, --probe-limb,
+ * --capture-every, --dev-drive, --dev-overlay, --fixture-transcript,
+ * --stop-beats-after, --ptt-chord, --ptt-mode — and any future one that follows
+ * the same naming.
+ */
+const INSTRUMENTATION_FLAG = /^--(force|probe|capture|dev|fixture|stop|ptt)-/;
+
+export function isInstrumentedLaunch(argv: readonly string[] = process.argv): boolean {
+  return argv.some((a) => INSTRUMENTATION_FLAG.test(a));
+}
+
+/**
  * Applied to every WebContents the app ever creates, not just the main window.
  * Registered from `app.on('web-contents-created')` so a future window, or one
  * created by something else, cannot skip it.
@@ -80,22 +114,31 @@ export function createOrbWindow(options: WindowOptions): BrowserWindow {
   // using it is how a window ends up 48px taller than the space it can occupy.
   const { workAreaSize, workArea } = screen.getPrimaryDisplay();
 
-  const restored = loadWindowState();
-  const initial: SavedWindowState = restored.ok
-    ? restored.state
-    : {
-        width: workAreaSize.width,
-        height: workAreaSize.height,
-        x: workArea.x,
-        y: workArea.y,
-        isMaximized: true,
-      };
+  const instrumented = isInstrumentedLaunch();
+
+  const fillWorkArea: SavedWindowState = {
+    width: workAreaSize.width,
+    height: workAreaSize.height,
+    x: workArea.x,
+    y: workArea.y,
+    isMaximized: true,
+  };
+
+  // An instrumented launch neither reads nor writes. Not reading is the smaller
+  // half of the fix and still worth it: two capture sets were taken at 984x652
+  // and 1366x720 and could not be compared, because each run inherited whatever
+  // the previous one had left behind. A measurement should start from a known
+  // geometry, not from the sediment of the last measurement.
+  const restored = instrumented ? null : loadWindowState();
+  const initial: SavedWindowState = restored?.ok ? restored.state : fillWorkArea;
 
   console.log(
     `[orb] window: workArea ${workAreaSize.width}x${workAreaSize.height} · ` +
-      (restored.ok
-        ? `restored ${initial.width}x${initial.height} at ${initial.x},${initial.y} maximized=${initial.isMaximized}`
-        : `no restore (${restored.reason}: ${restored.detail}) — maximizing`),
+      (instrumented
+        ? 'INSTRUMENTED launch — window state not read and will not be written; filling the work area'
+        : restored?.ok
+          ? `restored ${initial.width}x${initial.height} at ${initial.x},${initial.y} maximized=${initial.isMaximized}`
+          : `no restore (${restored?.reason}: ${restored?.detail}) — maximizing`),
   );
 
   const window = new BrowserWindow({
@@ -160,7 +203,7 @@ export function createOrbWindow(options: WindowOptions): BrowserWindow {
 
   window.once('ready-to-show', () => window.show());
 
-  attachStatePersistence(window);
+  if (!instrumented) attachStatePersistence(window);
   attachFullscreenToggle(window);
 
   if (options.isDev && options.rendererUrl) {

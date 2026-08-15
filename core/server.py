@@ -51,6 +51,13 @@ from zoey_protocol import (  # noqa: E402
     CLOSE_PROTOCOL_MISMATCH,
     CLOSE_RATE_LIMITED,
 )
+from core.brain.conversation import Conversation  # noqa: E402
+from core.brain.llm import describe_engines, make_engine  # noqa: E402
+from core.tools.browser import close_browser as close_browser_on_shutdown  # noqa: E402
+from core.tools.browser import reap_orphan  # noqa: E402
+from core.brain.persona import loaded as persona_loaded  # noqa: E402
+from core.brain.persona import system_prompt as persona_system_prompt  # noqa: E402
+from core.brain.provenance import SessionContext  # noqa: E402
 from core.security.audit import AuditLog  # noqa: E402
 from core.security.identity import IdentityError, assert_not_service_account  # noqa: E402
 from core.security.guard import Guard, Verdict  # noqa: E402
@@ -87,6 +94,17 @@ PORT_SCAN_LIMIT = 20
 # 10 s is ~2x the worst realistic case, so it will not fire on a slow-but-
 # compliant revoke, and it bounds an unrecorded non-compliance to ten seconds.
 REVOKE_CONFIRM_TIMEOUT_S = 10.0
+
+# How long a voice turn may take before it is audited as STALLED.
+#
+# Derived, not picked round: Gerald's worst OBSERVED sttMs was 29400 ms, and the
+# worst full turn (STT + TTS + playback start) was 29672 ms. 60 s is ~2x that,
+# so it cannot fire on a slow-but-working turn on this machine.
+#
+# It does NOT cancel the turn — a thread cannot be cancelled and pretending
+# otherwise would leave a half-run tool. It records WHERE the turn got to and
+# releases the sphere, so a hang is legible in one minute instead of twelve.
+VOICE_TURN_STALL_S = 60.0
 WS_PATH = "/v1"
 ALLOWED_ORIGINS = frozenset({"zoey://console", "zoey://orb"})
 HANDSHAKE_DEADLINE_S = 3.0
@@ -184,7 +202,30 @@ class ZoeyDaemon:
 
         self.audit = AuditLog(ROOT / "data" / "audit.log")
         self.guard = Guard(ROOT / "core" / "config" / "permissions.yaml")
+        # THE INJECTION FENCE, and there is exactly ONE of it. CONTRACT §6.1's
+        # `external_content_in_context` counter is only a control if every path
+        # that can run a red-tier tool consults the same instance — a second
+        # SessionContext somewhere would be a flag that is always clear and a
+        # gate that always opens.
+        self.session = SessionContext()
+        # THE THREAD, loaded from disk at boot. A corrupt file starts empty
+        # and is reported — it must never stop the daemon coming up.
+        self.conversation = Conversation()
+
+        # THE BRAIN. Built here so `brain.engine` in settings.yaml is read once,
+        # at boot, and reported at boot — including whether it is actually
+        # usable. Constructing an adapter loads no model and opens no socket, so
+        # this costs microseconds even for `local`.
+        #
+        # It is NOT replaced with a working engine when the selected one is
+        # unusable. He finds out in the start-up log and, if he asks it
+        # something, out loud. See core/brain/llm/__init__.py.
         self.settings = load_settings(ROOT / "core" / "config" / "settings.yaml")
+        try:
+            self.brain = make_engine(self.settings)
+        except ValueError as exc:
+            log(f"!! brain: {exc}")
+            self.brain = None
 
         budget = self.settings.get("budget", {}) or {}
         health_cfg = self.settings.get("health", {}) or {}
@@ -687,7 +728,24 @@ class ZoeyDaemon:
         owner most needs to see that something is happening.
         """
         try:
-            turn = await asyncio.to_thread(self.voice.stop)
+            turn = await asyncio.wait_for(
+                asyncio.to_thread(self.voice.stop), timeout=VOICE_TURN_STALL_S)
+        except asyncio.TimeoutError:
+            stages = getattr(self.voice, "stages", [])
+            last = stages[-1][0] if stages else "no stage reached"
+            trail = " -> ".join(f"{n}@{ms:.0f}ms" for n, ms in stages) or "none"
+            log(f"!! VOICE TURN STALLED after {VOICE_TURN_STALL_S:.0f}s | last stage: {last}")
+            log(f"   stages: {trail}")
+            self.audit.append(
+                actor="system", tool="voice.turn.stalled", tier="red",
+                summary=(f"voice turn did not complete within {VOICE_TURN_STALL_S:.0f}s; "
+                         f"last stage reached: {last}"),
+                detail={"lastStage": last, "stages": trail,
+                        "timeoutS": VOICE_TURN_STALL_S},
+            )
+            await self.broadcast("evt.agent.state",
+                                 {"companionId": DEFAULT_COMPANION_ID, "state": "idle"})
+            return
         except Exception as exc:  # noqa: BLE001
             log(f"!! voice turn failed: {exc}")
             await self.broadcast("evt.agent.state", {"companionId": DEFAULT_COMPANION_ID, "state": "idle"})
@@ -754,8 +812,10 @@ class ZoeyDaemon:
             },
             provenance="human",
         )
-        await self.broadcast("evt.agent.state", {"companionId": DEFAULT_COMPANION_ID,
-                                                 "state": "speaking" if turn.said else "idle"})
+        # Also no explicit broadcast: the bus emitted `speaking` when playback
+        # started and will emit `idle` from `finished_callback` when the audio
+        # actually drains. Re-emitting here duplicated the first and pre-empted
+        # the second with a state that was not yet true.
 
     # ── microphone lifecycle (spec §7, CONTRACT §5.3) ────────────────────────
 
@@ -911,8 +971,20 @@ class ZoeyDaemon:
         if action == "start":
             self.ptt_active = True
             if self.voice is not None:
-                await asyncio.to_thread(self.voice.start)
-                await self.broadcast("evt.agent.state", {"companionId": DEFAULT_COMPANION_ID, "state": "listening"})
+                # NO explicit state broadcast here. `voice.start()` sets it on
+                # the bus, and the bus is the single owner of the broadcast —
+                # emitting it here as well is precisely what produced 2-3
+                # `listening` frames per press on Session 2's wire.
+                loop_now = asyncio.get_running_loop()
+
+                def _auto_stop(reason: str) -> None:
+                    # VAD closed the segment. Run the SAME turn path a manual
+                    # second press would, so there is one code path and not two.
+                    log(f"  [turn] VAD closed the segment ({reason})")
+                    self.ptt_active = False
+                    asyncio.run_coroutine_threadsafe(self._run_voice_turn(), loop_now)
+
+                await asyncio.to_thread(lambda: self.voice.start(on_auto_stop=_auto_stop))
         else:
             self.ptt_active = False
             if self.voice is not None:
@@ -997,6 +1069,8 @@ class ZoeyDaemon:
                     self.health.sample,
                     budget_spent=self.ledger.spent_today(),
                     budget_cap=self.budget_cap,
+                    brain_calls=getattr(self.brain, "calls", 0),
+                    brain_engine=getattr(self.brain, "name", ""),
                 )
             except Exception as err:  # noqa: BLE001
                 # A health sample must never kill the beat the Orb renders from.
@@ -1056,6 +1130,10 @@ async def main() -> None:
     parser.add_argument("--port", type=int, default=None)
     parser.add_argument("--voice", action="store_true",
                         help="load the voice loop and open the microphone")
+    parser.add_argument("--inject-wav", default=None,
+                        help="DEV: feed a WAV into the mic callback as if spoken, then run a real turn")
+    parser.add_argument("--dump-segments", action="store_true",
+                        help="write each segment handed to Whisper under data/audio/segments/")
     parser.add_argument("--stt-model", default="base",
                         help="whisper size: tiny | base | small (default base)")
     args = parser.parse_args()
@@ -1090,6 +1168,28 @@ async def main() -> None:
         log(f"!! AUDIT CHAIN BROKEN: {why}")
     else:
         log(f"audit chain intact ({daemon.audit.count} entries)")
+
+    # A browser orphaned by a force-killed previous daemon. Item 2c: a headful
+    # Chrome must never outlive the daemon, and `atexit` does not run under
+    # taskkill /F — which is exactly how this daemon usually dies.
+    _reaped = reap_orphan()
+    if _reaped:
+        log(f"browser: {_reaped}")
+
+    if daemon.conversation.load_error:
+        log(f"memory: conversation.json UNREADABLE ({daemon.conversation.load_error}) "
+            f"- starting with an empty thread")
+    else:
+        log(f"memory: {daemon.conversation.describe()} loaded")
+
+    _persona_ok, _persona_path = persona_loaded()
+    log(f"brain: persona zoey.md {'loaded' if _persona_ok else 'MISSING'} "
+        f"({len(persona_system_prompt())} chars)")
+
+    for _name, _sel, _why, _usable in describe_engines(daemon.settings):
+        _mark = "->" if _sel else "  "
+        _state = "ready" if _usable else f"UNUSABLE ({_why})"
+        log(f"brain: {_mark} {_name:<10} {_state}")
 
     runtime_file = rt.write_runtime_file(port, daemon.token)
     log(f"runtime file: {runtime_file}")
@@ -1134,9 +1234,88 @@ async def main() -> None:
                 budget_spent=daemon.ledger.spent_today(),
                 budget_cap=daemon.budget_cap)),
             bus=bus, on_state=_emit_state,
+            on_stage=lambda name, ms: log(f"  [turn] {ms:8.1f} ms  {name}"),
+            dump_segments=args.dump_segments,
+            session=daemon.session, audit=daemon.audit, brain=daemon.brain,
+            conversation=daemon.conversation,
         )
+        # CONTRACT §4.1 `evt.permission.request`. The red gate raises these and
+        # nothing can answer them yet — the approval card is P5 and Session 2's.
+        # Emitting them anyway is deliberate: the moment that card exists, red
+        # tools work with no daemon change, and until then the requests are
+        # visible on the wire and in the audit log rather than invisible.
+        daemon.voice.executor.approvals._on_request = (
+            lambda payload: asyncio.run_coroutine_threadsafe(
+                daemon.broadcast("evt.permission.request", payload), loop_ref)
+        )
+        daemon.voice.vad_config = daemon.settings.get("voice", {}) or {}
+        # PRE-WARM PIPER. Constructing PiperTTS loads the voice but does not run
+        # an inference, so the first real synthesis pays the ONNX lazy init —
+        # measured at 709 ms first call versus 338 ms warm on a quiet machine.
+        # Gerald should pay that at boot, alongside the Whisper load he already
+        # waits through, not on his first command.
+        #
+        # It is NOT the 12.4 s his turn saw. That synthesis ran immediately after
+        # os.startfile spawned Explorer and Defender began scanning the opened
+        # folder, on two cores — contention, not cold start. This removes a real
+        # but much smaller penalty and is worth having regardless.
+        _t_warm = time.monotonic()
+        try:
+            tts.synthesise("Ready.")
+            log(f"voice: piper pre-warmed in {(time.monotonic() - _t_warm) * 1000:.0f} ms")
+        except Exception as exc:  # noqa: BLE001
+            log(f"voice: piper pre-warm failed ({exc}) - first reply will be slower")
+
         mic.open()
         daemon.audit_mic_open(pre_roll_s=1.0, device="default input")
+
+        if args.inject_wav:
+            # DEV ONLY. Feeds a recorded WAV into the SAME callback the sound
+            # device feeds, bypassing only the acoustics.
+            #
+            # This is not a harness and not a loopback. The ring, the pre-roll,
+            # the VAD watcher, transcribe, route, execute, synthesise and
+            # playback are all the daemon's own, running in the daemon. The only
+            # substitution is the air between a speaker and a microphone —
+            # which had to go, because acoustic echo cancellation destroys it
+            # and makes every transcript from that route meaningless.
+            import wave as _wave
+
+            async def _inject() -> None:
+                await asyncio.sleep(1.0)
+                with _wave.open(args.inject_wav, "rb") as fh:
+                    raw = fh.readframes(fh.getnframes())
+                pcm = __import__("numpy").frombuffer(raw, dtype="int16")
+                # Stop the real device first. Otherwise the live microphone
+                # keeps feeding the SAME buffer and the segment becomes injected
+                # audio interleaved with the room - measured once as 12.64 s of
+                # chop for 5.10 s of injection, which Whisper returned empty.
+                # The callback is a pure function; closing the device does not
+                # stop it being callable.
+                mic.close()
+                log(f"INJECT: {args.inject_wav} ({len(pcm) / 16000:.2f}s) into the mic callback "
+                    f"(real device closed so the segment is the WAV alone)")
+
+                loop_ref2 = asyncio.get_running_loop()
+
+                def _auto(reason: str) -> None:
+                    log(f"  [turn] VAD closed the segment ({reason})")
+                    daemon.ptt_active = False
+                    asyncio.run_coroutine_threadsafe(daemon._run_voice_turn(), loop_ref2)
+
+                daemon.voice.start(on_auto_stop=_auto)
+                daemon.ptt_active = True
+                # Real-time pacing in 50 ms blocks, so VAD sees the same
+                # arrival cadence a live speaker produces.
+                blk = 800
+                for i in range(0, len(pcm), blk):
+                    if not daemon.ptt_active:
+                        log(f"INJECT: stopped early at {i / 16000:.2f}s (VAD closed it)")
+                        break
+                    mic._callback(pcm[i:i + blk].reshape(-1, 1), blk, None, None)
+                    await asyncio.sleep(blk / 16000.0)
+
+            asyncio.create_task(_inject())
         log(f"voice: ready in {time.monotonic() - t_v:.1f}s "
             f"(stt={args.stt_model} tts={tts.voice.voice_id})")
 
@@ -1173,6 +1352,10 @@ async def main() -> None:
         finally:
             hb.cancel()
             sweeper.cancel()
+
+    _closed = close_browser_on_shutdown(reason="daemon shutdown")
+    if _closed.get("was_open"):
+        log(f"browser: closed on shutdown (up {_closed.get('up_s')}s)")
 
     daemon.audit.append(actor="system", tool="daemon.stop", tier="none",
                         summary="Daemon stopped cleanly")

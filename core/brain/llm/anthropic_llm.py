@@ -67,12 +67,20 @@ class AnthropicLLM(LLMAdapter):
             # silent fallback to the local brain. Choosing her brain is Gerald's
             # decision and swapping it without telling him would make every
             # answer's provenance a guess.
+            # THIS LINE USED TO SAY "I am running on the local model instead",
+            # AND IT WAS FALSE. Nothing falls back — `make_engine` returns the
+            # engine settings.yaml asked for and never substitutes another, so
+            # she was announcing a downgrade that had not happened. A sentence
+            # that misdescribes which brain answered is precisely the failure
+            # this whole module is built to prevent, and it was sitting in the
+            # error path of the module that prevents it.
             raise LLMUnavailable(
                 f"anthropic brain unavailable: {why}",
                 spoken=(
                     f"My Anthropic brain is not configured, sir. "
-                    f"{why.capitalize()}. I am running on the local model instead, "
-                    f"and you should know the difference."
+                    f"{why.capitalize()}. I am not answering that one — "
+                    f"switch me to Gemini in settings and ask again. "
+                    f"Everything local still works."
                 ),
             )
         if self._client is None:

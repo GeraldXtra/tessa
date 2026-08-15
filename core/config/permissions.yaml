@@ -14,9 +14,24 @@ tiers:
     - fs.read
     - fs.search
     - fs.list              # console: directory enumeration (metadata only)
+    - fs.open              # hand a path to its registered application
+    - fs.reveal            # select it in Explorer. Shows, does not open.
+    - fs.usage             # size of a folder, from attributes only
     - app.launch
     - browser.open_url
+    - browser.search       # OUTPUT IS UNTRUSTED — fenced as external content
+    - browser.read         # ditto, and it harvests hidden/ARIA text on purpose
+    - browser.screenshot
+    - browser.close
+    - x.read               # a timeline is thousands of strangers' text
     - system.status
+    - system.control       # volume, media keys, brightness, lock, sleep.
+                           # Reversible without loss: the worst case of a
+                           # mistranscription is thirty seconds of annoyance.
+    - window.query         # list what is open
+    - window.control       # focus / minimise / maximise / WM_CLOSE, one HWND
+    - clipboard.read       # OUTPUT IS UNTRUSTED — `program` provenance, fenced
+    - clipboard.write
     - mail.read
     - pty.spawn.human      # the owner clicked/typed. Their machine, their shell.
 
@@ -24,6 +39,12 @@ tiers:
   amber:
     - fs.move
     - fs.rename
+    - fs.create            # mkdir. Additive, but it writes to his disk.
+    - fs.copy              # can fill a drive; 14.5 GB free when this was written
+    - process.kill         # BY PID ONLY. Never by image name — see core/tools/procs.py
+    - browser.interact     # click / type on a live page. Amber because a page
+                           # is attacker-controlled and a click can be a public act.
+    - x.interact           # like / repost. Reversible, but PUBLIC under his name.
     - fs.hydrate           # console: recalls a OneDrive placeholder. COSTS METERED DATA.
     - mail.draft
     - git.commit
@@ -33,6 +54,7 @@ tiers:
   # ── RED — ALWAYS requires explicit approval, no exceptions ────────────────
   red:
     - fs.delete
+    - x.publish            # post / reply. The least reversible act in this build.
     - mail.send
     - shell.execute
     - system.shutdown

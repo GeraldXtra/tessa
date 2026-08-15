@@ -34,7 +34,8 @@ from datetime import datetime
 from enum import Enum
 from typing import Callable
 
-from .intents import IntentParser
+from .intents import IntentParser, greeting
+from .repair import repair
 
 
 class Intent(str, Enum):
@@ -188,20 +189,38 @@ _PRESENCE = [
 # the moment the tools were reconnected, and a lie she would have kept telling
 # him. It names CATEGORIES rather than reciting sixteen tool names, because a
 # list is not something anyone can hold from a spoken sentence.
+# THE ACKNOWLEDGEMENT OPENER IS GONE, and it was the loudest thing wrong with
+# her. Every one of these began "I heard you, Emperor" / "Heard, Emperor" /
+# "I caught that, Emperor", so across eight consecutive turns Gerald was greeted
+# eight times. His rule was: greet on first contact, and when he greets her.
+# Telling him she heard him is not information — she answered, so obviously she
+# heard him — and repeated every turn it reads as a tic.
+#
+# These now survive only as the last-resort line for something the brain also
+# could not take, so they are rarer AND shorter.
 _UNROUTED = [
-    "I heard you, Emperor. Not that one yet. Apps, folders, your system and the time are mine.",
-    "Heard, Emperor. That is not mine yet. I can open things, check your machine, tell you the time.",
-    "I caught that, Emperor. Not yet. Apps, folders, ports, your system — those I can do.",
+    "Not that one yet, Emperor. Files, windows, your machine, the browser and X are mine.",
+    "That is not mine yet, Emperor. I can open things, run your machine, search the web.",
+    "Not yet, Emperor. Files, apps, processes, the browser — those I can do.",
 ]
 
 _NEAR_MISS = [
-    "I half caught that, Emperor. Say it again?",
+    "Say that again, Emperor?",
     "Not quite, Emperor. Once more?",
 ]
 
 _SILENCE = [
     "I did not catch anything, Emperor.",
     "Nothing came through, Emperor.",
+]
+
+# Distinct from silence on purpose. "Nothing came through" sends him looking for
+# a bug; "you came through very quietly" sends him to the microphone, which is
+# where the problem actually is. Naming the real cause is the difference between
+# a useful failure and a polite one.
+_TOO_QUIET = [
+    "You came through very quietly, Emperor. Closer to the microphone?",
+    "That was almost too quiet to hear, Emperor. Say it again, a little closer.",
 ]
 
 
@@ -219,6 +238,19 @@ class Router:
     def __init__(self, health_sample: Callable[[], dict] | None = None) -> None:
         self._health = health_sample
         self._tools = IntentParser()
+        #: Turn counter for this session. GREETING IS FIRST CONTACT ONLY.
+        #:
+        #: His rule, and it was not implemented: greet when the session opens
+        #: and when he greets her. Not every sentence. Eight turns produced
+        #: eight greetings because the acknowledgement was baked into the
+        #: UNROUTED strings rather than being a decision anything made.
+        self.turns = 0
+        #: Set per turn by `repair` — did he actually say her name.
+        self.addressed_by_name = False
+
+    @property
+    def first_contact(self) -> bool:
+        return self.turns <= 1
 
     def route(self, text: str) -> Routed:
         """
@@ -235,7 +267,12 @@ class Router:
         told Gerald she could not open his downloads — which she could, and had
         been able to for two days.
         """
-        raw = collapse_repetition(text or "")
+        self.turns += 1
+        # REPAIR BEFORE ANYTHING MATCHES. Her own name in any spelling, verb
+        # concatenation ("OpenGoogle.com"), and spoken domains ("google dot
+        # com") are all fixed once, at the front, so no downstream matcher has
+        # to know that speech arrives glued together. See core/brain/repair.py.
+        raw, self.addressed_by_name = repair(collapse_repetition(text or ""))
         norm = normalise(raw)
         if not norm:
             return Routed(Intent.UNROUTED, _pick(_SILENCE))
@@ -275,6 +312,11 @@ class Router:
             ]), score=score)
 
         if intent is Intent.PRESENCE:
+            # He greeted her, so she greets back — that is the half of his rule
+            # that always applied. On any later turn a bare "you there?" gets
+            # the short form instead of a fresh salutation.
+            if self.first_contact:
+                return Routed(intent, greeting(now) + " Ready when you are.", score=score)
             return Routed(intent, _pick(_PRESENCE), score=score)
 
         if intent is Intent.STOP:

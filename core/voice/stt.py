@@ -44,7 +44,32 @@ CPU_THREADS = 4
 #: It fixes exactly the class of error the accent produces: proper nouns.
 #: Zui -> Zoey, "larger watch" -> LedgerWatch, Aptek -> Aptech. Generic English
 #: was already verbatim without it.
-VOCABULARY_PRIME = "Zoey, LedgerWatch, Aptech, naira, Titan Wave, ZOEY_OS, Lagos"
+#: UPDATED FROM HIS ACTUAL TRANSCRIPTS. The old list was proper nouns from an
+#: earlier sprint and had gone stale — meanwhile the words he says every day
+#: were mangled: "documents" -> "Taluts", "tweet that I'm building an AI
+#: assistant" -> "Tweets, Data Mbudinon AI Assist", and his own assistant's name
+#: "Zoey" -> "Zoi". Priming is measured as a 2x SPEED SAVING as well as an
+#: accuracy fix, so a longer, RELEVANT list costs nothing and is exactly its job.
+#:
+#: Her own name first, and spelled once. The folder nouns, the verbs he uses on
+#: them, the apps he actually opens, and the domain words that keep coming back
+#: concatenated.
+#: FULL PHRASES, NOT JUST NOUNS. The noun list fixed folder names and did
+#: nothing for connected speech: "tweet that I'm building an AI assistant" came
+#: back as "Tweet, that's I am, Beauty and AI assis…". An `initial_prompt` is
+#: decoder CONDITIONING — it biases the language model toward the shapes it
+#: contains, so a list of isolated nouns primes isolated nouns. Sentences prime
+#: sentences.
+VOCABULARY_PRIME = (
+    "Zoey, open my downloads. Zoey, open my documents, desktop, pictures, "
+    "videos or music. Zoey, what is the weather? Zoey, what is a closure in "
+    "JavaScript? Open Chrome, Google, WhatsApp, VS Code or Explorer. "
+    "Tweet that I am building an AI assistant. Post this to X. Repost that. "
+    "Reply to post two. Read my timeline. Check my notifications. "
+    "Forget that, start fresh. Yes, please. Go on. "
+    "google.com, x.com, web.whatsapp.com, github.com. "
+    "LedgerWatch, Aptech, naira, Titan Wave, ZOEY_OS, Lagos."
+)
 
 
 @dataclass
@@ -57,6 +82,10 @@ class Transcript:
     segments: list[str] = field(default_factory=list)
     #: True when the decoder echoed its own vocabulary prime instead of speech.
     prime_echo: bool = False
+    #: True when the segment never reached the model because it was near-silent.
+    too_quiet: bool = False
+    #: Measured RMS of the segment, so a quiet-capture problem is visible.
+    rms: float = 0.0
 
     @property
     def realtime_factor(self) -> float:
@@ -64,7 +93,25 @@ class Transcript:
         return self.audio_s / self.wall_s if self.wall_s > 0 else float("inf")
 
 
-_PRIME_WORDS = {w.strip(" ,.").lower() for w in VOCABULARY_PRIME.replace(",", " ").split() if w.strip(" ,.")}
+#: THE ECHO VOCABULARY IS NOT THE PRIME, AND DECOUPLING THEM WAS A BUG FIX.
+#:
+#: `_is_prime_echo` asks "is this transcript just my own prompt coming back",
+#: and it used to derive its word set from VOCABULARY_PRIME directly. That was
+#: safe while the prime was six proper nouns. The moment the prime grew to
+#: include the words he actually says — open, my, downloads, post, x — the test
+#: inverted: "open my downloads" scored 3 of 3 prime words, 100%, and was
+#: DISCARDED as an echo. That is the one command that worked for him.
+#:
+#: So the echo test now uses only DISTINCTIVE tokens: proper nouns and coined
+#: words nobody utters casually. A transcript made mostly of these is the
+#: decoder regurgitating the prompt; a transcript made of "open" and "my" is a
+#: man giving an instruction.
+_ECHO_WORDS = {
+    "ledgerwatch", "aptech", "naira", "titan", "wave", "zoey_os", "lagos",
+    "dioco", "piper",
+}
+
+_PRIME_WORDS = _ECHO_WORDS
 
 #: At or above this fraction of prime words, the transcript is the prime coming
 #: back rather than speech. 0.6 rather than 1.0 because the echo arrives
@@ -82,6 +129,39 @@ def _is_prime_echo(text: str) -> bool:
     hits = sum(1 for w in words if w in _PRIME_WORDS)
     return (hits / len(words)) >= PRIME_ECHO_RATIO
 
+
+#: Below this RMS, the segment is treated as SILENCE and never transcribed.
+#:
+#: MEASURED, and this is the mechanism behind the fiction. A captured segment at
+#: RMS 90.5 (peak 822, -32.0 dBFS) produced the confident transcript
+#: "I can't even talk to you." from audio that said "Zoey, open my downloads."
+#: Gerald's own fixture measures RMS 2966 and transcribes correctly. Whisper does
+#: not return silence for silence — it HALLUCINATES, fluently, and the router
+#: then acts on the hallucination.
+#:
+#: LOWERED FROM 300 AFTER MEASURING, and the correction matters: Gerald's own
+#: speech attenuated to RMS 264 transcribes CORRECTLY. A 300 floor would have
+#: told him "too quiet" for audio Whisper handles perfectly — rejecting real
+#: commands to prevent a hallucination that low level does not actually cause.
+#:
+#: 150 sits between the measured room floor (~74 RMS) and the lowest level of
+#: his speech proven to work (264). It rejects the room and keeps him.
+SILENCE_RMS_FLOOR = 150.0
+
+#: A quiet segment with a real transient is still speech. The RMS floor alone
+#: would reject a whispered or AGC-flattened command whose peaks are clearly
+#: above the room, so BOTH must be under their floor before she says she heard
+#: nothing. 0.02 of full scale is ~655 in int16 — well above the ~74 RMS room.
+SILENCE_PEAK_FLOOR = 0.02
+
+#: Peak-normalise quiet captures to this before transcription. 0.35 rather than
+#: 1.0 leaves headroom so a louder syllable later in the utterance does not clip.
+NORMALISE_TARGET_PEAK = 0.35
+
+#: Cap on the boost. Beyond ~20x the room noise is amplified as much as the
+#: voice and Whisper hallucinates on the noise instead — trading one failure for
+#: an identical-looking one.
+MAX_NORMALISE_GAIN = 20.0
 
 #: THREAD_PRIORITY_BELOW_NORMAL. One step down, not lowest: THREAD_MODE_
 #: BACKGROUND_BEGIN also throttles I/O and would slow model page-ins.
@@ -123,7 +203,7 @@ class WhisperSTT:
         )
         self.load_s = time.perf_counter() - t0
 
-    def transcribe(self, audio: np.ndarray, sample_rate: int = 16_000) -> Transcript:
+    def transcribe(self, audio: np.ndarray, sample_rate: int = 16_000) -> Transcript:  # noqa: C901
         """
         `audio` is float32 in [-1, 1] at 16 kHz — the shape read_wav() returns.
 
@@ -132,6 +212,32 @@ class WhisperSTT:
         and missing it badly. If accuracy needs the beam, that is a trade to make
         with the measured numbers in hand, not by default.
         """
+        # ── SILENCE GATE, BEFORE the model is given a chance to invent ───────
+        #
+        # Cheaper than transcribing and strictly more truthful: a segment that is
+        # indistinguishable from the room cannot contain a command, and asking
+        # Whisper anyway is asking it to make one up.
+        rms = float(np.sqrt(np.mean((audio.astype(np.float64) * 32768.0) ** 2))) if audio.size else 0.0
+        peak = float(np.max(np.abs(audio))) if audio.size else 0.0
+
+        if rms < SILENCE_RMS_FLOOR and peak < SILENCE_PEAK_FLOOR:
+            return Transcript(
+                text="", language="en", language_probability=0.0,
+                audio_s=len(audio) / sample_rate, wall_s=0.0,
+                segments=[], too_quiet=True, rms=rms,
+            )
+
+        # LEVEL NORMALISATION WAS TRIED HERE AND REMOVED. Keeping the note
+        # because the negative result is worth more than the code was:
+        #
+        # Attenuating Gerald's real 15 s fixture from RMS 3499 down to RMS 264 —
+        # the level a 15-second AGC-settled stream produces — still transcribed
+        # CORRECTLY: "Zoey, Open LedgerWatch folder and show me what it looks
+        # like." Whisper is robust to low level. Peak-normalising it back up made
+        # the result slightly WORSE ("what things like").
+        #
+        # So quiet capture is NOT what produces the hallucinations, and a gain
+        # stage here would have been a fix for a cause that was not real.
         # ── THREAD PRIORITY, and why it is here rather than on the process ───
         #
         # Session 2 measured a STATE-VISIBLE arrivedToDrawnMs of 677.80 against
@@ -185,7 +291,7 @@ class WhisperSTT:
                 text="", language=info.language,
                 language_probability=float(info.language_probability),
                 audio_s=len(audio) / sample_rate, wall_s=wall,
-                segments=[], prime_echo=True,
+                segments=[], prime_echo=True, rms=rms,
             )
 
         return Transcript(
@@ -195,6 +301,7 @@ class WhisperSTT:
             audio_s=len(audio) / sample_rate,
             wall_s=wall,
             segments=[t.strip() for t in texts],
+            rms=rms,
         )
 
 

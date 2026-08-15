@@ -124,16 +124,27 @@ class SessionContext:
         self.external_content_in_context = 0
         self.sources.clear()
 
+    #: Tiers that cannot fire while untrusted content is in context.
+    #:
+    #: AMBER WAS ADDED WHEN THE BROWSER LANDED, and the reason is specific
+    #: rather than general caution. Before a browser existed, amber meant moving
+    #: a file on his own disk — annoying if wrong, private, reversible. Now amber
+    #: includes `x.like`, `x.repost`, `browser.click` and `browser.type`, and a
+    #: page that can make her LIKE something is a page that can make her act
+    #: PUBLICLY under his name. The blast radius of amber changed, so the gate
+    #: had to.
+    GATED_TIERS = ("red", "amber")
+
     def check_tool(self, name: str, tier: str) -> None:
         """
         Called before EVERY tool execution. Raises rather than returning a
         verdict, so a caller that forgets to check the result still cannot act.
         """
-        if tier != "red":
+        if tier not in self.GATED_TIERS:
             return
         if self.external_content_in_context and not self.owner_approved_red:
             raise InjectionRefusal(
-                f"REFUSED {name}: a red-tier action was requested while untrusted "
+                f"REFUSED {name}: a {tier}-tier action was requested while untrusted "
                 f"content from {', '.join(self.sources)} is in context. "
                 f"Only Gerald can authorise this, out loud, after the content is cleared."
             )

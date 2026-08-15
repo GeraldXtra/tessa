@@ -85,6 +85,20 @@ export const IPC = {
   pttEdge: 'zoey:ptt-edge',
   /** renderer → main, send. 'toggle' | 'hold'. */
   pttSetMode: 'zoey:ptt-set-mode',
+  /** main → renderer, push. `evt.permission.request` — one approval card. */
+  approvalRequested: 'zoey:approval-requested',
+  /** main → renderer, push. A requestId that is no longer pending. */
+  approvalCleared: 'zoey:approval-cleared',
+  /**
+   * renderer → main, send. `{ requestId, decision }` — the owner's answer.
+   *
+   * The ONE channel on this bridge that carries a caller-supplied string, and
+   * it is fenced accordingly: `decision` is narrowed to the two values a
+   * surface may send (CONTRACT §5.1 — `expired` is daemon-only), and
+   * `requestId` is only ever echoed back against a request main already holds.
+   * Main will not forward an id it never issued a card for.
+   */
+  approvalRespond: 'zoey:approval-respond',
   /** renderer → main, send. Owner pressed RETRY after a terminal failure. */
   retryConnection: 'zoey:retry-connection',
   /**
@@ -299,6 +313,22 @@ export interface BootstrapInfo {
    */
   probeGeometryMs: number;
   probePulseMs: number;
+  /**
+   * DEV ONLY, 0 = off. `--probe-limb=<ms>`. Reads an 80x160 patch on the
+   * sphere's limb, which is cheap enough to sustain a 50 ms cadence and is the
+   * one place the spin does not swamp the turbulence. See PROBE_LIMB_W.
+   */
+  probeLimbMs: number;
+  /** DEV ONLY, 0 = off. `--probe-centre=<ms>`. Same patch at the disc centre. */
+  probeCentreMs: number;
+  /**
+   * DEV ONLY. `--dev-overlay` shows the frame-metrics overlay at launch.
+   *
+   * Default OFF even in a dev build, which is the change: it used to render
+   * whenever `isDev` was true, and the owner runs `npm run dev`, so it sat over
+   * the lower-left of his sphere every day. Alt+0 toggles it at runtime.
+   */
+  devOverlay: boolean;
   /**
    * DEV ONLY. `--force-state=<agent state>`, already validated against the
    * closed set in main. Null means the live/cycler state wins as usual.

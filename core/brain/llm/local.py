@@ -38,6 +38,12 @@ from .base import LLMAdapter, LLMUnavailable, Message, ToolDef, Usage
 ROOT = Path(__file__).resolve().parents[3]
 MODEL_ROOT = ROOT / "data" / "models"
 
+#: ChatML control tokens. Qwen's template emits these as ordinary tokens and
+#: CTranslate2 hands them straight through, so they reach the text she speaks
+#: unless they are cut here. `<|endoftext|>` is included for the base-model
+#: variants that use it instead.
+_STOP_TOKENS = {"<|im_end|>", "<|im_start|>", "<|endoftext|>"}
+
 
 class LocalLLM(LLMAdapter):
     def __init__(self, cfg: dict[str, Any]) -> None:
@@ -55,11 +61,25 @@ class LocalLLM(LLMAdapter):
 
     @property
     def available(self) -> tuple[bool, str]:
-        try:
-            import ctranslate2  # noqa: F401
-            import transformers  # noqa: F401
-        except ImportError as exc:
-            return False, f"missing {exc.name}"
+        """
+        `find_spec`, NOT `import`. Measured: importing transformers to answer
+        "is the local brain installed?" added **5 SECONDS** to daemon boot,
+        because the daemon reports all three engines at start-up and this was
+        the third. It also drags PyTorch's absence warning into the log of a
+        process that was never going to use PyTorch.
+
+        `find_spec` answers the same question — is the package importable —
+        without executing it, in microseconds. The real import still happens in
+        `_load()`, where the cost buys something.
+        """
+        from importlib.util import find_spec
+
+        for mod in ("ctranslate2", "transformers"):
+            try:
+                if find_spec(mod) is None:
+                    return False, f"missing {mod}"
+            except (ImportError, ValueError):
+                return False, f"missing {mod}"
         return True, ""
 
     def _load(self) -> None:
@@ -115,6 +135,13 @@ class LocalLLM(LLMAdapter):
         for result in self._gen.generate_tokens(
             tokens, max_length=limit, sampling_temperature=0.3, sampling_topk=20,
         ):
+            # STOP TOKENS ARE NOT WORDS, AND CTRANSLATE2 DOES NOT STRIP THEM.
+            # Measured live: "Ibati, Nigeria's capital.<|im_end|>" — Piper would
+            # have read that last part out loud as "im end". The generator emits
+            # the chat template's own control tokens as ordinary tokens, so the
+            # break has to happen here.
+            if result.token in _STOP_TOKENS:
+                break
             buf.append(result.token)
             text = self._tok.convert_tokens_to_string(buf)
             if text:

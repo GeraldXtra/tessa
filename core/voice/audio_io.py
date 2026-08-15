@@ -15,6 +15,7 @@ the wire and then throwing most of them away on a 2-core machine.
 
 from __future__ import annotations
 
+import threading
 import time
 import wave
 from dataclasses import dataclass
@@ -239,22 +240,28 @@ class ArmedMicrophone:
     def rms_of(self, block: np.ndarray) -> float:
         return float(np.sqrt(np.mean(block.astype(np.float64) ** 2))) if block.size else 0.0
 
-    def wait_for_silence(
+    def watch_for_silence(
         self,
         *,
+        on_close: Callable[[str], None],
         silence_ms: int = 1200,
-        floor_rms: float = 300.0,
+        floor_rms: float = 150.0,
+        relative_ratio: float = 0.08,
         hard_cap_s: float = 20.0,
         poll_ms: int = 50,
-        stop_flag: Callable[[], bool] | None = None,
-    ) -> tuple[str, float]:
+    ) -> threading.Thread:
         """
-        Close the segment when HE stops talking. Returns (reason, ms_since_last_speech).
+        Close the segment when HE stops talking — as a BACKGROUND WATCHER.
 
-        THE PROBLEM THIS SOLVES: the chord was a toggle. Gerald pressed it, spoke,
-        and did not know he had to press again — so he pressed four more times and
-        Whisper returned "What time is it?" five times over, and he sat on
-        `listening` for 77 seconds. Press once, speak, and it should end.
+        THIS IS THE WIRING THAT WAS MISSING. `wait_for_silence` was written,
+        measured in isolation, reported as landed, and called by nothing. Gerald
+        has been told for two prompts that "press once and it ends on silence"
+        works. It has never once run: his 22.06 s segment ended because he
+        pressed the chord a second time, and the 20 s hard cap never fired
+        because the function containing it was never entered.
+
+        A blocking call could not be wired without stalling the socket handler,
+        which is why it never got connected. A watcher thread can.
 
         SILENCE WINDOW = 1200 ms, and the number is not arbitrary. Natural
         between-clause pauses in connected speech run 200-500 ms, and a
@@ -263,34 +270,79 @@ class ArmedMicrophone:
         it truncates him mid-thought, which is a worse failure than pressing
         twice — he loses the second half of a sentence and does not know why.
 
-        FLOOR = 300 RMS against a measured ambient of ~74 RMS (-33.8 dBFS) in
-        this room. Four times the noise floor, so the room alone cannot hold the
-        segment open, and well under speech (his fixture measured 2966 RMS).
+        FLOOR is hybrid: `max(floor_rms, loudest_so_far * relative_ratio)`.
+        Silence is "much quieter than what I just heard", so the segment still
+        closes after Windows AGC has wound the gain down over a long stream, in
+        a different room, or on a different microphone. The absolute 150 is the
+        lower bound that stops a dead-quiet room from being read as speech —
+        his room profiled at RMS 2 (max 191) against speech at 1348-4518, so the
+        floor was never what kept his segment open.
 
         HARD CAP = 20 s regardless. A noisy room, a fan, a passing conversation
         must never record indefinitely — the microphone is already always-live
         and an unbounded segment turns that into an unbounded recording.
 
-        `stop_flag` is checked every poll so a SECOND PRESS still ends it
-        instantly. He must never be trapped waiting for silence detection to
-        notice; the manual override outranks the automatic one.
+        A SECOND PRESS outranks all of it: `cancel_watch` sets `stop_evt` and the
+        loop returns "cancelled" without calling `on_close`, because a manual
+        stop is the caller's own business and must not be reported back to it as
+        an automatic one.
         """
+        stop_evt = threading.Event()
+        self._watch_stop = stop_evt
+
+        def run() -> None:
+            reason = self._silence_loop(
+                silence_ms=silence_ms, floor_rms=floor_rms,
+                relative_ratio=relative_ratio, hard_cap_s=hard_cap_s,
+                poll_ms=poll_ms, stop_evt=stop_evt,
+            )
+            if reason != "cancelled":
+                on_close(reason)
+
+        t = threading.Thread(target=run, name="zoey-vad", daemon=True)
+        t.start()
+        return t
+
+    def cancel_watch(self) -> None:
+        """A second press ends the segment immediately — his escape hatch."""
+        evt = getattr(self, "_watch_stop", None)
+        if evt is not None:
+            evt.set()
+
+    def _silence_loop(
+        self, *, silence_ms: int, floor_rms: float, relative_ratio: float,
+        hard_cap_s: float, poll_ms: int, stop_evt: threading.Event,
+    ) -> str:
         t0 = time.perf_counter()
         last_speech = t0
         heard_any = False
+        loudest = 0.0
+        seen = 0
         while True:
-            if stop_flag is not None and stop_flag():
-                return "second-press", (time.perf_counter() - last_speech) * 1000.0
+            if stop_evt.is_set():
+                return "cancelled"
             now = time.perf_counter()
             if now - t0 >= hard_cap_s:
-                return "hard-cap", (now - last_speech) * 1000.0
-            chunk = self._captured[-1] if self._captured else None
-            if chunk is not None and self.rms_of(chunk) >= floor_rms:
-                last_speech = now
-                heard_any = True
-            quiet_ms = (now - last_speech) * 1000.0
-            if heard_any and quiet_ms >= silence_ms:
-                return "silence", quiet_ms
+                return "hard-cap"
+            chunks = self._captured
+            if chunks is not None and len(chunks) > seen:
+                for blk in chunks[seen:]:
+                    r = self.rms_of(blk)
+                    loudest = max(loudest, r)
+                    # RELATIVE floor: silence is "much quieter than what I just
+                    # heard", not "below a fixed number". A fixed threshold
+                    # cannot survive AGC winding the level down, a different
+                    # room, or a different microphone — and the level here was
+                    # measured moving 979 -> 264 RMS over a 15 s hold. The
+                    # absolute floor stays as a lower bound so a dead-silent
+                    # room still counts as silence.
+                    threshold = max(floor_rms, loudest * relative_ratio)
+                    if r >= threshold:
+                        last_speech = now
+                        heard_any = True
+                seen = len(chunks)
+            if heard_any and (now - last_speech) * 1000.0 >= silence_ms:
+                return "silence"
             time.sleep(poll_ms / 1000.0)
 
     def arm(self) -> np.ndarray:
@@ -342,3 +394,57 @@ def read_wav(path: Path) -> tuple[np.ndarray, int]:
         raw = fh.readframes(fh.getnframes())
     pcm = np.frombuffer(raw, dtype=np.int16)
     return (pcm.astype(np.float32) / 32768.0), rate
+
+
+def replay_silence_decision(
+    samples: np.ndarray,
+    *,
+    block_ms: int = 50,
+    silence_ms: int = 1200,
+    floor_rms: float = 150.0,
+    relative_ratio: float = 0.08,
+    hard_cap_s: float = 20.0,
+) -> dict:
+    """
+    Run the SAME silence decision over a recorded segment, offline.
+
+    Deliberately shares the thresholds and the comparison with the live watcher
+    so this is not a second implementation that can drift from it. It is the
+    test that should have existed from the start: repeatable, needing neither
+    his voice nor a speaker, and it would have caught the unwired detector on
+    day one.
+
+    SCALE, and this was a real bug in this function. The live watcher measures
+    int16 RMS (0..32767) and the thresholds above are on that scale, but
+    `read_wav()` returns float32 in [-1, 1] because that is what Whisper wants.
+    Handed the natural output of `read_wav`, this replay compared a loudest
+    block of 0.219 against a floor of 150 and reported `heard_any=False` — it
+    "proved" his own speech was silence. Sharing the thresholds with the live
+    path is worthless if the units are not shared too, so the scale is now
+    coerced here rather than left to every caller to remember.
+    """
+    samples = np.asarray(samples)
+    if np.issubdtype(samples.dtype, np.floating):
+        samples = samples * 32768.0
+    n = int(block_ms * 16_000 / 1000)
+    last_speech_s = None
+    heard_any = False
+    loudest = 0.0
+    for i in range(0, len(samples) - n + 1, n):
+        t_s = (i + n) / 16_000.0
+        if t_s >= hard_cap_s:
+            return {"reason": "hard-cap", "close_at_s": hard_cap_s,
+                    "heard_any": heard_any, "loudest": loudest}
+        r = float(np.sqrt(np.mean(samples[i:i + n].astype(np.float64) ** 2)))
+        loudest = max(loudest, r)
+        threshold = max(floor_rms, loudest * relative_ratio)
+        if r >= threshold:
+            last_speech_s = t_s
+            heard_any = True
+        elif heard_any and last_speech_s is not None:
+            if (t_s - last_speech_s) * 1000.0 >= silence_ms:
+                return {"reason": "silence", "close_at_s": t_s,
+                        "last_speech_s": last_speech_s, "heard_any": True,
+                        "loudest": loudest}
+    return {"reason": "ran-out", "close_at_s": len(samples) / 16_000.0,
+            "heard_any": heard_any, "loudest": loudest}

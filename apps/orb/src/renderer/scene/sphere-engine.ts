@@ -82,42 +82,132 @@ const BREACHES_BEFORE_DEMOTION = 2;
 export const STATS_STALE_AFTER_MS = 6_000;
 
 /**
- * ─── `thinking` has to intensify, and must not look anxious ───
+ * ─── THIS SPHERE CANNOT EXPRESS DURATION. Three levers tried; all retired. ───
  *
- * §R.1 gives `thinking` "turbulence", and until now it was metronomic: measured
- * at a median per-pixel change of 2.416 with a range of 1.06 across a full
- * minute. That reads as ambient — a screensaver — and a local model can hold
- * this state for 60–90 s, which is exactly when the owner needs to see effort
- * rather than a loop.
+ * DO NOT RE-RUN ANY OF THESE. All three constants below are deliberately zero,
+ * for three different measured reasons, and the machinery is left in place so
+ * the record survives. `thinking` no longer intensifies at all, on purpose.
  *
- * WHAT INTENSIFIES, AND WHAT DELIBERATELY DOES NOT:
+ * THE PROBLEM. A local model can hold `thinking` for 60–90 s, and at rest the
+ * state was metronomic: median per-pixel change 2.416 with a range of 1.06
+ * across a full minute. It reads as ambient — a screensaver — where the owner
+ * needs to see that she is working.
  *
- *   RATE, mostly. The noise clock accelerates up to 2.2x. The same shell churns
- *   faster without growing, brightening or changing hue — which is what "she is
- *   working harder" looks like when it is not also "something is wrong".
+ * ATTEMPT 1 — TURBULENCE AMPLITUDE, +35% at the ceiling.
+ *   Measured imperceptible: the intensity term ramped 0.053 -> 0.964 across 308
+ *   samples while `lit` moved -0.36%, `sum` +0.28%, and the correlation of the
+ *   per-pixel delta with it was r = +0.050. The arithmetic says why: `wobble` is
+ *   three sines multiplied, so its RMS is ~0.35, and 0.19 -> 0.257 of
+ *   displacement is ~2% of the radius — a few pixels in a fuzzy point cloud.
+ *   It was also directionally wrong: amplitude growth deepens the deformation
+ *   that made `thinking` look crushed at the old turbulence of 0.19.
+ *   See TURB_AMP_GAIN.
  *
- *   AMPLITUDE, a little. +35% at the ceiling. Rate alone changes the character
- *   without changing the magnitude, so at a glance across a room it would not
- *   register; a bounded amplitude rise makes it perceptible. It is kept small
- *   on purpose — displacement growth is the shell distending, and a shell that
- *   visibly comes apart is distress, not concentration.
+ * ATTEMPT 2 — NOISE CLOCK RATE, 2.2x churn.
+ *   Never disproved and never detectable. The mechanism demonstrably worked —
+ *   the clock is accumulated, not `uTime * factor`, so the phase never snaps,
+ *   and the shader consumes it. But a differencing metric saturates at the same
+ *   displacement scale at which stochastic churn stops being legible to a
+ *   person, so neither an instrument nor an eye could find it. See
+ *   NOISE_RATE_GAIN.
  *
- *   COLOUR, NOT AT ALL. §R.7 reserves red for critical, and the colour
- *   temperature already tracks the daemon's cpuPct. Adding a second colour
- *   language here would make "thinking for a while" and "the machine is hot"
- *   the same picture — the same mistake as painting the microphone claim onto
- *   the sphere.
+ * ATTEMPT 3 — SPIN RATE, 0.34 -> 0.75 rad/s.
+ *   This one was MEASURED TO WORK and still failed. Differentiating the
+ *   accumulated rotation angle against the sample clock gave 0.4361 / 0.6105 /
+ *   0.7019 / 0.7349 rad/s at 5 / 20 / 40 / 60 s — matching the intended curve to
+ *   three decimals, on screen, with the silhouette provably unchanged.
+ *   Gerald watched sixty seconds of it: "It's not working harder at all. Just
+ *   spinning." See SPIN_GAIN.
  *
- * IT SETTLES. The curve is saturating, `1 - e^(-t/TAU)`, not linear: 0.24 at
- * 5 s, 0.67 at 20 s, 0.89 at 40 s, 0.96 at 60 s, 0.99 at 90 s. A long turn ends
- * at the ceiling rather than accelerating out of it, and the ceiling is a fixed
- * multiple rather than a limit that is merely never reached in practice.
+ * WHY ALL THREE FAILED, WHICH IS THE PART WORTH KEEPING. Every one of them is a
+ * RATE. A rate cannot encode elapsed time to a viewer who has no reference to
+ * compare against — nobody can tell 0.34 rad/s from 0.75 rad/s without seeing
+ * both, and by the time the ramp has moved, the earlier value is gone. Attempt 3
+ * proves the point rather than being an exception to it: the change was real,
+ * large, and correctly rendered, and it still read as "spinning", because
+ * spinning faster is what it looks like. A fourth rate parameter would fail the
+ * same way and for the same reason.
+ *
+ * The only cue that could carry duration is an ABSOLUTE, ACCUMULATING quantity
+ * with a visible reference — a thing that is visibly 40% of the way to
+ * somewhere. On this shell every such option is either deformation (reads as
+ * distress; killed attempt 1) or colour (§R.7 reserves red for critical, and the
+ * temperature already tracks cpuPct — a second colour language would make
+ * "thinking a while" and "the machine is hot" the same picture). Anything else
+ * is a progress affordance OUTSIDE the sphere, which is different work.
+ *
+ * WHAT `thinking` DOES CORRECTLY AND KEEPS: it reads as a sphere, it is
+ * distinguishable from `working` and `idle` at a glance, and it does not look
+ * distressed. That was the actual goal and it is met.
+ *
+ * THE PROBES STAY. `probeFrame`'s 'limb' and 'centre' modes, `pixelDelta`, and
+ * `spinRad` are NOT dead code left behind by these attempts — they are working
+ * instrumentation that cost real time to get right, and the next visual question
+ * will want them. See ProbeReading.
  */
 const THINKING_TAU_MS = 18_000;
-/** Noise clock multiplier at full intensity. 1 + this = 2.2x churn. */
-const NOISE_RATE_GAIN = 1.2;
-/** Turbulence amplitude multiplier at full intensity. */
-const TURB_AMP_GAIN = 0.35;
+/**
+ * ATTEMPT 2 — noise clock multiplier. ZERO. Was 1.2, giving 2.2x churn.
+ *
+ * Never disproved, never detectable. At 50 ms the per-frame radial displacement
+ * at BOTH rates already exceeds a particle's 2-3 px footprint, so a differencing
+ * metric is saturated — and the same fact is why an eye has nothing coherent to
+ * lock onto. The mechanism is correct: `uNoiseTime` is accumulated rather than
+ * derived as `uTime * factor`, so the phase never snaps when the rate changes.
+ *
+ * Kept as a named zero rather than deleted so the attempt stays on the record
+ * and so the accumulate-don't-scale pattern survives for whatever needs it next.
+ */
+const NOISE_RATE_GAIN = 0;
+
+/**
+ * ATTEMPT 3 — spin multiplier. ZERO. Was 1.2, giving 0.34 -> 0.75 rad/s.
+ *
+ * The only one of the three that was measured to WORK, and it still failed.
+ *
+ * It rendered exactly as designed: differentiating the accumulated rotation
+ * angle gave 0.4361 / 0.6105 / 0.7019 / 0.7349 rad/s at 5 / 20 / 40 / 60 s,
+ * matching `0.34 * (1 + 1.2 * focus)` to three decimals. The silhouette was
+ * provably unchanged — rotation moves particles ALONG the shell rather than off
+ * it, so it cannot deform, which is the property that killed attempt 1. The
+ * per-pixel delta stayed flat (1.896 -> 1.909, r = +0.086) and that saturation
+ * was predicted from the arithmetic before the run rather than discovered after.
+ *
+ * Gerald watched sixty seconds of it: "It's not working harder at all. Just
+ * spinning." A faster rotation reads as a faster rotation. See the block above
+ * THINKING_TAU_MS for why that generalises to every rate parameter.
+ *
+ * Kept as a named zero because the retirement of a lever that demonstrably
+ * worked is a more useful record than a clean file.
+ */
+const SPIN_GAIN = 0;
+
+/**
+ * ATTEMPT 1 — turbulence amplitude growth. ZERO, after looking at it.
+ *
+ * This was 0.35, and measuring it produced two findings that both point the
+ * same way:
+ *
+ *   IT WAS IMPERCEPTIBLE. Across 308 samples the intensity uniform ramped
+ *   0.05 → 0.96 exactly as designed, while lit moved −0.36%, sum +0.28%, and
+ *   the per-pixel delta correlated with it at r = +0.050. Nothing. The reason
+ *   is arithmetic: `wobble` is a product of three sines, so its RMS is about
+ *   0.35 rather than 1, and 0.19 → 0.257 of displacement on a unit sphere is
+ *   ~2% of the radius — a handful of pixels, lost in a fuzzy point cloud.
+ *
+ *   AND IT POINTED THE WRONG WAY. The captures settle it: at base turbulence
+ *   `thinking` is ALREADY not a sphere. It is a creased, cornered, crumpled
+ *   shape — next to `idle` and `working`, which are both clean spheres, it is
+ *   the only state that reads as something being crushed rather than something
+ *   being done. Growing the amplitude deepens exactly the deformation that
+ *   makes it look distressed.
+ *
+ * So amplitude is not the lever. Rate is: it makes the same shell churn faster
+ * without deforming it further, which is what effort looks like when nothing is
+ * wrong. Left at zero rather than deleted, because the mechanism is correct and
+ * the right value for it depends on the base turbulence — see the report.
+ */
+const TURB_AMP_GAIN = 0;
 
 /**
  * Width of the centre column the pulse probe reads, in buffer pixels.
@@ -137,6 +227,42 @@ const PROBE_COLUMN_PX = 240;
  * transparent majority of the buffer.
  */
 const PROBE_THRESHOLD = 8;
+
+/**
+ * The LIMB patch — a probe that can actually see the turbulence rate.
+ *
+ * ─── why the previous two attempts could not ───
+ * The per-pixel delta over a wide column saturated at 250 ms and the probe died
+ * at 50 ms, and I blamed the sampling interval both times. The interval was not
+ * the problem. THE SPIN WAS.
+ *
+ * For rotation about Y at angular rate w, a particle's screen-space velocity
+ * depends entirely on where it sits. At the centre of the disc (z = +R, x = 0)
+ * the velocity is `w y^ x R z^ = wR x^` — maximum lateral motion. At the LEFT
+ * or RIGHT LIMB (x = -+R, z = 0) it is `w y^ x (-+R x^) = +-wR z^` — motion
+ * straight toward or away from the camera, which changes screen position only
+ * through perspective and is therefore almost nil.
+ *
+ * `thinking` spins at 0.34 rad/s, which at a ~259 px screen radius drags
+ * centre-disc particles ~2.6 px per frame — comparable to a particle's own
+ * diameter. So over the whole disc the field decorrelates from ROTATION alone
+ * within a frame or two, and a metric differencing frames is pinned at "totally
+ * different" no matter what the wobble does. Shrinking the readback would not
+ * have fixed that; it would have made a cheaper saturated metric.
+ *
+ * At the limb, rotation contributes almost nothing to screen motion and the
+ * dominant term is radial displacement — which is exactly what turbulence
+ * produces. So this is where the wobble rate is legible.
+ *
+ * ─── one patch, not two ───
+ * The cost of a read is the GPU pipeline flush, not the byte count, so a second
+ * patch roughly doubles the cost. And under a Y-axis rotation the two limbs are
+ * statistically equivalent: the right limb carries no information the left one
+ * lacks, only more samples. Taller rather than doubled is the cheaper way to
+ * buy sample size — 80 x 160 is 12,800 px against the column's 166,080.
+ */
+const PROBE_LIMB_W = 80;
+const PROBE_LIMB_H = 160;
 
 /**
  * The governor manages PARTICLE COUNT. It deliberately stops at 'low' and never
@@ -282,6 +408,17 @@ export interface ProbeReading {
   heldMs: number;
   focus: number;
   /**
+   * Accumulated rotation in radians at the instant of the read.
+   *
+   * Carried because a differencing metric cannot measure a ROTATION rate: at
+   * the disc centre a particle already moves ~4.9 px per 50 ms at the resting
+   * 0.34 rad/s, well past its own 2-3 px footprint, so consecutive reads are
+   * decorrelated at every rate the ramp can produce. Differentiating this
+   * against the sample timestamps measures the rendered rotation rate directly,
+   * with no saturation to argue about.
+   */
+  spinRad: number;
+  /**
    * What last brought the drawing buffer into step with the CSS box —
    * `observer`, `frame`, `probe`, `init` or `reprobe`.
    *
@@ -350,7 +487,9 @@ export interface SphereEngine {
    * `ProbeReading`.
    *
    * `'full'` reads the whole buffer, for geometry. `'column'` reads a centred
-   * full-height strip, for the pulse.
+   * full-height strip, for the pulse. `'limb'` reads a small patch on the
+   * sphere's left edge, for the turbulence RATE — the only place where the spin
+   * does not swamp the measurement. See PROBE_LIMB_W.
    *
    * This is deliberately NOT a passive sampler of whatever the loop last drew.
    * It calls `step(0)`, and a zero delta is a no-op for every piece of animated
@@ -359,7 +498,7 @@ export interface SphereEngine {
    * on screen without becoming part of the animation it is measuring, and two
    * probes with no frame between them are identical by construction.
    */
-  probeFrame(mode: 'full' | 'column'): ProbeReading | null;
+  probeFrame(mode: 'full' | 'column' | 'limb' | 'centre'): ProbeReading | null;
   dispose(): void;
 }
 
@@ -714,10 +853,29 @@ export function createSphereEngine(options: SphereEngineOptions): SphereEngine {
     smooth.brightness = approach(smooth.brightness, target.brightness, rate);
     smooth.coolMix = approach(smooth.coolMix, target.coolMix, rate);
 
+    // How long this state has been held, and how hard she is visibly working
+    // because of it. Computed BEFORE the motion integration below, so the spin
+    // ramp applies on the same frame rather than one behind. Only `thinking`
+    // intensifies: it is the state that can last 90 s with nothing else to show
+    // for it.
+    if (state !== intensityState) {
+      intensityState = state;
+      stateHeldMs = 0;
+    } else if (!target.frozen && !reducedMotion) {
+      stateHeldMs += deltaMs;
+    }
+    const focusTarget = state === 'thinking' ? 1 - Math.exp(-stateHeldMs / THINKING_TAU_MS) : 0;
+    focusCurrent = approach(focusCurrent, focusTarget, rate);
+
     if (!target.frozen && !reducedMotion) {
       sceneTimeMs += deltaMs;
       breathPhase += (deltaMs / target.breathPeriodMs) * Math.PI * 2;
-      spinAngle += (smooth.spin * deltaMs) / 1000;
+      // THE INTENSIFICATION. Rotation, not displacement — it is a single
+      // coherent cue the eye integrates, and it moves particles ALONG the shell
+      // rather than off it, so the silhouette cannot deform. See SPIN_GAIN.
+      spinAngle += (smooth.spin * (1 + SPIN_GAIN * focusCurrent) * deltaMs) / 1000;
+      // Accumulated, never uTime * factor — see the note in particles.vert.
+      noisePhaseS += (deltaMs / 1000) * (1 + NOISE_RATE_GAIN * focusCurrent);
     }
 
     const amplitude = reducedMotion ? 0 : fakeAmplitude(sceneTimeMs, state);
@@ -739,23 +897,6 @@ export function createSphereEngine(options: SphereEngineOptions): SphereEngine {
     const pulseInFlight = pulseElapsedMs >= 0;
     uniforms.uPulse.value = pulseInFlight ? pulseElapsedMs / PULSE_TRAVEL_MS : 0;
     uniforms.uPulseGain.value = pulseInFlight ? 1 : 0;
-
-    // How long this state has been held, and how hard she is visibly working
-    // because of it. Only `thinking` intensifies: it is the state that can last
-    // 90 s with nothing else to show for it.
-    if (state !== intensityState) {
-      intensityState = state;
-      stateHeldMs = 0;
-    } else if (!target.frozen && !reducedMotion) {
-      stateHeldMs += deltaMs;
-    }
-    const focusTarget = state === 'thinking' ? 1 - Math.exp(-stateHeldMs / THINKING_TAU_MS) : 0;
-    focusCurrent = approach(focusCurrent, focusTarget, rate);
-
-    // Accumulated, never uTime * factor — see the note in particles.vert.
-    if (!target.frozen && !reducedMotion) {
-      noisePhaseS += (deltaMs / 1000) * (1 + NOISE_RATE_GAIN * focusCurrent);
-    }
 
     uniforms.uTime.value = sceneTimeMs / 1000;
     uniforms.uNoiseTime.value = noisePhaseS;
@@ -801,7 +942,7 @@ export function createSphereEngine(options: SphereEngineOptions): SphereEngine {
   let probePrev: Uint8Array | null = null;
   let probePrevLen = 0;
 
-  function probeFrame(mode: 'full' | 'column'): ProbeReading | null {
+  function probeFrame(mode: 'full' | 'column' | 'limb' | 'centre'): ProbeReading | null {
     if (disposed) return null;
 
     // A probe must never be the thing that reports a stale buffer as a fact.
@@ -816,23 +957,54 @@ export function createSphereEngine(options: SphereEngineOptions): SphereEngine {
     // also exactly why there is no frame here for a compositor to tear.
     step(0);
 
-    const width = mode === 'column' ? Math.min(bufW, PROBE_COLUMN_PX) : bufW;
-    const x0 = Math.floor((bufW - width) / 2);
-    const needed = width * bufH * 4;
+    let width: number;
+    let height: number;
+    let x0: number;
+    /** Bottom-left origin, as readPixels wants it. */
+    let glY0: number;
+
+    if (mode === 'limb' || mode === 'centre') {
+      // Screen radius from the projection the engine already maintains:
+      // uSizeScale is height / (2 tan(fov/2)), so pixels-per-world-unit at the
+      // sphere's depth is uSizeScale / CAMERA_Z.
+      const screenR = uniforms.uRadius.value * (uniforms.uSizeScale.value / CAMERA_Z);
+      // The drawer shift is `-offsetCurrentPx * 0.5 * worldPerPixel` world
+      // units, and worldPerPixel * (uSizeScale / CAMERA_Z) is exactly 1, so in
+      // pixels the shift is simply half the offset.
+      const shiftPx = -offsetCurrentPx * 0.5;
+      width = Math.min(PROBE_LIMB_W, bufW);
+      height = Math.min(PROBE_LIMB_H, bufH);
+      // 'limb' sits on the silhouette, where rotation contributes least to
+      // screen motion. 'centre' sits on the disc centre, where it contributes
+      // MOST — which is the sensitive region for a spin change and the reason
+      // the same patch serves both questions from opposite ends.
+      const cssCx = (bufW - 1) / 2 + shiftPx - (mode === 'limb' ? screenR : 0);
+      const cssCy = (bufH - 1) / 2;
+      x0 = Math.max(0, Math.min(bufW - width, Math.round(cssCx - width / 2)));
+      const cssY0 = Math.max(0, Math.min(bufH - height, Math.round(cssCy - height / 2)));
+      glY0 = bufH - (cssY0 + height);
+    } else {
+      width = mode === 'column' ? Math.min(bufW, PROBE_COLUMN_PX) : bufW;
+      height = bufH;
+      x0 = Math.floor((bufW - width) / 2);
+      glY0 = 0;
+    }
+
+    const needed = width * height * 4;
     if (!probeBuffer || probeBuffer.length < needed) probeBuffer = new Uint8Array(needed);
     const px = probeBuffer;
 
     const gl = renderer.getContext();
-    gl.readPixels(x0, 0, width, bufH, gl.RGBA, gl.UNSIGNED_BYTE, px);
+    gl.readPixels(x0, glY0, width, height, gl.RGBA, gl.UNSIGNED_BYTE, px);
 
     let sum = 0;
     let sx = 0;
     let sy = 0;
     let lit = 0;
-    for (let row = 0; row < bufH; row++) {
+    for (let row = 0; row < height; row++) {
       // readPixels' origin is bottom-left. Everything else in this file — CSS,
       // the status bar, the reader of these numbers — is top-left.
-      const cssY = bufH - 1 - row;
+      const cssY = bufH - 1 - (glY0 + row);
       const base = row * width * 4;
       for (let col = 0; col < width; col++) {
         const i = base + col * 4;
@@ -887,6 +1059,7 @@ export function createSphereEngine(options: SphereEngineOptions): SphereEngine {
       uPulse: uniforms.uPulse.value,
       heldMs: stateHeldMs,
       focus: focusCurrent,
+      spinRad: spinAngle,
       resizeReason,
     };
   }

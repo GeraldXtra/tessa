@@ -22,6 +22,58 @@ budget:
   # on startup so a restart mid-evening does not hand back a fresh allowance.
   ledger_path: "data/cost-ledger.jsonl"
 
+# ── Brain ─────────────────────────────────────────────────────────────────────
+#
+# ONE WORD IS THE WHOLE SWITCH. `engine` selects which adapter answers the
+# questions the local router cannot: summarise, explain, teach, do the maths,
+# draft something. Everything the router already handles stays local, free and
+# instant regardless of what is set here.
+#
+# There is deliberately NO automatic fallback. If the selected engine cannot
+# answer she SAYS SO, in her own voice, and the local tools keep working. A
+# brain that silently swaps itself is lying about what answered him — the same
+# objection as an Opus-to-Sonnet downgrade nobody was told about.
+brain:
+  engine: gemini            # gemini | anthropic | local
+
+  gemini:
+    # Free tier, no card. The key is read from the ENVIRONMENT and never
+    # stored here — a settings file is checked into a repo and a key is not.
+    api_key_env: GEMINI_API_KEY
+    # PINNED, NOT `gemini-flash-latest`. An alias that moves under him is a
+    # silent brain change, which is the one thing this module exists to
+    # prevent — and the alias also READ-TIMED OUT when probed, while the pinned
+    # ids answered in under three seconds.
+    #
+    # THE LISTING LIES, so these were measured rather than chosen. `ListModels`
+    # returns 38 models supporting generateContent; several of them 404 with
+    # "no longer available to new users" — `gemini-2.0-flash`, `gemini-2.5-flash`
+    # and `gemini-2.5-flash-lite` all did, on his key, on 2026-08-14. Probed
+    # end-to-end, these two answered:
+    #     gemini-3.6-flash        2.53 s
+    #     gemini-3.1-flash-lite   1.72 s
+    #     (gemini-3.5-flash worked but took 8.52 s — too slow to speak over)
+    # `python -m core.brain.llm.gemini --probe` re-runs that measurement.
+    models:
+      main: gemini-3.6-flash
+      classify: gemini-3.1-flash-lite
+
+  anthropic:
+    api_key_env: ANTHROPIC_API_KEY
+    models:
+      main: claude-opus-5
+      classify: claude-haiku-4-5-20251001
+      fallback: claude-sonnet-5
+
+  local:
+    # ALREADY ON DISK from the earlier attempt. Downloads nothing.
+    # Measured on this machine: 10.6 tok/s idle, 0.9 tok/s with the Orb
+    # running. It is the offline fallback, not a daily brain, and the two
+    # cores are why — not the model.
+    repo: jncraton/Qwen2.5-0.5B-Instruct-ct2-int8
+    compute_type: int8
+    threads: 4
+
 # ── Health heartbeat ──────────────────────────────────────────────────────────
 health:
   # evt.daemon.health cadence. CONTRACT §4.1 says every 5 s.

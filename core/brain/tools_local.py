@@ -53,6 +53,50 @@ _KNOWN_FOLDERS = {
     "dev": Path(r"C:\dev"),
 }
 
+#: SPOKEN NAMES FOR THE SAME FOLDER. He does not say "pictures" — he says
+#: photos, or pics, or images, and they are one place on disk.
+#:
+#: This is the same class of failure as the dropped plural that made "open my
+#: download" fail after Whisper transcribed it without the s: the folder was
+#: right there and the matcher was too literal to see it. Coverage of exact
+#: words loses; resolving the word he used to the place he meant wins.
+_FOLDER_ALIASES = {
+    "docs": "documents", "doc": "documents", "my docs": "documents",
+    "dl": "downloads", "downloaded": "downloads",
+    "pics": "pictures", "photos": "pictures", "photo": "pictures", "images": "pictures",
+    "movies": "videos", "vids": "videos", "films": "videos",
+    "songs": "music", "tunes": "music",
+    "my pc": "home", "user folder": "home", "home folder": "home", "my folder": "home",
+    "repo": "zoey", "the repo": "zoey", "zoey os": "zoey", "zoey repo": "zoey",
+    "projects": "dev", "project folder": "dev",
+}
+
+
+def folder_stem(name: str) -> str:
+    """"downloads" -> "download". ONE definition, used everywhere it is needed."""
+    return name[:-1] if name.endswith("s") else name
+
+
+def folder_for(text: str) -> Path | None:
+    """
+    Resolve spoken words to a known folder: canonical name, singular or plural,
+    or any alias above. Returns None rather than guessing.
+
+    Word-boundary matched, never substring: "documentation" must not resolve to
+    Documents, and "developer" must not resolve to C:\\dev.
+    """
+    c = (text or "").lower().strip(" .,?!\"'")
+    if not c:
+        return None
+    for alias, canonical in _FOLDER_ALIASES.items():
+        if re.search(rf"\b{re.escape(alias)}\b", c):
+            return _KNOWN_FOLDERS[canonical]
+    for name, path in _KNOWN_FOLDERS.items():
+        if re.search(rf"\b{re.escape(folder_stem(name))}s?\b", c):
+            return path
+    return None
+
+
 _BROWSERS = {
     "chrome": "chrome", "google chrome": "chrome",
     "edge": "msedge", "microsoft edge": "msedge",

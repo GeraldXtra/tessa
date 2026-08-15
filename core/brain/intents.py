@@ -25,10 +25,13 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from . import phrasings
 from .tools_local import (
     _BROWSERS,
     _KNOWN_FOLDERS,
     ToolCall,
+    folder_for,
+    folder_stem,
     fuzzy_match,
     index_start_menu,
 )
@@ -130,6 +133,25 @@ def strip_lead(text: str) -> str:
 _VERSION_TOOLS = {"node": "node", "npm": "npm", "python": "python", "git": "git"}
 
 
+def _is_bare_folder(c: str) -> bool:
+    """The whole utterance IS a folder name — "downloads", or "photos", alone.
+
+    Deliberately an equality test and not `folder_for(c) is not None`: the
+    latter would open C:\\dev on "what's the dev version" and his home folder on
+    "I am working from home". A bare noun is a command; a noun in a sentence
+    needs a verb in front of it.
+
+    `folder_stem` is imported rather than redefined. It was briefly declared in
+    two files, each carrying a comment claiming to be the only one — which is
+    how the plural handling drifted apart the first time.
+    """
+    from .tools_local import _FOLDER_ALIASES
+
+    if c in _FOLDER_ALIASES:
+        return True
+    return any(c == name or c == folder_stem(name) for name in _KNOWN_FOLDERS)
+
+
 class IntentParser:
     def __init__(self) -> None:
         self._apps: dict[str, Path] | None = None
@@ -172,6 +194,19 @@ class IntentParser:
                                 speech=f"That will kill whatever holds port {port}."), None
             return ToolCall("sys.port_owner", {"port": port},
                             speech=f"Checking port {port}."), None
+
+        # ── THE WINDOWS TOOL SURFACE ────────────────────────────────────────
+        #
+        # Placed AFTER versions and ports and BEFORE the coarse machine-state
+        # keywords, and the position is the whole design. The two rules above
+        # are extremely specific (a named tool plus the word "version"; the
+        # word "port" plus a number) and must not be shadowed. Everything
+        # below is broad keyword matching that WOULD shadow the new surface —
+        # `\b(disk|storage|space|drive)\b` alone would swallow "how much space
+        # is my downloads folder using" and answer about the C: volume.
+        call = phrasings.match(clause)
+        if call is not None:
+            return call, None
 
         # ── machine state ───────────────────────────────────────────────────
         if re.search(r"\b(disk|storage|space|drive)\b", c):
@@ -225,7 +260,7 @@ class IntentParser:
                             speech="Opening VS Code."), None
 
         # ── folders ─────────────────────────────────────────────────────────
-        if re.search(r"\b(open|show|go to|take me to)\b", c) or c in _KNOWN_FOLDERS:
+        if re.search(r"\b(open|show|go to|take me to)\b", c) or _is_bare_folder(c):
             target = self._folder_from(c)
             if target is not None:
                 return ToolCall("app.open_folder", {"path": str(target)},
@@ -248,9 +283,15 @@ class IntentParser:
 
     @staticmethod
     def _folder_from(c: str) -> Path | None:
-        for name, path in _KNOWN_FOLDERS.items():
-            if re.search(rf"\b{re.escape(name)}\b", c):
-                return path
+        # OPTIONAL TRAILING 's' AND SPOKEN ALIASES, both from `folder_for` so
+        # there is ONE resolver rather than two that drift. Whisper dropped the
+        # plural on a real turn — "Open my download." for "open my downloads" —
+        # and the folder then failed to match, so a command that had worked a
+        # minute earlier became UNROUTED. Aliases are the same failure one step
+        # out: he says photos, the folder is called Pictures.
+        hit = folder_for(c)
+        if hit is not None:
+            return hit
         m = re.search(r"([a-z]:\\[^\s\"']+)", c, re.I)
         if m:
             p = Path(m.group(1))

@@ -252,6 +252,9 @@ if (!app.requestSingleInstanceLock()) {
       gpu,
       probeGeometryMs: probeFlagMs('probe-geometry'),
       probePulseMs: probeFlagMs('probe-pulse'),
+      probeLimbMs: probeFlagMs('probe-limb'),
+      probeCentreMs: probeFlagMs('probe-centre'),
+      devOverlay: isDev && process.argv.includes('--dev-overlay'),
       forcedState: forcedState(),
       devScript: (() => {
         if (!isDev) return null;

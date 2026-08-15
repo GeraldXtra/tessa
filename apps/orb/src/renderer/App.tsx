@@ -21,6 +21,7 @@ import { AGENT_STATES, type AgentState } from '@zoey/protocol';
 import type { BootstrapInfo, SphereTier } from '../shared/ipc-contract.ts';
 import { parseDevScript, runDevScript } from './dev-drive.ts';
 import { tokenPx } from './design-tokens.ts';
+import { StateDwell } from './state/state-dwell.ts';
 import { Drawer } from './layout/Drawer.tsx';
 import { DevOverlay } from './layout/DevOverlay.tsx';
 import { LastLine } from './layout/LastLine.tsx';
@@ -75,6 +76,7 @@ export function App() {
   const [rendererName, setRendererName] = useState('probing…');
   const [engine, setEngine] = useState<SphereEngine | null>(null);
   const readStats = engine ? engine.stats : null;
+  const [showOverlay, setShowOverlay] = useState(false);
 
   /**
    * The one un-drawn state change, and when it arrived. Spec §4.
@@ -91,7 +93,15 @@ export function App() {
    * a genuine change replaces whatever was pending, because the sphere will
    * never draw the superseded one.
    */
-  const pendingState = useRef<{ state: string; at: number } | null>(null);
+  const pendingState = useRef<{
+    state: string;
+    /** When the dwell released it to the store. */
+    at: number;
+    /** When the daemon's frame arrived. */
+    arrivedAt: number;
+    /** How long the dwell held it. */
+    queuedMs: number;
+  } | null>(null);
   const lastArrivedState = useRef<string | null>(null);
 
   /* ── bootstrap: GPU tier, then the connection feed ─────────────────────── */
@@ -105,6 +115,7 @@ export function App() {
 
       // Validated against AGENT_STATES in main before it got here.
       if (info.forcedState) agentStateStore.set(info.forcedState as AgentState);
+      if (info.devOverlay) setShowOverlay(true);
 
       const probe = probeSphereTier(info.gpu);
       tierStore.set(probe.tier);
@@ -159,19 +170,30 @@ export function App() {
     );
 
     // Main has already validated this against AGENT_STATES before sending.
+    // Through the dwell, never straight to the store. See state-dwell.ts.
+    const dwell = new StateDwell({
+      report: (line) => window.zoey.reportMetrics(line),
+      release: ({ state, arrivedAt, queuedMs }) => {
+        // TWO stamps, deliberately. `arrivedAt` is when the daemon's frame
+        // landed; `releasedAt` is when the dwell let it through. The engine
+        // reports when it was DRAWN, and the difference between those two
+        // intervals is the whole point: one is a rendering latency and the
+        // other is a delay this surface chose. Collapsing them into a single
+        // "state change → visible" number would quietly turn spec §4's budget
+        // into a measurement of my own timer.
+        pendingState.current = { state, at: performance.now(), arrivedAt, queuedMs };
+        agentStateStore.set(state as AgentState);
+      },
+    });
+
     const offAgentState = window.zoey.onAgentState((state) => {
       const at = performance.now();
       const repeat = state === lastArrivedState.current;
       lastArrivedState.current = state;
-      // Stamped BEFORE the store is set, so the measured interval includes the
-      // store notification and everything after it. Same clock as the engine's
-      // report — both are `performance.now()` in this renderer, so there is no
-      // cross-process clock to reconcile.
-      if (!repeat) pendingState.current = { state, at };
       window.zoey.reportMetrics(
-        `STATE-ARRIVED state=${state} t=${at.toFixed(1)} repeat=${repeat}`,
+        `STATE-ARRIVED state=${state} t=${at.toFixed(1)} repeat=${repeat} depth=${dwell.depth}`,
       );
-      agentStateStore.set(state as AgentState);
+      dwell.submit(state);
     });
 
     return () => {
@@ -185,6 +207,9 @@ export function App() {
       offTranscript();
       offMic();
       offNote();
+      // A pending dwell timer outliving the listener would release a state
+      // into a store nobody is reading and leave the sphere on it.
+      dwell.dispose();
     };
   }, []);
 
@@ -325,6 +350,14 @@ export function App() {
       // verify this build — arrives with scancode 0 and therefore no usable
       // `code`. Matching only `code` makes the shortcut silently dead for all
       // of them.
+      // Alt+0 toggles the frame-metrics overlay. Same family as the Alt+1…6
+      // state cycler and the only digit it does not already use.
+      if (/^Digit0$/.test(event.code) || event.key === '0') {
+        setShowOverlay((v) => !v);
+        event.preventDefault();
+        return;
+      }
+
       const digit =
         /^Digit([1-6])$/.exec(event.code)?.[1] ?? (/^[1-6]$/.test(event.key) ? event.key : null);
       if (!digit) return;
@@ -409,6 +442,39 @@ export function App() {
     return () => window.clearInterval(id);
   }, [isDev, pulseMs, engine]);
 
+  /**
+   * Turbulence RATE (§R.1's intensification). One small limb patch per tick.
+   *
+   * Separate from the pulse probe because it answers a different question with
+   * a different region and a much shorter interval. `pixelDelta` is the whole
+   * point here: the pulse cares about total brightness, this cares about how
+   * fast the picture is changing, and over the wide column the spin decorrelated
+   * the field within a frame and pinned that number.
+   */
+  useEffect(() => {
+    // One probe, two regions. `--probe-limb` reads the silhouette, where
+    // rotation contributes least and radial turbulence most; `--probe-centre`
+    // reads the disc centre, where rotation contributes most. Same 80x160 patch
+    // and the same cost, aimed at opposite questions.
+    const limbMs = bootstrap?.probeLimbMs ?? 0;
+    const centreMs = bootstrap?.probeCentreMs ?? 0;
+    const limbMode = limbMs > 0;
+    const ms = limbMode ? limbMs : centreMs;
+    if (!isDev || ms <= 0 || !engine) return;
+    const id = window.setInterval(() => {
+      const r = engine.probeFrame(limbMode ? 'limb' : 'centre');
+      if (!r) return;
+      window.zoey.reportMetrics(
+        `PROBE-${limbMode ? 'LIMB' : 'CENTRE'} t=${performance.now().toFixed(0)} ` +
+          `dpx=${Number.isFinite(r.pixelDelta) ? r.pixelDelta.toFixed(4) : 'na'} ` +
+          `sum=${r.sum} lit=${r.lit} rect=${r.x0}..${r.x1} ` +
+          `held=${Math.round(r.heldMs)} focus=${r.focus.toFixed(4)} ` +
+          `spin=${r.spinRad.toFixed(4)} state=${agentStateStore.get()}`,
+      );
+    }, ms);
+    return () => window.clearInterval(id);
+  }, [isDev, bootstrap, engine]);
+
   /* ── the drawer, and what it does to the sphere ────────────────────────── */
 
   // Keep the last panel mounted while the drawer slides shut, so the content
@@ -449,8 +515,15 @@ export function App() {
     // this process synthesised itself.
     if (!pending || pending.state !== state) return;
     pendingState.current = null;
+    // Three numbers, not one. `drawn` is what the renderer costs and is the
+    // only one comparable to the pre-dwell figures; `queued` is the deliberate
+    // wait; `total` is what the owner actually experiences. Reported apart so
+    // nobody can read the sum as a rendering result.
     window.zoey.reportMetrics(
-      `STATE-VISIBLE state=${state} arrivedToDrawnMs=${(at - pending.at).toFixed(2)}`,
+      `STATE-VISIBLE state=${state} ` +
+        `queuedMs=${pending.queuedMs.toFixed(2)} ` +
+        `drawnMs=${(at - pending.at).toFixed(2)} ` +
+        `totalMs=${(at - pending.arrivedAt).toFixed(2)}`,
     );
   }, []);
 
@@ -494,7 +567,11 @@ export function App() {
         </Drawer>
       </div>
 
-      {isDev ? (
+      {/* Dev-only AND off by default. `isDev` alone was the wrong gate: the
+          owner runs `npm run dev`, so it was true for him, and the overlay sat
+          over the lower-left of his sphere every day. --dev-overlay shows it at
+          launch; Alt+0 toggles it. */}
+      {isDev && showOverlay ? (
         <DevOverlay
           tier={tier}
           // The DOM rung has no engine; passing the disposed one's closure would

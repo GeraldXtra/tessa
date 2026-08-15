@@ -84,7 +84,28 @@ export const SPHERE_STATES = {
 
   thinking: {
     radius: 1.02,
-    turbulence: 0.19,
+    /**
+     * 0.07, down from 0.19.
+     *
+     * PEAK displacement governs the silhouette, not RMS, and that is what the
+     * old value got wrong. `wobble` is three sines multiplied, so its RMS is
+     * ~0.35 — but its PEAK is 1.0, and at 0.19 those peaks threw particles 19%
+     * of the radius outward. That is what produced the facets, the hard
+     * corners and the squarish outline in the captures: at rest `thinking` was
+     * not a sphere at all, it was a shape being crushed. Next to `idle` and
+     * `working`, which are both clean spheres, it was the only state that
+     * looked like something had gone wrong.
+     *
+     * 0.07 keeps peaks at 7% of the radius, below the point where a point
+     * cloud stops reading as a sphere, and RMS at ~2.5%.
+     *
+     * It is still the most turbulent state by a clear margin — 2x `working`'s
+     * 0.035, 3x `idle`'s 0.022, 6x `listening`'s 0.012 — so `thinking` remains
+     * visibly the busiest shell. The old value was 5.4x the next highest in the
+     * whole table, which is the shape of a number nobody had looked at beside
+     * its neighbours.
+     */
+    turbulence: 0.07,
     breathDepth: 0.03,
     breathPeriodMs: 1800,
     amplitudeGain: 0.0,

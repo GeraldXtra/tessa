@@ -98,13 +98,34 @@ class HealthCollector:
 
     # ── the payload ──────────────────────────────────────────────────────────
 
-    def sample(self, *, budget_spent: float, budget_cap: float) -> dict[str, Any]:
+    def sample(self, *, budget_spent: float, budget_cap: float,
+               brain_calls: int = 0, brain_engine: str = "") -> dict[str, Any]:
         """
-        Exactly CONTRACT §4.1's six fields, in that shape.
+        CONTRACT §4.1's six fields, plus two ADDITIVE OPTIONAL ones.
 
         `cpuPct` and `memMB` degrade to 0.0 if psutil is unavailable rather than
         raising — but that case is reported at startup, never silently, so a
         zero is not mistaken for an idle daemon.
+
+        ── HOW A FREE TIER IS REPORTED HONESTLY ──────────────────────────────
+
+        Gemini's free tier costs ₦0, so `budgetSpent` stays 0.00. That is the
+        truth and it must not be dressed up: showing a notional naira figure for
+        calls that were free would put fiction into the one number the budget
+        cap is a HARD STOP on, and the day he pays for something real the gauge
+        would already be wrong.
+
+        But ₦0.00 on its own tells him nothing about how hard he is leaning on
+        someone else's quota — and that quota is what actually runs out. So the
+        REAL number ships alongside it: `brainCalls`, a count, and
+        `brainEngine`, the name of what answered. PULSE shows "gemini · 14 calls
+        · ₦0.00", where every part is measured.
+
+        ADDITIVE AND OPTIONAL, so this needs no PROTOCOL_VERSION bump: CONTRACT
+        §7.2 allows new optional payload fields, and §3.2 requires the Orb to
+        ignore fields it does not know. Session 2 can adopt them whenever it
+        suits; nothing breaks until then. The matching row for CONTRACT §4.1 is
+        PROPOSED to Gerald in the report rather than written into that file.
         """
         cpu_pct = 0.0
         mem_mb = 0.0
@@ -122,6 +143,8 @@ class HealthCollector:
             "apiReachable": self._api_reachable_cached(),
             "budgetSpent": round(budget_spent, 2),
             "budgetCap": round(budget_cap, 2),
+            "brainCalls": int(brain_calls),
+            "brainEngine": brain_engine,
         }
 
     @property

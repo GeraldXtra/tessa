@@ -107,7 +107,7 @@ export function DevOverlay({ tier, readStats, tierReason, rendererName }: DevOve
       </div>
       <div className="dev-overlay__row dev-overlay__row--hint">
         <span className="dev-overlay__key">keys</span>
-        <span>alt+1…6 states · esc closes drawer</span>
+        <span>alt+1…6 states · alt+0 hides this · esc closes drawer</span>
       </div>
     </div>
   );

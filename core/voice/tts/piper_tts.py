@@ -70,6 +70,30 @@ class PiperTTS(TTSAdapter):
     def voice(self) -> VoiceInfo:
         return self._info
 
+    #: Piper's speaking rate. 1.0 is the voice's native pace; HIGHER IS SLOWER
+    #: (it is a length multiplier, not a speed one).
+    #:
+    #: 1.05 — HIS EAR, TWICE. He said "she talks too fast and runs sentences
+    #: together", so this went to 1.15. He then heard 1.15 and said "the slower
+    #: speech is too slow", and when asked whether to revert fully, "slightly
+    #: slower than that".
+    #:
+    #: 1.05 is that: a shade below her native pace, nowhere near 1.15. Most of
+    #: the original complaint was never the rate anyway — it was missing
+    #: punctuation in the router strings, which gave Piper nothing to pause on.
+    #: That is fixed, so the rate no longer has to carry the whole problem.
+    LENGTH_SCALE = 1.05
+
+    def _syn_config(self):
+        """None when the installed Piper predates SynthesisConfig, so a version
+        without it degrades to the native rate rather than crashing."""
+        try:
+            from piper import SynthesisConfig
+
+            return SynthesisConfig(length_scale=self.LENGTH_SCALE)
+        except Exception:  # noqa: BLE001
+            return None
+
     def stream(self, text: str) -> Iterator[np.ndarray]:
         """
         Yield audio as Piper produces it.
@@ -80,7 +104,7 @@ class PiperTTS(TTSAdapter):
         time-to-first-sample is the cost of the FIRST SENTENCE, not of the whole
         utterance, and it is measured rather than assumed in `synthesise()`.
         """
-        for chunk in self._voice.synthesize(text):
+        for chunk in self._voice.synthesize(text, syn_config=self._syn_config()):
             audio = getattr(chunk, "audio_int16_array", None)
             if audio is None:
                 raw = getattr(chunk, "audio_int16_bytes", None)
