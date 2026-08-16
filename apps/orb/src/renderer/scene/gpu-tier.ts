@@ -31,11 +31,40 @@ export interface TierProbe {
 /** Names that mean the GPU is not involved. */
 const SOFTWARE_RENDERER = /swiftshader|basic render|llvmpipe|software|microsoft basic/i;
 
-/** Particles per rung. 'dom' draws no particles at all. */
+/**
+ * Particles per rung. 'dom' draws no particles at all.
+ *
+ * ─── med went 8,000 -> 20,000 ON MEASUREMENT, and here is the measurement ───
+ *
+ * The old ladder was set before the shell had a crescent, when the fill-rate
+ * estimate was a guess. At 20,000 particles with the crescent, on the owner's
+ * HD 620 with its legacy driver, 60 s focused per state:
+ *
+ *   idle      cost p50/p95 0.20/0.30 ms   raf 16.7/17.0   shown 33.3/33.6   30.0 fps
+ *   thinking  cost p50/p95 0.10/0.30 ms   raf 16.7/17.0   shown 33.3/33.6   30.0 fps
+ *
+ * 0.30 ms against COST_BUDGET_MS of 12 is 2.5% of the governor's budget, and
+ * `shown` is pinned to exactly two 60 Hz vsync intervals in both states. The
+ * old 8,000 was costing the sphere three quarters of its density for nothing.
+ *
+ * It matters visually and not just numerically: at 8,000 the particles have to
+ * be large to cover the shell, and large particles on a Fibonacci lattice show
+ * the lattice — the projection produces concentric arcs of dots that the
+ * reference does not have. 20,000 smaller ones cover the same area with the
+ * fine irregular speckle the reference has. Coverage is N x size², so trading
+ * count for size at constant coverage is very nearly free on fill rate, which
+ * is what the numbers above say.
+ *
+ * `low` is the governor's demotion rung and inherits the old med, so a demotion
+ * lands on a count whose cost is known rather than on an untested one. `high`
+ * is UNREACHABLE from probeSphereTier — it never returns anything but med, low
+ * or dom — and exists only for `--force-tier=high`, so it is kept above med as
+ * a headroom probe rather than pruned.
+ */
 export const PARTICLE_COUNT: Record<SphereTier, number> = {
-  high: 20_000,
-  med: 8_000,
-  low: 3_000,
+  high: 32_000,
+  med: 20_000,
+  low: 8_000,
   dom: 0,
 };
 

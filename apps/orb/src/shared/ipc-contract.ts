@@ -42,6 +42,8 @@ export const IPC = {
   healthChanged: 'zoey:health-changed',
   /** main → renderer, push. evt.agent.state — validated against the closed set. */
   agentStateChanged: 'zoey:agent-state-changed',
+  /** main → renderer, push. evt.turn.timing — one turn's stage breakdown. */
+  turnTiming: 'zoey:turn-timing',
   /** main → renderer, push. One audit entry, from evt.audit.appended. */
   auditAppended: 'zoey:audit-appended',
   /** main → renderer, push. res.audit history, in reply to cmd.audit.query. */
@@ -135,6 +137,37 @@ export const IPC = {
   windowMinimize: 'zoey:window-minimize',
   windowClose: 'zoey:window-close',
 } as const;
+
+/**
+ * `evt.turn.timing` — ONE TURN, BROKEN INTO STAGES. Item 9.
+ *
+ * An approved additive event (CONTRACT §7.2), not yet in the contract's tables.
+ * `name` is a CLOSED vocabulary — `stt | route | tool | tts | playback` — and
+ * main validates every stage against it before this crosses the bridge, so the
+ * renderer never sees a name it has no column for.
+ *
+ * This is the one number the owner cannot currently get: he can hear that a
+ * reply took four seconds and has no way to learn whether that was the model,
+ * the speech synthesis, or the audio device. `core/server.py`'s `on_stage`
+ * already computes exactly this and sends it to `log()`.
+ */
+/**
+ * What `evt.agent.state` pushes across the bridge: the state AND its detail.
+ *
+ * One message, not two channels. Both change in the same daemon event and are
+ * rendered as one line — delivering them separately would let the chip show a
+ * new state beside the previous state's target for as long as the second push
+ * took to arrive.
+ */
+export interface AgentStatePush {
+  state: string;
+  detail: { tool?: string; target?: string; note?: string } | null;
+}
+
+export interface TurnTiming {
+  turnId: string;
+  stages: readonly { name: string; ms: number }[];
+}
 
 /* ─────────────────────────────────────────────────────── connection status */
 
@@ -490,6 +523,11 @@ export interface BootstrapInfo {
     size: number;
     bodyBright: number;
     bodySize: number;
+    darkSide: number;
+    lambertPow: number;
+    jitter: number;
+    rimPow: number;
+    spreadPow: number;
   } | null;
   /**
    * DEV ONLY. `--force-aura=<0..1>` pins the resource aura's load.
@@ -538,7 +576,8 @@ export interface ZoeyBridge {
   /** Returns an unsubscribe function. */
   onHealth(listener: (health: DaemonHealth) => void): () => void;
   /** Returns an unsubscribe function. Daemon-authoritative agent state. */
-  onAgentState(listener: (state: string) => void): () => void;
+  onAgentState(listener: (payload: AgentStatePush) => void): () => void;
+  onTurnTiming(listener: (timing: TurnTiming) => void): () => void;
   /** Returns an unsubscribe function. Fires when the display layout changes. */
   onDisplayChanged(listener: () => void): () => void;
   /** Returns an unsubscribe function. One newly appended audit entry. */

@@ -1579,22 +1579,33 @@ ol {
    * value colour it sits beside.
    */
   --col-label: color-mix(in srgb, var(--text) 35%, var(--theme-void));
+
+  /**
+   * THE FLOOR. Item 6.2 — a horizon plane, and the real one rather than the
+   * contact ellipse he rejected.
+   *
+   * Both derived from tokens, so the ground follows the palette: a floor lit by
+   * a violet sphere and glowing amber would be two light sources with one
+   * object. `--floor-line` is deliberately weaker than `--ornament`, which is
+   * itself below AA on purpose — the plane must be sensed rather than read, and
+   * a floor you can measure against is a chart.
+   */
+  --floor-line: color-mix(in srgb, var(--text-muted) 9%, transparent);
+  --floor-glow: color-mix(in srgb, var(--bg-ambient) 15%, transparent);
 }
 
 /* ── the right column ────────────────────────────────────────────────────────
    Borderless, no panel, right-aligned mono on void. §9.1 forbids a card
    background on the centre stage and this obeys it literally: no fill, no
    border, no radius — only text. */
+/* The column no longer positions itself — it is the CONTENT of the right
+   panel now, and a child that also decides where it sits would fight its
+   parent. Everything about where it appears moved to `.panel--right`. */
 .col {
-  position: absolute;
-  top: var(--sp-5);
-  right: var(--sp-5);
-  width: var(--col-w);
   display: flex;
   flex-direction: column;
   gap: var(--sp-4);
   pointer-events: none;
-  z-index: 2;
 }
 
 .col__group {
@@ -1898,4 +1909,568 @@ ol {
     animation-iteration-count: 1 !important;
     transition-duration: 0.01ms !important;
   }
+}
+
+/* ────────────────────────────────────────────────────── the composition ──
+ *
+ * Item 4. Two floating panels, a floor, the wordmark, and the state chip.
+ *
+ * ─── the fill and the border are MEASURED, not styled ───
+ * Sampled off ref-2.png, the only direct capture among the five references:
+ *
+ *   background, four points     000000 · 000000 · 000000 · 01000A
+ *   panel interior, four points 010101 · 030303 · 010101 · 040405
+ *   panel edge, scanned across  0C0C0C 0D0D0D 0A0A0A 070707 -> 010101
+ *
+ * So the reference's panels are not cards in any usual sense: the fill is
+ * within three levels of the void behind them, and the whole object is held
+ * together by a two-pixel edge at about level 13. They are objects on the void
+ * exactly as the brief says, and almost nothing else.
+ *
+ * That is very close to what CONTRACT §9's tokens already specify. `--panel` is
+ * rgba(18,18,22,0.72), which over black composites to rgb(13,13,16); the
+ * reference's interior is darker, but both are "a whisper above the void"
+ * rather than a surface. `--panel-border` is rgba(255,255,255,0.06), which over
+ * black is two levels off the measured edge. The tokens are used unchanged and
+ * no new colour value is introduced anywhere in this block.
+ *
+ * A CORRECTION TO THE BRIEF: item 4h asks for "the background as measured from
+ * ref-2.png, not pure black". Measured, it IS pure black — level zero at three
+ * of four sample points, and the fourth is bloom from the panel above it.
+ * `--bg-void` is lighter than that, so the surface is currently paler than the
+ * reference rather than darker. Matching it means editing a token, and this
+ * round's exception covers the sphere colour ladder only, so it is proposed in
+ * the report rather than done here.
+ */
+
+.panel {
+  position: absolute;
+  top: var(--sp-5);
+  /* The panels never scroll and never grow: their content is a fixed month grid
+     and a fixed list of telemetry rows. `min-content` height lets a short panel
+     stay short instead of stretching to the frame, which is what makes them
+     read as floating objects rather than as columns. */
+  height: min-content;
+  max-height: calc(100% - 2 * var(--sp-5));
+  padding: var(--sp-4);
+  background: var(--panel);
+  border: var(--hairline) solid var(--panel-border);
+  border-radius: var(--panel-radius);
+  /* The soft edge. A shadow of the VOID rather than of black, so it reads as
+     the panel sinking into the background instead of as a drop shadow, which
+     is the difference between an object on a void and a card on a page. */
+  box-shadow: 0 0 var(--sp-6) var(--sp-4) var(--bg-void);
+  z-index: 2;
+  pointer-events: none;
+}
+
+.panel--left {
+  left: var(--sp-5);
+  width: var(--panel-left-w);
+}
+
+.panel--right {
+  right: var(--sp-5);
+  width: var(--panel-right-w);
+}
+
+/* ─── the calendar ─── */
+
+.cal__month {
+  margin: 0 0 var(--sp-3);
+  font-size: var(--fs-label);
+  font-weight: 600;
+  color: var(--accent-bright);
+  text-transform: var(--label-transform);
+  letter-spacing: var(--label-tracking);
+}
+
+.cal__year {
+  color: var(--col-label);
+}
+
+.cal__grid {
+  display: grid;
+  grid-template-columns: repeat(7, 1fr);
+  gap: 2px;
+}
+
+.cal__dow {
+  font-size: var(--fs-label);
+  color: var(--col-label);
+  text-align: center;
+  padding-bottom: var(--sp-1);
+}
+
+.cal__blank {
+  /* Present, not collapsed: the grid's shape is the information, and a missing
+     cell would shift every day after it into the wrong weekday column. */
+  min-height: 1.55em;
+}
+
+.cal__day {
+  font-size: var(--fs-sm);
+  font-variant-numeric: tabular-nums;
+  color: var(--text-muted);
+  text-align: center;
+  line-height: 1.55em;
+  min-height: 1.55em;
+  border-radius: var(--radius-sm);
+}
+
+/* TODAY. The one cell that carries information beyond the grid's own shape, so
+   it is the one cell that gets the accent — and it gets a fill rather than only
+   a colour, because a single differently-coloured numeral among forty-two is
+   not findable at a glance from across a room. */
+.cal__day[data-today] {
+  color: var(--theme-void);
+  background: var(--accent-bright);
+  font-weight: 600;
+}
+
+/* ─── the wordmark ─── */
+
+.wordmark {
+  position: absolute;
+  /* Tracks the sphere. Both custom properties are published by App from the
+     same arithmetic that positions the engine, so the name cannot drift away
+     from the thing it names when the sphere is refitted or a drawer opens. */
+  left: var(--sphere-cx, 50%);
+  top: calc(var(--sphere-cy, 48%) + var(--sphere-r, 40%) + var(--sp-5));
+  transform: translateX(-50%);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--sp-2);
+  z-index: 2;
+  pointer-events: none;
+}
+
+.wordmark__name {
+  font-size: var(--fs-md);
+  font-weight: 600;
+  color: var(--accent-bright);
+  letter-spacing: 0.38em;
+  /* The tracking pushes the last letter's sidebearing outside the box, so the
+     word reads off-centre by half a letter-space without this. */
+  text-indent: 0.38em;
+}
+
+.wordmark__rungs {
+  display: flex;
+  gap: 5px;
+}
+
+.wordmark__rung {
+  width: 10px;
+  height: 2px;
+  border-radius: 1px;
+  background: var(--ornament);
+}
+
+.wordmark__rung[data-lit] {
+  background: var(--accent-bright);
+}
+
+/* ─── the state chip ─── */
+
+.statechip {
+  position: absolute;
+  top: var(--sp-5);
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--sp-1);
+  z-index: 2;
+  pointer-events: none;
+  text-align: center;
+  max-width: 40%;
+}
+
+.statechip__word {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+  font-size: var(--fs-base);
+  color: var(--accent-bright);
+  text-transform: var(--label-transform);
+  letter-spacing: var(--label-tracking);
+}
+
+.statechip__dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--accent-bright);
+}
+
+/* `blocked` is the one state that is not the accent. CONTRACT §4.1 fixes it
+   amber under all five themes — "waiting on your approval" must not change
+   colour when the palette does, or the one state that needs answering becomes
+   whatever hue is fashionable that day. */
+.statechip[data-state='blocked'] .statechip__word {
+  color: var(--status-warn);
+}
+
+.statechip[data-state='blocked'] .statechip__dot {
+  background: var(--status-warn);
+}
+
+.statechip__detail {
+  font-size: var(--fs-label);
+  color: var(--col-label);
+  letter-spacing: 0.06em;
+  /* One line, ellipsised. A redacted target can still be long, and a wrapping
+     second line under the state word would move the composition's top anchor
+     every time she touched a different file. */
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100%;
+}
+
+/* ─── the floor ─── */
+
+.floor {
+  position: absolute;
+  left: 0;
+  right: 0;
+  /* Anchored under the SPHERE, not to the frame's bottom. A horizon that stays
+     put while the sphere is refitted stops being the ground the sphere stands
+     on and becomes a stripe. */
+  top: calc(var(--sphere-cy, 48%) + var(--sphere-r, 40%));
+  bottom: 0;
+  z-index: 0;
+  pointer-events: none;
+
+  /* THE ALIASING, which was named as the risk before this was built.
+     `repeating-linear-gradient` with a 34px period and no hard stop — every
+     band is a ramp, so each edge is filtered across five pixels instead of
+     landing on one. A 1px rule at the same spacing would crawl on an HD 620
+     the moment anything moved; a ramp has nothing to crawl with. Nothing here
+     animates either, so there is no motion to alias in the first place. */
+  background-image:
+    repeating-linear-gradient(
+      to bottom,
+      transparent 0,
+      transparent 22px,
+      var(--floor-line) 27px,
+      transparent 34px
+    ),
+    /* The ground glow. Its peak sits BELOW the top of the element, not at it.
+       Peaked at the top edge it drew a hard bright line exactly where the
+       sphere meets the floor — which is a contact shadow with the contrast
+       inverted, i.e. the thing he rejected wearing the opposite colour. */
+      linear-gradient(to bottom, transparent, var(--floor-glow) 26%, transparent 68%);
+  /* Fades in AND out. Out at the bottom is atmospheric perspective, and it is
+     also why the bands never get close enough to moiré — the plane is gone
+     before the spacing tightens. In at the top is what stops the whole floor
+     having a horizontal edge of its own: a plane that begins abruptly is a
+     stripe, and the eye reads the stripe instead of the ground. */
+  mask-image: linear-gradient(
+    to bottom,
+    transparent,
+    rgb(0 0 0 / 100%) 22%,
+    rgb(0 0 0 / 100%) 55%,
+    transparent 88%
+  );
+}
+
+/* NO CONVERGING PERSPECTIVE LINES. Vertical rules receding to a vanishing point
+   are what "grid plane" usually means, and they are precisely the case that
+   crawls: their spacing passes through every sub-pixel value between the frame
+   edge and the horizon, so on a non-antialiased 1366-wide frame they shimmer.
+   Horizontal bands only, whose spacing is constant by construction. */
+
+/* ───────────────────────────────────── built-and-dark rails, items 5 + 6 ── */
+
+.dark {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-4);
+}
+
+.dark__question {
+  margin: 0;
+  font-size: var(--fs-base);
+  color: var(--text);
+}
+
+.dark__state {
+  margin: 0;
+  font-size: var(--fs-sm);
+  color: var(--col-label);
+}
+
+.dark__block {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  padding: var(--sp-3);
+  border-left: 2px solid var(--accent-dim);
+  background: var(--panel);
+}
+
+.dark__label {
+  display: block;
+  font-size: var(--fs-label);
+  color: var(--col-label);
+  text-transform: var(--label-transform);
+  letter-spacing: var(--label-tracking);
+}
+
+.dark__cmd {
+  font-size: var(--fs-sm);
+  color: var(--accent-bright);
+}
+
+/* The proposal is CODE and is shown as code — preformatted, not reflowed. A
+   wrapped message shape is a different message shape. */
+.dark__shape {
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+  line-height: var(--lh-base);
+  color: var(--text-muted);
+  white-space: pre;
+  overflow-x: auto;
+}
+
+.dark__withheld {
+  margin: 0;
+  font-size: var(--fs-sm);
+  color: var(--col-label);
+}
+
+/* ─── the provenance legend, item 11 ─── */
+
+.legend {
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+}
+
+.legend__row {
+  display: grid;
+  /* The gutter column is the same width as the one on a trace line, so the two
+     line up down the panel and the key reads as belonging to the lines. */
+  grid-template-columns: 3px auto 1fr auto;
+  align-items: baseline;
+  gap: var(--sp-2);
+}
+
+.legend__gutter {
+  align-self: stretch;
+  min-height: 1em;
+  background: var(--prov-program);
+}
+
+.legend__gutter[data-provenance='human'] {
+  /* --prov-human is transparent by token: the trusted source is the one with no
+     warning stripe. A visible mark here would say the opposite of the design. */
+  background: var(--prov-human);
+  border-left: 1px dashed var(--ornament);
+}
+
+.legend__gutter[data-provenance='agent'],
+.legend__gutter[data-provenance='schedule'] {
+  background: var(--prov-agent);
+}
+
+.legend__gutter[data-provenance='external'] {
+  background: var(--status-error);
+}
+
+.legend__gutter[data-provenance='system'] {
+  background: var(--ornament);
+}
+
+.legend__tag {
+  font-size: var(--fs-sm);
+  color: var(--text);
+}
+
+.legend__means {
+  margin: 0;
+  font-size: var(--fs-sm);
+  color: var(--col-label);
+}
+
+.legend__trust {
+  margin: 0;
+  font-size: var(--fs-label);
+  color: var(--col-label);
+  text-transform: var(--label-transform);
+  letter-spacing: var(--label-tracking);
+  white-space: nowrap;
+}
+
+/* The two ends of the trust scale are the only ones coloured. Colouring all six
+   would make the column a rainbow and flatten exactly the distinction it is
+   there to draw. */
+.legend__trust[data-trust='trusted'] {
+  color: var(--status-active);
+}
+
+.legend__trust[data-trust='highest risk'] {
+  color: var(--status-error);
+}
+
+/* ─── the latency trace, item 9 ─── */
+
+.lat {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+}
+
+.lat__total {
+  float: right;
+  color: var(--text);
+}
+
+.lat__bar {
+  display: flex;
+  height: 6px;
+  border-radius: var(--radius-pill);
+  overflow: hidden;
+  background: var(--panel);
+}
+
+.lat__seg {
+  min-width: 1px;
+}
+
+/* Five steps down ONE ramp, not five hues. The stages are sequential, so a
+   sequential ramp says "and then" where five colours would say "these are
+   different kinds of thing". Every step is mixed from the theme accent, so the
+   trace follows the palette like everything else. */
+.lat__seg[data-stage='stt'],
+.lat__swatch[data-stage='stt'] {
+  background: var(--accent-bright);
+}
+
+.lat__seg[data-stage='route'],
+.lat__swatch[data-stage='route'] {
+  background: color-mix(in srgb, var(--accent-bright) 78%, var(--theme-void));
+}
+
+.lat__seg[data-stage='tool'],
+.lat__swatch[data-stage='tool'] {
+  background: color-mix(in srgb, var(--accent-bright) 58%, var(--theme-void));
+}
+
+.lat__seg[data-stage='tts'],
+.lat__swatch[data-stage='tts'] {
+  background: color-mix(in srgb, var(--accent-bright) 40%, var(--theme-void));
+}
+
+.lat__seg[data-stage='playback'],
+.lat__swatch[data-stage='playback'] {
+  background: color-mix(in srgb, var(--accent-bright) 25%, var(--theme-void));
+}
+
+.lat__rows {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.lat__row {
+  display: grid;
+  grid-template-columns: 8px 1fr auto;
+  align-items: center;
+  gap: var(--sp-2);
+}
+
+.lat__swatch {
+  width: 8px;
+  height: 8px;
+  border-radius: 2px;
+}
+
+.lat__name {
+  font-size: var(--fs-label);
+  color: var(--col-label);
+  text-transform: var(--label-transform);
+  letter-spacing: var(--label-tracking);
+}
+
+.lat__ms {
+  font-size: var(--fs-sm);
+  color: var(--text);
+}
+
+/* ─── the topology, item 10 ─── */
+
+.topo__list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+}
+
+.topo__node {
+  display: grid;
+  grid-template-columns: 10px 1fr auto;
+  align-items: baseline;
+  gap: var(--sp-2);
+  padding: 2px 0;
+}
+
+/* The connector. A short vertical stub in the gutter column, so the rows read
+   as a chain rather than as a list — which is the whole difference between a
+   topology and four facts stacked up. */
+.topo__link {
+  align-self: stretch;
+  justify-self: center;
+  width: 1px;
+  min-height: 1.4em;
+  margin-top: -6px;
+  background: var(--ornament);
+}
+
+.topo__node[data-grade='live'] .topo__link {
+  background: var(--status-active);
+}
+
+.topo__node[data-grade='weak'] .topo__link {
+  background: var(--status-warn);
+}
+
+.topo__node[data-grade='dead'] .topo__link {
+  background: var(--status-error);
+}
+
+.topo__node--self .topo__name {
+  color: var(--accent-bright);
+}
+
+/* The head node's connector is present for the grid and invisible to the eye —
+   there is nothing above `orb` for it to join to. */
+.topo__node--self .topo__link {
+  background: transparent;
+}
+
+.topo__name {
+  font-size: var(--fs-label);
+  color: var(--col-label);
+  text-transform: var(--label-transform);
+  letter-spacing: var(--label-tracking);
+}
+
+.topo__note {
+  font-size: var(--fs-sm);
+  color: var(--text);
+}
+
+.topo__node--self .topo__note {
+  color: var(--col-label);
 }

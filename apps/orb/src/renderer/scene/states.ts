@@ -24,6 +24,24 @@
  * same +0.26, so `thinking` is still the coolest and `blocked` still the
  * warmest, and no state signature changed its relationship to any other.
  *
+ * ─── WHY EVERY `brightness` AND `pointScale` ALSO MOVED, TOGETHER ───
+ *
+ * Every `brightness` was multiplied by 1.90 and every `pointScale` by 0.89, in
+ * one pass, from the sweep that fitted this sphere to the reference's own
+ * direct capture. Two things changed at once and they are one change:
+ *
+ *   count      8,000 -> 20,000 particles (see PARTICLE_COUNT for the frame
+ *              measurement that permitted it)
+ *   size       x0.89, because coverage goes as N x size² and the count is up
+ *   brightness x1.90, because the shell now carries a wrapped-lambert term that
+ *              costs the body most of its light on the unlit side
+ *
+ * The RELATIVE ordering is untouched — every value moved by the same factor —
+ * so `listening` is still the brightest, `idle` still the dimmest, and no state
+ * changed its relationship to any other. That is the property item 2f depends
+ * on and the reason this was done as a uniform scaling rather than by retuning
+ * six numbers by eye.
+ *
  * The six agent states, as sphere parameters.
  *
  * The state list is IMPORTED from @zoey/protocol, never retyped. `AgentState`
@@ -84,8 +102,8 @@ export const SPHERE_STATES = {
     breathPeriodMs: 5200,
     amplitudeGain: 0.0,
     spin: 0.04,
-    pointScale: 0.011,
-    brightness: 0.55,
+    pointScale: 0.0098,
+    brightness: 1.05,
     coolMix: 0.60,
     palette: 'flame',
     frozen: false,
@@ -100,8 +118,8 @@ export const SPHERE_STATES = {
     breathPeriodMs: 2600,
     amplitudeGain: 0.16,
     spin: 0.06,
-    pointScale: 0.0125,
-    brightness: 1.0,
+    pointScale: 0.0111,
+    brightness: 1.90,
     coolMix: 0.81,
     palette: 'flame',
     frozen: false,
@@ -135,8 +153,8 @@ export const SPHERE_STATES = {
     breathPeriodMs: 1800,
     amplitudeGain: 0.0,
     spin: 0.34,
-    pointScale: 0.0105,
-    brightness: 0.82,
+    pointScale: 0.0093,
+    brightness: 1.56,
     coolMix: 0.54,
     palette: 'flame',
     frozen: false,
@@ -149,8 +167,8 @@ export const SPHERE_STATES = {
     breathPeriodMs: 2200,
     amplitudeGain: 0.42,
     spin: 0.08,
-    pointScale: 0.012,
-    brightness: 0.95,
+    pointScale: 0.0107,
+    brightness: 1.81,
     coolMix: 0.72,
     palette: 'flame',
     frozen: false,
@@ -165,8 +183,8 @@ export const SPHERE_STATES = {
     breathPeriodMs: 1400,
     amplitudeGain: 0.0,
     spin: 0.13,
-    pointScale: 0.0115,
-    brightness: 0.85,
+    pointScale: 0.0102,
+    brightness: 1.62,
     coolMix: 0.66,
     palette: 'flame',
     frozen: false,
@@ -179,8 +197,8 @@ export const SPHERE_STATES = {
     breathPeriodMs: 1,
     amplitudeGain: 0.0,
     spin: 0.0,
-    pointScale: 0.0125,
-    brightness: 0.72,
+    pointScale: 0.0111,
+    brightness: 1.37,
     coolMix: 1.0,
     palette: 'amber',
     frozen: true,

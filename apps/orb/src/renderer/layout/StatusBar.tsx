@@ -26,7 +26,6 @@ import { useEffect, useState } from 'react';
 import type { ConnectionPhase } from '../../shared/ipc-contract.ts';
 import { formatMetric, formatUptime } from '../rails/format.ts';
 import {
-  agentStateStore,
   connectionStore,
   healthStore,
   micStore,
@@ -81,7 +80,6 @@ const HEARTBEAT_STALE_MS = 15_000;
  * dark.
  */
 export function StatusBar() {
-  const agentState = useStore(agentStateStore);
   const connection = useStore(connectionStore);
   const health = useStore(healthStore);
   const mic = useStore(micStore);
@@ -106,12 +104,10 @@ export function StatusBar() {
       <div className="status-bar__drag">
         <span className="status-bar__mark">ZOEY</span>
 
-        <span className="status-bar__sep" aria-hidden="true" />
-
-        <span className="status-bar__state" data-state={agentState}>
-          <span className="status-bar__dot" aria-hidden="true" />
-          {agentState}
-        </span>
+        {/* THE AGENT STATE IS NOT HERE ANY MORE. It moved to StateChip, top
+            centre of the stage — see that file for the argument. This bar keeps
+            the diagnostics and stays the frameless window's drag region, which
+            is why it could not move wholesale. */}
 
         <span className="status-bar__sep" aria-hidden="true" />
 

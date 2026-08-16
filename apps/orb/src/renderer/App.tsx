@@ -32,6 +32,7 @@ import {
 } from './state/approval-store.ts';
 import { StateDwell } from './state/state-dwell.ts';
 import { ApprovalStack } from './layout/ApprovalCard.tsx';
+import { Calendar } from './layout/Calendar.tsx';
 import { Column } from './layout/Column.tsx';
 import { Drawer } from './layout/Drawer.tsx';
 import { EdgeDetail } from './layout/EdgeDetail.tsx';
@@ -41,13 +42,16 @@ import { DevOverlay } from './layout/DevOverlay.tsx';
 import { LastLine } from './layout/LastLine.tsx';
 import { NotificationStack } from './layout/NotificationStack.tsx';
 import { Rail } from './layout/Rail.tsx';
+import { StateChip } from './layout/StateChip.tsx';
 import { StatusBar } from './layout/StatusBar.tsx';
+import { Wordmark } from './layout/Wordmark.tsx';
 import { railById } from './rails/rails.tsx';
 import { DomSphere } from './scene/DomSphere.tsx';
 import { Sphere } from './scene/Sphere.tsx';
 import { probeSphereTier } from './scene/gpu-tier.ts';
 import type { ProbeReading, SphereEngine } from './scene/sphere-engine.ts';
 import {
+  agentDetailStore,
   agentStateStore,
   auditStore,
   AUDIT_MAX,
@@ -60,6 +64,7 @@ import {
   railStore,
   tierStore,
   transcriptStore,
+  turnTimingStore,
   TRANSCRIPT_MAX,
   useStore,
   type RailId,
@@ -76,6 +81,8 @@ import {
  * is a property of what he sees rather than of an internal box.
  */
 const SPHERE_X_FRACTION = 0.34;
+/** Where it sits with no right panel to make room for. See `xFraction`. */
+const SPHERE_X_FRACTION_BARE = 0.44;
 /** 0.47, not 0.5: vertical centring reads as LOW in a frame with a heavy
  *  bottom edge, and this layout has an axis along the bottom. */
 const SPHERE_Y_FRACTION = 0.47;
@@ -92,18 +99,49 @@ const STATUS_H = 28;
  * thing still saying "built".
  */
 const AXIS_MIN_W = 1100;
-const COLUMN_MIN_W = 1040;
 const AXIS_SHORT_W = 1200;
 
 /**
- * The sphere's on-screen radius as a fraction of canvas height.
+ * Widths of the two floating panels, and the window widths they need.
  *
- * From the engine's own projection: uSizeScale = h / (2 tan(fov/2)) and pixels
- * per world unit at the sphere's depth is uSizeScale / CAMERA_Z. With fov 42 and
- * CAMERA_Z 3.2 that is h * 0.407 for a unit radius. 0.42 adds the margin that
- * turbulence and breath need.
+ * CONTRACT §9 sizes them: `--panel-left-w` 240, `--panel-right-w` 280. §R.7
+ * forbids a rounded card ON THE CENTRE STAGE and these are rounded cards, so
+ * it is worth saying plainly rather than leaving it to look like a rule was
+ * broken quietly: the prohibition is about the stage, which is the sphere's
+ * ground and must stay void. These sit at the frame's edges, outside the
+ * sphere's clear space, which is where §9's own layout rails put a left and a
+ * right panel in the first place.
+ *
+ * Two panels need far more room than the one column did, so they collapse in a
+ * stated order rather than all at once. See LAYOUT_STEPS in the report.
  */
-const SPHERE_R_FRACTION = 0.42;
+const PANEL_BOTH_W = 1180;
+const PANEL_RIGHT_W = 980;
+
+/**
+ * The largest fraction of the stage's SHORT side the sphere's diameter may
+ * take, and the clearance it keeps from a panel.
+ *
+ * At its natural size the sphere's projected radius is 43% of the canvas
+ * height — an 86%-of-height disc, which clipped top and bottom against the
+ * inset border in the owner's screenshot. 0.74 is judged, not measured: it
+ * leaves a margin wide enough that breath and turbulence, which push the shell
+ * a few percent beyond its nominal radius, cannot reach the edge either.
+ */
+const SPHERE_FILL = 0.74;
+const PANEL_CLEARANCE = 28;
+
+/**
+ * The sphere's natural projected radius, as a fraction of canvas height.
+ *
+ * Derived, not measured: the silhouette of a sphere of radius R at distance d
+ * subtends asin(R/d), so its projected radius is
+ * `tan(asin(R/CAMERA_Z)) * h / (2 tan(fov/2))`. With R=1, CAMERA_Z=3.2 and
+ * fov=42 that is 0.4285 * h. A least-squares circle fitted to a capture's own
+ * silhouette measured 297.7 px at h=692, i.e. 0.4302 — 0.4% from the algebra,
+ * which is the check that this constant is the real one and not a guess.
+ */
+const SPHERE_NATURAL_R = 0.4285;
 
 /**
  * One probe reading as a log line. Three decimals on the offsets: the pass
@@ -306,14 +344,26 @@ export function App() {
       },
     });
 
-    const offAgentState = window.zoey.onAgentState((state) => {
+    const offAgentState = window.zoey.onAgentState(({ state, detail }) => {
       const at = performance.now();
       const repeat = state === lastArrivedState.current;
       lastArrivedState.current = state;
       window.zoey.reportMetrics(
         `STATE-ARRIVED state=${state} t=${at.toFixed(1)} repeat=${repeat} depth=${dwell.depth}`,
       );
+      // The detail is set BEFORE the state. The chip renders both from one
+      // paint, and setting the state first would show the new state beside the
+      // old target for a frame — which is a wrong statement about what she is
+      // touching, briefly, which is still wrong.
+      agentDetailStore.set(detail);
       dwell.submit(state);
+    });
+
+    // Item 9 — the latency trace. Nothing emits `evt.turn.timing` yet, so this
+    // is live wiring behind a dark renderer rather than a stub: the moment
+    // Session 1 ships its half, the trace appears with no change here.
+    const offTiming = window.zoey.onTurnTiming((timing) => {
+      turnTimingStore.set(timing);
     });
 
     return () => {
@@ -321,6 +371,7 @@ export function App() {
       offConnection();
       offHealth();
       offAgentState();
+      offTiming();
       offAuditHistory();
       offAuditAppended();
       offPty();
@@ -682,7 +733,8 @@ export function App() {
 
   const canvasW = Math.max(1, viewport.w - railW);
   const canvasH = Math.max(1, viewport.h - STATUS_H);
-  const sphereR = canvasH * SPHERE_R_FRACTION;
+  const leftPanelW = tokenPx('--panel-left-w', 240);
+  const rightPanelW = tokenPx('--panel-right-w', 280);
 
   /**
    * The column yields to BOTH the drawer and the approval card.
@@ -693,19 +745,93 @@ export function App() {
    * are deliberate, and deliberate wins.
    */
   const cardPresent = useStore(approvalsStore).length > 0;
-  const showColumn = viewport.w >= COLUMN_MIN_W && rail === null && !cardPresent;
+  const showRight = viewport.w >= PANEL_RIGHT_W && rail === null && !cardPresent;
+  /**
+   * The LEFT panel goes first, and it is the right one to lose.
+   *
+   * It carries the month grid, which is a date — a fact the owner can also get
+   * from the clock in his own taskbar. The right panel carries uptime, spend,
+   * CPU and the audit count, which exist nowhere else on this machine. When
+   * only one panel fits, the one that is the sole source of its information
+   * stays. The left panel also sits on the side the sphere is offset TOWARD,
+   * so it is the one that would squeeze the sphere first.
+   */
+  const showLeft = viewport.w >= PANEL_BOTH_W && showRight;
   const showAxis = viewport.w >= AXIS_MIN_W;
   const axisWindowMs = viewport.w >= AXIS_SHORT_W ? 3 * 60_000 : 60_000;
+
+  /**
+   * THE SPHERE MUST NOT OVERFLOW — item 2e, and it is a geometry problem, not a
+   * styling one.
+   *
+   * Three constraints, and the sphere obeys the tightest:
+   *   1. the stage's height, so it never clips against the inset border;
+   *   2. the clear width between whichever panels are showing;
+   *   3. its natural projected size, which it may never EXCEED — the fit factor
+   *      only ever shrinks, so a very tall window does not inflate the sphere
+   *      into something the crescent was not measured at.
+   *
+   * Computed against the WINDOW rather than against a resize observer on the
+   * canvas: the canvas is `inset: 0` on the stage, so this arithmetic and the
+   * engine's own `setSize` are driven by the same number and cannot disagree.
+   */
+  const naturalR = canvasH * SPHERE_NATURAL_R;
+  const clearW =
+    canvasW -
+    (showLeft ? leftPanelW + PANEL_CLEARANCE : 0) -
+    (showRight ? rightPanelW + PANEL_CLEARANCE : 0);
+  const allowedR = Math.min(
+    (canvasH * SPHERE_FILL) / 2,
+    (Math.max(120, clearW) * SPHERE_FILL) / 2,
+    naturalR,
+  );
+  const fit = allowedR / naturalR;
+  const sphereR = allowedR;
 
   /**
    * With a drawer open the sphere must clear its right edge, or an opaque panel
    * slides over the one thing that carries state. Otherwise it sits at the
    * composition's fraction.
    */
-  const targetCx = rail
-    ? Math.max(SPHERE_X_FRACTION * viewport.w, railW + drawerWidth + sphereR + 24)
-    : SPHERE_X_FRACTION * viewport.w;
-  const targetCy = SPHERE_Y_FRACTION * viewport.h;
+  /**
+   * The sphere sits at 34% of the width WHEN THERE IS SOMETHING AT 66%.
+   *
+   * Item 6.1 asks for the sphere off the bullseye, and it is right — a circle
+   * centred in a rectangle with equal emptiness on all four sides is the least
+   * dynamic arrangement available. But asymmetry is a relationship, not a
+   * number: with both panels gone at 900x600 the same 0.34 left an entire empty
+   * right half and read as a mistake rather than as a composition. Measured off
+   * the capture: the sphere ended at x=513 in a 900px frame with nothing after
+   * it.
+   *
+   * So the fraction follows what is actually beside it. Still off centre in
+   * every case — 0.44 is not 0.5 — but the emptiness is a margin rather than a
+   * missing panel.
+   */
+  const xFraction = showRight ? SPHERE_X_FRACTION : SPHERE_X_FRACTION_BARE;
+  const wantCx = rail
+    ? Math.max(xFraction * viewport.w, railW + drawerWidth + sphereR + 24)
+    : xFraction * viewport.w;
+
+  /**
+   * Fitting the sphere is only half of not overflowing. It must also be PLACED
+   * so that the disc lands inside the stage: a correctly-sized sphere pushed to
+   * 34% of a narrow window still hangs off the left edge.
+   *
+   * Clamped in window coordinates against the stage's own bounds, with the
+   * left bound at the rail rather than at zero. `Math.max` runs last so that if
+   * the two bounds ever cross — a window narrower than the sphere, which the
+   * fit above should prevent — the sphere is pinned inside the left edge rather
+   * than sliding off the right one.
+   */
+  const targetCx = Math.max(
+    railW + sphereR + PANEL_CLEARANCE,
+    Math.min(wantCx, viewport.w - sphereR - PANEL_CLEARANCE),
+  );
+  const targetCy = Math.max(
+    STATUS_H + sphereR + PANEL_CLEARANCE,
+    Math.min(SPHERE_Y_FRACTION * viewport.h, viewport.h - sphereR - PANEL_CLEARANCE),
+  );
 
   // Engine convention: positive x moves LEFT by x/2, positive y moves UP by y/2.
   const offsetPx = -2 * (targetCx - railW - canvasW / 2);
@@ -732,6 +858,14 @@ export function App() {
   const onEngineReady = useCallback((next: SphereEngine) => {
     setEngine(next);
   }, []);
+
+  // The fit is a layout consequence, so it is pushed on every layout change
+  // rather than passed as a prop — passing it would re-run Sphere's mount
+  // effect and rebuild the WebGL context, which is the most expensive thing
+  // this app can do (see the note on the depthFar prop).
+  useEffect(() => {
+    engine?.setFit(fit);
+  }, [engine, fit]);
 
   /**
    * Spec §4: "sphere state change → visible, p95 80 ms, hard fail 200 ms".
@@ -768,7 +902,19 @@ export function App() {
       <div className="app__body">
         <Rail />
 
-        <main className="stage" style={stageVars} data-column={showColumn}>
+        <main className="stage" style={stageVars} data-column={showRight}>
+          {/* Item 6.2 — THE FLOOR, and the real one rather than the contact
+              ellipse he rejected.
+
+              A horizon plus a receding grid, in CSS, behind the canvas. Not in
+              the WebGL scene and not as 1px lines, both deliberately: the
+              renderer runs with `antialias: false`, so hairlines converging
+              toward a vanishing point would land on fractional pixels and
+              crawl on an HD 620 every time the sphere breathes. Gradient bands
+              are filtered rather than sampled, they are STATIC — nothing here
+              animates, so there is nothing to crawl — and the plane fades out
+              well before the bands get close enough to moiré. */}
+          <div className="floor" aria-hidden="true" />
           {/* Nothing is drawn until bootstrap resolves and the tier is known.
               Rendering <Sphere> on the default 'med' first would create a WebGL
               context and allocate particle buffers, only to tear both down a
@@ -793,6 +939,15 @@ export function App() {
           {/* Ornament. Asserts nothing, below AA by construction, no numerals. */}
           <EdgeDetail />
 
+          {/* Item 4g. Top centre, over the stage — see StateChip for what this
+              did to the status bar and why the bar could not simply move. */}
+          <StateChip />
+
+          {/* Item 4d. Under the sphere, tracking it: `--sphere-cx` and
+              `--sphere-r` are the same values the engine is positioned from, so
+              the name cannot drift away from the thing it names. */}
+          <Wordmark />
+
           {/* §R.2 — the HUD sits over the stage, never inside a drawer.
               All three render nothing until they have something true to show.
 
@@ -807,7 +962,20 @@ export function App() {
           {/* The right column. Hidden while a drawer is open — the column is
               ambient and the drawer is deliberate — and below 1040px, where it
               would start squeezing the sphere rather than sitting beside it. */}
-          {showColumn ? <Column /> : null}
+          {/* The two floating panels. Left is the month grid, right is the
+              telemetry. Both render nothing rather than an empty frame when
+              they do not fit — see showLeft / showRight for the order they go
+              in and why the left one goes first. */}
+          {showLeft ? (
+            <aside className="panel panel--left">
+              <Calendar />
+            </aside>
+          ) : null}
+          {showRight ? (
+            <aside className="panel panel--right">
+              <Column />
+            </aside>
+          ) : null}
 
           {/* The time axis. Renders nothing when no audit entry falls in the
               window, ruler included: a ruler over nothing is an empty box. */}

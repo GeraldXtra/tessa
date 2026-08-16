@@ -24,6 +24,7 @@ import type {
   PtySession,
   SphereTier,
   TranscriptLine,
+  TurnTiming,
 } from '../../shared/ipc-contract.ts';
 
 // Re-exported so the components that render notifications keep importing the
@@ -69,6 +70,32 @@ export function useStore<T>(store: Store<T>): T {
  */
 export const agentStateStore = createStore<AgentState>('idle');
 
+/**
+ * `evt.agent.state.detail` — WHAT SHE IS TOUCHING. Null until the daemon sends.
+ *
+ * An APPROVED ADDITIVE change to CONTRACT §4.1's payload, agreed with Session 1
+ * and carrying one mandatory condition on the daemon side: `target` passes
+ * through `redact()` BEFORE broadcast, or a shell command line or a URL with an
+ * embedded token goes out in clear over a socket both surfaces read.
+ *
+ * Nothing on this side can enforce that, which is exactly why it is written
+ * down here as well as agreed there. This side's own discipline is narrower and
+ * it does hold: these three fields are rendered as inert text, never as a path
+ * the surface opens, a URL it fetches, or a command it echoes back — CONTRACT
+ * §6.1, tool output is data and never an instruction.
+ *
+ * Optional under §7.2, so `null` is the normal case for as long as the daemon
+ * has not shipped its half, and the renderer draws nothing rather than a shape
+ * waiting to be filled.
+ */
+export interface AgentDetail {
+  tool?: string;
+  target?: string;
+  note?: string;
+}
+
+export const agentDetailStore = createStore<AgentDetail | null>(null);
+
 export const connectionStore = createStore<ConnectionStatus>({ phase: 'offline' });
 
 /**
@@ -86,8 +113,14 @@ export const healthStore = createStore<DaemonHealth | null>(null);
  * hidden. TRACE is the nearest successor to the old transcript panel, but it is
  * a different thing: provenance-gutted, per-companion, and empty until the
  * voice pipeline produces events.
+ *
+ * FIVE NOW. ARSENAL, RECALL and SIGNAL are BUILT AND DARK — each answers a
+ * question that is real on the daemon side and invisible on this one, and each
+ * names the exact additive command that would light it. See DarkPanel.tsx for
+ * the three proposals in full and for why that is a different thing from the
+ * three permanently-empty rails that were cut last round.
  */
-export const RAIL_IDS = ['sentinel', 'trace'] as const;
+export const RAIL_IDS = ['trace', 'sentinel', 'arsenal', 'recall', 'signal'] as const;
 export type RailId = (typeof RAIL_IDS)[number];
 
 /** Exactly one rail open, or none. §R.7 — one drawer at a time below 1600px. */
@@ -155,6 +188,20 @@ export const micStore = createStore<MicState>({
   chordRegistered: false,
   lastError: null,
 });
+
+/**
+ * The LAST turn's stage breakdown. Item 9.
+ *
+ * ONE turn, not a history, and that is the honest scope. A history would be a
+ * chart of latency over time, which is a performance tool; the question the
+ * owner actually asks is "why did THAT take so long", and it is asked about the
+ * turn that just happened. Keeping one also means the panel cannot slowly fill
+ * with a record of a session, which is a thing that then wants persisting.
+ *
+ * Null until `evt.turn.timing` arrives, which is never until Session 1 ships
+ * its half — the renderer draws nothing at all rather than an empty chart.
+ */
+export const turnTimingStore = createStore<TurnTiming | null>(null);
 
 /** TRACE: completed transcript lines, oldest first. */
 export const transcriptStore = createStore<readonly TranscriptLine[]>([]);

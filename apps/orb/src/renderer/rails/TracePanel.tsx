@@ -117,9 +117,62 @@ export function TracePanel() {
         )}
       </Section>
 
+      {/* ITEM 11 — THE PROVENANCE LEGEND.
+          Cut once, correctly: as a free-floating block of static text it looked
+          like data, which on a surface whose one rule is that everything on it
+          is real was the wrong thing for it to look like.
+          It is here now because position fixes that. Beside the gutters it
+          explains, inside the panel that draws them, with a heading that says
+          KEY — a legend attached to its chart is read as a legend, and the same
+          words floating alone are read as a status list. */}
+      <Legend />
+
       <Section title="Search">
         <NoData />
       </Section>
     </>
+  );
+}
+
+/**
+ * CONTRACT §6.2's six tags, and what each one is worth.
+ *
+ * The trust column is the point of the whole thing. `human` is the ONLY trusted
+ * source — everything else is data that may be trying to instruct her, and
+ * `external` is called out as the highest risk because email bodies and web
+ * pages are the ones written by somebody who wants something.
+ *
+ * All six are listed even though the gutter only draws three colours today
+ * (--prov-human, --prov-program, --prov-agent). A key that lists only what is
+ * currently visible teaches the reader that there are three kinds of source,
+ * and the four-source day would then arrive without warning.
+ */
+const PROVENANCE_KEY: readonly { tag: string; means: string; trusted: string }[] = [
+  { tag: 'human', means: 'you typed or clicked it', trusted: 'trusted' },
+  { tag: 'program', means: 'stdout on this machine', trusted: 'not trusted' },
+  { tag: 'agent', means: 'the model proposed it', trusted: 'not trusted' },
+  { tag: 'schedule', means: 'a scheduled job fired', trusted: 'not trusted' },
+  { tag: 'external', means: 'fetched from off this machine', trusted: 'highest risk' },
+  { tag: 'system', means: "the daemon's own actions", trusted: '—' },
+];
+
+function Legend() {
+  return (
+    <Section title="Key">
+      <dl className="legend">
+        {PROVENANCE_KEY.map((p) => (
+          <div key={p.tag} className="legend__row">
+            {/* The same gutter mark the lines above carry, at the same width,
+                so the eye matches them by shape rather than by reading. */}
+            <span className="legend__gutter" data-provenance={p.tag} aria-hidden="true" />
+            <dt className="legend__tag">{p.tag}</dt>
+            <dd className="legend__means">{p.means}</dd>
+            <dd className="legend__trust" data-trust={p.trusted}>
+              {p.trusted}
+            </dd>
+          </div>
+        ))}
+      </dl>
+    </Section>
   );
 }

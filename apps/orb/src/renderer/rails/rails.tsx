@@ -1,6 +1,10 @@
 /**
- * TWO rails: SENTINEL and TRACE. §R.3 fixes five; three of them have no
- * producer, and this is a deliberate, reversible subtraction.
+ * FIVE rails: TRACE, SENTINEL, ARSENAL, RECALL, SIGNAL.
+ *
+ * The first two are live. The last three are BUILT AND DARK — each names the
+ * one additive command that would light it, in DarkPanel.tsx. §R.3's original
+ * five are not these five: PULSE moved into the right panel, and FLOW and INTEL
+ * are still gone for the reason below.
  *
  * ─── why three left ───
  * PULSE's contents are now permanently on screen in the right column, which was
@@ -22,6 +26,7 @@
 import type { ReactNode } from 'react';
 
 import type { RailId } from '../state/store.ts';
+import { DarkPanel } from './DarkPanel.tsx';
 import { SentinelPanel } from './SentinelPanel.tsx';
 import { TracePanel } from './TracePanel.tsx';
 
@@ -35,8 +40,12 @@ export interface RailDef {
 }
 
 export const RAILS: readonly RailDef[] = [
-  { id: 'sentinel', label: 'Sentinel', answers: 'Is it safe?', render: () => <SentinelPanel /> },
   { id: 'trace', label: 'Trace', answers: 'What did we say?', render: () => <TracePanel /> },
+  { id: 'sentinel', label: 'Sentinel', answers: 'Is it safe?', render: () => <SentinelPanel /> },
+  // Built and dark. Each renders its own missing command; see DarkPanel.tsx.
+  { id: 'arsenal', label: 'Arsenal', answers: 'What can she do?', render: () => <DarkPanel id="arsenal" /> },
+  { id: 'recall', label: 'Recall', answers: 'What does she remember?', render: () => <DarkPanel id="recall" /> },
+  { id: 'signal', label: 'Signal', answers: 'What is the voice chain doing?', render: () => <DarkPanel id="signal" /> },
 ];
 
 export function railById(id: RailId): RailDef {

@@ -41,7 +41,9 @@ import {
 } from '../state/store.ts';
 import { approvalsStore } from '../state/approval-store.ts';
 import { formatUptime, tickStore } from '../state/tick.ts';
+import { Latency } from './Latency.tsx';
 import { MIN_SAMPLES, Sparkline } from './Sparkline.tsx';
+import { Topology } from './Topology.tsx';
 
 /** One label/value line. Renders nothing when the value is absent. */
 function Row({ label, value, hint }: { label: string; value: string | null; hint?: string }) {
@@ -205,6 +207,17 @@ export function Column() {
         <Row label="pty" value={pty.length > 0 ? String(pty.length) : null} />
         <Row label="mic" value={mic.claimed ? 'open' : null} />
       </Group>
+
+      {/* Item 10 · what this process can honestly say it is connected to.
+             Every row traces to a value already on this side of the bridge; the
+             Console and the network beyond the daemon are absent because there
+             is no source for either. See Topology.tsx. */}
+      <Topology />
+
+      {/* Item 9 · where the last turn's seconds went. Renders NOTHING until
+             `evt.turn.timing` arrives, and the wire is live end to end so it
+             lights the first time a turn completes. See Latency.tsx. */}
+      <Latency />
 
       {/*
         n · HEARD / SAID lives UNDER THE SPHERE, not here.

@@ -434,13 +434,38 @@ if (!app.requestSingleInstanceLock()) {
         const flag = process.argv.find((a) => a.startsWith('--force-sphere='));
         if (!flag) return null;
         const parts = flag.slice('--force-sphere='.length).split(',').map(Number);
-        if (parts.length !== 4 || parts.some((n) => !Number.isFinite(n) || n < 0)) {
-          log(`!! --force-sphere needs four non-negative numbers, got "${flag}"`);
+        if (parts.length !== 9 || parts.some((n) => !Number.isFinite(n) || n < 0)) {
+          log(`!! --force-sphere needs nine non-negative numbers, got "${flag}"`);
           return null;
         }
-        const [gain, size, bodyBright, bodySize] = parts as [number, number, number, number];
-        log(`sphere: rimGain=${gain} rimSize=${size} bodyBright=${bodyBright} bodySize=${bodySize}`);
-        return { gain, size, bodyBright, bodySize };
+        const [gain, size, bodyBright, bodySize, darkSide, lambertPow, jitter, rimPow, spreadPow] =
+          parts as [
+          number,
+          number,
+          number,
+          number,
+          number,
+          number,
+          number,
+          number,
+          number,
+        ];
+        log(
+          `sphere: rimGain=${gain} rimSize=${size} bodyBright=${bodyBright}` +
+            ` bodySize=${bodySize} darkSide=${darkSide} lambertPow=${lambertPow}` +
+            ` jitter=${jitter} rimPow=${rimPow} spreadPow=${spreadPow}`,
+        );
+        return {
+          gain,
+          size,
+          bodyBright,
+          bodySize,
+          darkSide,
+          lambertPow,
+          jitter,
+          rimPow,
+          spreadPow,
+        };
       })(),
       probeGeometryMs: probeFlagMs('probe-geometry'),
       probePulseMs: probeFlagMs('probe-pulse'),
@@ -683,9 +708,21 @@ if (!app.requestSingleInstanceLock()) {
       // evt.agent.state today, so in practice the Alt+1…6 dev cycler still owns
       // the sphere — but the wiring is live, and the moment core/ grows a brain
       // this takes over with no further change here.
-      onAgentState: (state) => {
-        log(`agent state: ${state}`);
-        broadcast(IPC.agentStateChanged, state);
+      onAgentState: (state, detail) => {
+        // The detail is logged as a COUNT, not as its contents. It has already
+        // passed the daemon's redact() and this side's sanitiser, and it is
+        // still the field most likely to carry a path or a URL — the process
+        // log is a file on disk that outlives the window.
+        const n = detail ? Object.values(detail).filter(Boolean).length : 0;
+        log(`agent state: ${state}${n ? ` (+${n} detail field${n === 1 ? '' : 's'})` : ''}`);
+        broadcast(IPC.agentStateChanged, { state, detail: detail ?? null });
+      },
+
+      // Item 9. Straight through: main validated the closed stage vocabulary
+      // already, and the renderer draws bars from numbers.
+      onTurnTiming: (timing) => {
+        log(`turn timing: ${timing.stages.map((s) => `${s.name}=${Math.round(s.ms)}`).join(' ')}`);
+        broadcast(IPC.turnTiming, timing);
       },
 
       /**

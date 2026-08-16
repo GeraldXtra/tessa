@@ -23,14 +23,70 @@ uniform float uBrightness;
  */
 uniform float uDepthFar;
 
-/** Extra brightness at the silhouette. See vFresnel in the vertex stage. */
+/** Extra brightness at the LIT silhouette. See vFresnel in the vertex stage. */
 uniform float uRimGain;
+
+/** How much larger a silhouette point draws. Shared with the vertex stage. */
+uniform float uRimSize;
+
+/**
+ * What fraction of its brightness the side facing AWAY from the light keeps.
+ *
+ * Measured: the reference's dark limb is 0.0% lit coverage against 34.8% at the
+ * bright one. Copying that literally would give a shell with a hard terminator
+ * and half of it missing, which reads as a crescent moon rather than a sphere —
+ * so this is a floor, not zero, and the number is judged rather than measured.
+ * See the report for what it cost and why it stopped where it did.
+ */
+uniform float uDarkSide;
+
+/**
+ * The exponent on the wrapped lambert. 1.0 is the plain half-angle cosine.
+ *
+ * Measured, not chosen. At 1.0 the crescent was too broad angularly and too
+ * narrow radially — it wrapped over the top of the shell (top patch 4.9%
+ * against the reference's 1.5%) while leaving the lit half's inboard region
+ * too dark (litMid 3.8% against 7.0%). Raising the exponent steepens the
+ * terminator, which pushes light off the top and poles and concentrates it
+ * across the lit face, moving both errors the right way at once.
+ */
+uniform float uLambertPow;
+
+/**
+ * The crescent's radial width, as an exponent on the fresnel. LOWER IS WIDER.
+ *
+ * Shared with the vertex stage's point-size term, deliberately — brightness and
+ * size have to peak on the same particles or the band is a bright thin line
+ * sitting inside a wide dim one, which is two rims.
+ */
+uniform float uRimPow;
+
+/**
+ * ENERGY SPREAD. How much of its per-particle brightness a widened point gives
+ * back. 0 disables it and reproduces the un-conserved shell exactly.
+ *
+ * This is the term that makes "broader" and "not brighter" compatible, and
+ * without it they are not. Growing a sprite multiplies its AREA, and with
+ * additive blending every overlapping pixel sums — so widening the band raised
+ * the limb's mean lit luminance to 0.39 against the reference's 0.061, a factor
+ * of 6.4, while the rim GAIN was only 0.4. The brightness was never coming from
+ * the gain; it was coming from overlap.
+ *
+ * Dividing by the size growth gives the light back as area instead of as
+ * intensity, which is what spreading a fixed amount of light over a larger spot
+ * physically means. At 2.0 it is full conservation (area goes as the square);
+ * below that the band still gains some intensity as it widens, which is what
+ * keeps it reading as a lit edge rather than as a flat wash.
+ */
+uniform float uSpreadPow;
 
 varying float vRim;
 varying float vSeed;
 varying float vPulse;
 varying float vDepth;
 varying float vFresnel;
+varying float vLight;
+varying float vSpread;
 
 void main() {
   // Round the point. gl_PointCoord is [0,1] across the sprite; work in squared
@@ -73,12 +129,45 @@ void main() {
   // temperature for the same channel.
   float depthFade = mix(1.0, uDepthFar, vDepth);
 
-  // THE RIM. Squared so it stays off the face of the disc and climbs steeply
-  // only in the last few degrees before the silhouette — a linear ramp lifts
-  // the whole shell and just makes it uniformly brighter, which is the state it
-  // was already in and the state he rejected.
-  float rim = 1.0 + uRimGain * vFresnel * vFresnel;
+  // THE CRESCENT — the broad half of it.
+  //
+  // A wrapped lambertian: brightest where the surface faces the light, falling
+  // to `uDarkSide` where it faces away. This is what produces the reference's
+  // 0.1% -> 1.8% -> 7.0% run from the dark side across the middle to the bright
+  // side, and it is the term that gives the shell a dark side at all. Without
+  // it the sphere is lit from within and has no volume to read.
+  float lambert = mix(uDarkSide, 1.0, pow(0.5 + 0.5 * vLight, uLambertPow));
 
-  float alpha = falloff * uBrightness * grain * depthFade * rim * (1.0 + vPulse * 1.6);
+  // THE CRESCENT — the sharp half.
+  //
+  // The exponent keeps it off the face of the disc: `vFresnel` is near zero
+  // across the middle whatever the power, so this lifts the edge and not the
+  // shell. A linear ramp would brighten everything uniformly, which is the
+  // state it was already in and the state he rejected.
+  //
+  // 1.3 rather than 2.0, and the side-by-side is what changed it: squared drew
+  // a thin bright wire ON the silhouette, where the reference has a broad
+  // granular band reaching well inboard — 12.9 px mean blob at the lit
+  // mid-radius against 4.1 px at the square.
+  //
+  // The SAME exponent as the vertex stage's size term, so brightness and size
+  // peak on the same particles and the band is bright exactly where it is also
+  // merged. Two different falloffs put a bright thin line inside a wide dim
+  // one, which is two rims.
+  //
+  // Gated on `face`, again matching the vertex stage. Ungated this is a fresnel
+  // ring: it lights the dark limb too and turns the object back into a bubble.
+  float face = smoothstep(-0.15, 0.85, vLight);
+  float grow = pow(vFresnel, uRimPow);
+  float rim = 1.0 + uRimGain * grow * face;
+
+  // The growth the vertex stage ACTUALLY delivered, clamp included. Recomputing
+  // it here from uRimSize would reproduce the intended growth rather than the
+  // realised one, and past the overdraw clamp those two diverge — which made
+  // the crescent dim as it was widened. See vSpread.
+  float spread = pow(max(vSpread, 1.0), -uSpreadPow);
+
+  float alpha =
+    falloff * uBrightness * grain * depthFade * lambert * rim * spread * (1.0 + vPulse * 1.6);
   gl_FragColor = vec4(tint * alpha, alpha);
 }

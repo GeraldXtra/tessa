@@ -66,6 +66,7 @@ import type {
   PermissionRequest,
   PtySession,
   TranscriptLine,
+  TurnTiming,
 } from '../shared/ipc-contract.ts';
 import { readRuntimeFile, type RuntimeInfo } from './runtime-file.ts';
 import { TranscriptAssembler, type TranscriptDelta } from './transcript-assembler.ts';
@@ -191,11 +192,31 @@ function credentialDigest(port: number, token: string): string {
   return createHash('sha256').update(`${port}:${token}`).digest('hex').slice(0, 16);
 }
 
+/**
+ * The CLOSED stage vocabulary for `evt.turn.timing`.
+ *
+ * Session 1 approved the event on this condition, and it is a condition rather
+ * than a preference: the renderer lays the stages out in a fixed left-to-right
+ * order and colours them from a fixed map, so a name outside this set has
+ * nowhere to go. Adding one is a change both sides make together, exactly like
+ * CONTRACT §7.4's closed enums — this list is not in enums.json because the
+ * event is not in the contract yet, and it moves there when it is.
+ */
+const TIMING_STAGES: readonly string[] = ['stt', 'route', 'tool', 'tts', 'playback'];
+
+/** The three fields of `evt.agent.state.detail`, after this file sanitises them. */
+export interface AgentDetailIn {
+  tool?: string | undefined;
+  target?: string | undefined;
+  note?: string | undefined;
+}
+
 export interface DaemonConnectionOptions {
   surfaceVersion: string;
   onStatus: (status: ConnectionStatus) => void;
   onHealth: (health: DaemonHealth) => void;
-  onAgentState: (state: AgentState) => void;
+  onAgentState: (state: AgentState, detail: AgentDetailIn | null) => void;
+  onTurnTiming: (timing: TurnTiming) => void;
   onAuditHistory: (entries: AuditEntry[]) => void;
   onAuditAppended: (entry: AuditEntry) => void;
   onPtySessions: (sessions: PtySession[]) => void;
@@ -868,9 +889,84 @@ export class DaemonConnection {
       // drifted (CONTRACT §7.4) — dropping it keeps the sphere on a state it
       // can actually render instead of blanking.
       if (typeof evt.state === 'string' && (AGENT_STATES as readonly string[]).includes(evt.state)) {
-        this.opts.onAgentState(evt.state);
+        /**
+         * `detail` — WHAT SHE IS TOUCHING. Item 12, approved as additive.
+         *
+         * Sanitised HARD on the way in, and the daemon's own `redact()` is not
+         * the reason this is here: two independent controls beat one, and the
+         * one this process can guarantee is the one on this side of the socket.
+         *
+         *   • only the three named fields survive; anything else is dropped
+         *   • non-strings are dropped rather than coerced, so `[object Object]`
+         *     can never reach the screen
+         *   • each is truncated, because an unbounded string in a fixed chip is
+         *     a layout weapon whatever it contains
+         *   • control characters are stripped: a payload carrying an ANSI escape
+         *     or a newline is not a rendering problem here (React escapes text)
+         *     but it IS one the moment anything logs it, and §6.2 already
+         *     strips provenance-shaped sequences on the PTY path for the same
+         *     reason.
+         */
+        const raw = evt.detail as Record<string, unknown> | undefined;
+        const clean = (v: unknown): string | undefined => {
+          if (typeof v !== 'string' || v.length === 0) return undefined;
+          // Control characters out, without a regex escape in sight: the
+          // strip is by CODE POINT, which cannot be got wrong by a build
+          // step, a copy-paste, or a tool that rewrites escapes.
+          let out = "";
+          for (const ch of v.slice(0, 120)) {
+            const code = ch.codePointAt(0) ?? 0;
+            out += code < 0x20 || code === 0x7f ? " " : ch;
+          }
+          return out;
+        };
+        const detail = raw
+          ? { tool: clean(raw['tool']), target: clean(raw['target']), note: clean(raw['note']) }
+          : undefined;
+        const any = detail && (detail.tool || detail.target || detail.note);
+
+        this.opts.onAgentState(evt.state, any ? detail : null);
       } else {
         this.opts.log(`ignored evt.agent.state with unknown state '${String(evt.state)}'`);
+      }
+      return;
+    }
+
+    /**
+     * `evt.turn.timing` — THE LATENCY TRACE. Item 9, approved as additive.
+     *
+     * `{ turnId, stages: [{ name, ms }] }`, where `name` is the CLOSED
+     * vocabulary agreed with Session 1: stt | route | tool | tts | playback.
+     * Closed matters — the renderer lays the stages out in a fixed order and
+     * colours them from a fixed map, so an unexpected name would either be
+     * dropped silently or land in a bar nobody can label.
+     *
+     * Validated here rather than trusted, on the same grounds as the agent
+     * state above: an unknown name means the two sides have drifted, and the
+     * honest response is to drop that stage and say so, not to render it under
+     * a guessed label.
+     */
+    if (parsed.type === 'evt.turn.timing') {
+      const evt = parsed.payload as { turnId?: unknown; stages?: unknown };
+      const stages: { name: string; ms: number }[] = [];
+      if (Array.isArray(evt.stages)) {
+        for (const s of evt.stages) {
+          const st = s as { name?: unknown; ms?: unknown };
+          if (typeof st.name !== 'string' || !TIMING_STAGES.includes(st.name)) {
+            this.opts.log(`ignored evt.turn.timing stage with unknown name '${String(st.name)}'`);
+            continue;
+          }
+          // Non-finite or negative durations are dropped, not clamped. A bar of
+          // width NaN silently disappears; a bar of width -1 silently inverts.
+          if (typeof st.ms !== 'number' || !Number.isFinite(st.ms) || st.ms < 0) continue;
+          stages.push({ name: st.name, ms: st.ms });
+        }
+      }
+      if (stages.length > 0) {
+        this.opts.onTurnTiming({
+          turnId: typeof evt.turnId === 'string' ? evt.turnId : '',
+          stages,
+        });
       }
       return;
     }

@@ -33,6 +33,7 @@ import {
   Points,
   Scene,
   ShaderMaterial,
+  Vector3,
   WebGLRenderer,
 } from 'three';
 
@@ -457,7 +458,17 @@ export interface SphereEngineOptions {
    * states.ts, so the six states keep their relative ordering under a sweep —
    * the thing item 2f has to survive.
    */
-  rim?: { gain: number; size: number; bodyBright: number; bodySize: number };
+  rim?: {
+    gain: number;
+    size: number;
+    bodyBright: number;
+    bodySize: number;
+    darkSide: number;
+    lambertPow: number;
+    jitter: number;
+    rimPow: number;
+    spreadPow: number;
+  };
   /** Read each frame. Never a subscription — no React involvement. */
   getState: () => AgentState;
   /** Fired when the governor or a context loss changes the tier. */
@@ -493,6 +504,22 @@ export interface SphereEngine {
    * the 160px its available space actually moved.
    */
   setCentreOffset(xPx: number, yPx: number): void;
+  /**
+   * Scale the whole object so it always fits its frame. 1 is the natural size.
+   *
+   * THE SPHERE MUST NOT OVERFLOW, at any window size. Its natural projected
+   * radius is `tan(asin(R / CAMERA_Z)) * canvasHeight / (2 tan(fov/2))`, which
+   * is 43% of the canvas height — an 86%-of-height disc that clipped against
+   * the inset border top and bottom in the owner's own screenshot.
+   *
+   * Scaling BOTH the radius and the point size by the same factor is what makes
+   * this a true scaling rather than a squeeze: shrinking the shell alone would
+   * leave the sprites at their old size and quietly make the sphere denser, so
+   * the crescent measured against the reference would no longer be the crescent
+   * on screen. The caller computes the factor from the stage it actually has;
+   * this engine does not know what a panel is.
+   */
+  setFit(factor: number): void;
   /**
    * Discard the measured refresh rate and re-derive the frame divider.
    *
@@ -652,8 +679,72 @@ export const DEPTH_FAR_DEFAULT = 0.42;
  * report and the varying `vFresnel` in particles.vert.glsl. `--force-sphere=`
  * overrides all four rim/body numbers so a sweep needs one build, not twelve.
  */
-export const RIM_GAIN_DEFAULT = 2.6;
-export const RIM_SIZE_DEFAULT = 1.4;
+export const RIM_GAIN_DEFAULT = 0.4;
+export const RIM_SIZE_DEFAULT = 2.4;
+
+/**
+ * How much brightness the side facing away from the light keeps.
+ *
+ * The reference's dark limb measures 0.0% lit coverage against 34.8% at the
+ * bright one, so the honest copy of it is zero. Zero renders a crescent moon,
+ * not a sphere: the terminator becomes a hard edge and half the shell is simply
+ * gone. This floor is the compromise, and it is stated rather than hidden.
+ */
+export const DARK_SIDE_DEFAULT = 0.2;
+
+/** Exponent on the wrapped lambert. See the uniform's note in particles.frag. */
+export const LAMBERT_POW_DEFAULT = 1.8;
+
+/**
+ * Peak-to-peak radial jitter. ZERO, and deliberately so.
+ *
+ * Built to break the Fibonacci lattice's concentric arcs, and it does — but it
+ * breaks the silhouette with them, because the crisp limb and the visible
+ * lattice come from the same evenness. Measured by eye across 0.0 / 0.10 /
+ * 0.20: at 0.10 the crescent is already a diffuse band rather than an edge, and
+ * at 0.20 the sphere is a fuzzy cloud with no surface at all — the exact
+ * complaint this whole round exists to fix.
+ *
+ * The lattice was fixed the other way instead, by raising the particle count so
+ * the dots are small enough that the arcs stop being legible. The uniform stays
+ * at zero rather than being deleted so the finding survives and so the next
+ * person does not spend the same afternoon rediscovering it.
+ */
+export const JITTER_DEFAULT = 0.0;
+
+/**
+ * The crescent's radial width, and its energy conservation. Both MEASURED.
+ *
+ * `RIM_POW` is the exponent on the fresnel; LOWER IS WIDER. It went 2.0 -> 1.3
+ * -> its final value because the side-by-side against ref-2.png showed the
+ * reference's crescent as a broad granular band and this one as a thin wire:
+ * mean blob area at the lit mid-radius was 4.1 px here against 12.9 px there.
+ *
+ * `SPREAD_POW` is what makes broad and dim compatible, and without it they are
+ * not. See uSpreadPow in particles.frag for the arithmetic; the short version
+ * is that under additive blending a wider band is automatically a brighter one,
+ * and the reference's band is wide and NOT bright — its limb is only 1.65x the
+ * luminance of its own body.
+ */
+export const RIM_POW_DEFAULT = 1.3;
+export const SPREAD_POW_DEFAULT = 0.0;
+
+/**
+ * The light, in VIEW space. Right, below, and slightly toward the camera.
+ *
+ * Direction taken from the reference rather than chosen: its bottom patch
+ * measures 12.3% lit coverage against 1.5% at the top, and its right limb 34.8%
+ * against 0.0% at the left. Right and below, therefore, and the small +z tips
+ * the highlight a few degrees onto the face so the crescent has a soft inner
+ * edge instead of ending exactly on the silhouette.
+ *
+ * The y component was -0.45 on the first pass and is measured down to -0.28.
+ * The reference's ratio of bright limb to bottom is 34.8 : 12.3, i.e. 2.8 : 1;
+ * at -0.45 mine measured 45.3 : 35.0, i.e. 1.3 : 1. The light was sitting too
+ * low, which pooled the crescent under the sphere and read as the contact
+ * ellipse he had just rejected, in a different form.
+ */
+const LIGHT_DIR = new Vector3(1.0, -0.28, 0.3).normalize();
 
 function percentile(sorted: readonly number[], fraction: number): number {
   if (sorted.length === 0) return 0;
@@ -740,11 +831,22 @@ export function createSphereEngine(options: SphereEngineOptions): SphereEngine {
      */
     uRimGain: { value: options.rim?.gain ?? RIM_GAIN_DEFAULT },
     uRimSize: { value: options.rim?.size ?? RIM_SIZE_DEFAULT },
+    uDarkSide: { value: options.rim?.darkSide ?? DARK_SIDE_DEFAULT },
+    uLambertPow: { value: options.rim?.lambertPow ?? LAMBERT_POW_DEFAULT },
+    uJitter: { value: options.rim?.jitter ?? JITTER_DEFAULT },
+    uRimPow: { value: options.rim?.rimPow ?? RIM_POW_DEFAULT },
+    uSpreadPow: { value: options.rim?.spreadPow ?? SPREAD_POW_DEFAULT },
+    uLightDir: { value: LIGHT_DIR.clone() },
   };
 
   // Multipliers on the per-state body values. 1 unless a sweep is running.
   const bodyBrightMul = options.rim?.bodyBright ?? 1;
   const bodySizeMul = options.rim?.bodySize ?? 1;
+
+  // Uniform fit scaling. Smoothed like every other placement value so a
+  // window resize eases rather than snapping. See SphereEngine.setFit.
+  let fitTarget = 1;
+  let fitCurrent = 1;
 
   const material = new ShaderMaterial({
     uniforms,
@@ -1037,11 +1139,12 @@ export function createSphereEngine(options: SphereEngineOptions): SphereEngine {
     uniforms.uTime.value = sceneTimeMs / 1000;
     uniforms.uNoiseTime.value = noisePhaseS;
     uniforms.uAmplitude.value = amplitude;
-    uniforms.uRadius.value = smooth.radius;
+    fitCurrent = approach(fitCurrent, fitTarget, rate);
+    uniforms.uRadius.value = smooth.radius * fitCurrent;
     uniforms.uTurbulence.value = smooth.turbulence * (1 + TURB_AMP_GAIN * focusCurrent);
     uniforms.uBreath.value = Math.sin(breathPhase) * smooth.breathDepth;
     uniforms.uAmpGain.value = smooth.amplitudeGain;
-    uniforms.uPointScale.value = smooth.pointScale * bodySizeMul;
+    uniforms.uPointScale.value = smooth.pointScale * bodySizeMul * fitCurrent;
     // §R.1: hotter under load. coolMix 1 is fully --sphere-cool and 0 is fully
     // --sphere-hot, so load pulls it DOWN toward hot from whatever the current
     // state's resting temperature is.
@@ -1350,6 +1453,12 @@ export function createSphereEngine(options: SphereEngineOptions): SphereEngine {
 
   return {
     setTier,
+
+    setFit(factor: number) {
+      // Clamped, not trusted. A zero or a NaN out of a layout calculation
+      // would silently render nothing, which is the hardest bug to see.
+      fitTarget = Number.isFinite(factor) ? Math.min(1, Math.max(0.2, factor)) : 1;
+    },
 
     setCentreOffset(xPx: number, yPx: number) {
       offsetTargetPx = Number.isFinite(xPx) ? xPx : 0;

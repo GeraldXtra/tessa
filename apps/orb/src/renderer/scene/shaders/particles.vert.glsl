@@ -42,6 +42,34 @@ uniform float uNoiseTime;
 /** How much larger a silhouette particle draws than a face-on one. */
 uniform float uRimSize;
 
+/** The crescent's radial width, as an exponent on the fresnel. LOWER IS WIDER. */
+uniform float uRimPow;
+
+/**
+ * The overdraw guard, in pixels. NOT an aesthetic choice.
+ *
+ * Every pixel of every point is an additive blend, so unbounded point size on
+ * an HD 620 turns 20,000 particles into a full-screen overdraw storm. Raised
+ * from 9 to 20 once the fragment stage started conserving energy across the
+ * growth — see vSpread — because a bigger sprite no longer means a brighter
+ * one, so the cost of raising it is fill rate alone and that was measured.
+ */
+const float POINT_SIZE_MAX = 20.0;
+
+/**
+ * The light direction, in VIEW space, unit length, set once on the CPU.
+ *
+ * View space and not object space, and that is the whole point: the shell
+ * spins, and a light fixed to the object would drag its bright side around
+ * with it, which reads as a rotating pattern rather than as a lit thing. Fixed
+ * in view space, the particles rotate THROUGH a stationary highlight, which is
+ * what a solid object does.
+ */
+uniform vec3 uLightDir;
+
+/** Peak-to-peak radial jitter as a fraction of the radius. Breaks the lattice. */
+uniform float uJitter;
+
 varying float vRim;
 varying float vSeed;
 varying float vPulse;
@@ -80,6 +108,39 @@ varying float vDepth;
  */
 varying float vFresnel;
 
+/**
+ * WHICH WAY THIS PARTICLE FACES RELATIVE TO THE LIGHT. -1 away, +1 toward.
+ *
+ * A SECOND CORRECTION, and it overturns the first one. The rim above was
+ * modelled as a fresnel, which is symmetric: both limbs equally bright. The
+ * reference is not symmetric. Re-measured against its own fitted disc —
+ * centre (708,457), r=264, fitted by least squares through the right-edge arc
+ * rather than by a hand-placed patch — coverage across the shell runs:
+ *
+ *   left limb   0.0%    max blob     0 px
+ *   left mid    0.1%    max blob     4 px
+ *   centre      1.8%    max blob    16 px
+ *   right mid   7.0%    max blob    40 px
+ *   right limb 34.8%    max blob  3417 px
+ *   top         1.5%  ·  bottom  12.3%
+ *
+ * That is a monotone gradient from a DARK side to a blazing one, peaking at a
+ * single limb, with a 3417 px continuous ribbon at the peak. It is a crescent,
+ * not a ring — a directional light from the lower right — and a fresnel term
+ * cannot produce it, because a fresnel term does not know which way the light
+ * is.
+ *
+ * The distinction matters more than it sounds. A shell lit evenly from within
+ * is a lamp; it has no dark side, so it has no volume, and no amount of edge
+ * brightness fixes that. A shell with a dark side is an OBJECT. That is what
+ * "dense and thick" was describing.
+ */
+varying float vLight;
+
+/** How much bigger this point actually drew than its unlit size, after the
+ *  clamp. The fragment stage divides brightness by it. */
+varying float vSpread;
+
 // Three detuned sines instead of a hash. No texture fetch, no branching, and on
 // an integrated part the vertex stage has headroom that the fragment stage does
 // not.
@@ -100,7 +161,22 @@ void main() {
   float noise  = wobble(position * 1.6 + aSeed, uNoiseTime);
   float ripple = sin(dir.y * 9.0 - uTime * 6.0 + aSeed * 6.2831);
 
-  float radius = uRadius
+  // PER-PARTICLE RADIAL JITTER — the lattice-breaker.
+  //
+  // `position` is a Fibonacci lattice, which is near-optimally even, and that
+  // evenness is visible: projected to the screen it produces concentric arcs
+  // of dots. Beside the reference, whose particles scatter irregularly, that
+  // regularity is the single largest remaining difference, and it reads as a
+  // printed pattern rather than as a cloud of matter.
+  //
+  // A fixed per-particle offset breaks the arcs without touching the count,
+  // the fill rate or the frame budget: it is one multiply-add on an attribute
+  // the shader already reads. Static in object space, so it does not shimmer —
+  // it thickens the shell into a thin spherical SHELL rather than a surface,
+  // which is also closer to what the reference looks like.
+  float jitter = 1.0 + uJitter * (fract(sin(aSeed * 127.1) * 43758.5453) - 0.5);
+
+  float radius = uRadius * jitter
                + uBreath
                + uTurbulence * noise
                + uAmpGain * uAmplitude * ripple * 0.35;
@@ -135,6 +211,7 @@ void main() {
   vec3 nView = normalize((modelViewMatrix * vec4(dir, 0.0)).xyz);
   vec3 eye   = normalize(-viewPos.xyz);
   vFresnel   = 1.0 - clamp(abs(dot(nView, eye)), 0.0, 1.0);
+  vLight     = dot(nView, uLightDir);
 
   // View depth, normalised across the shell's own diameter rather than against
   // a camera constant. Taking the centre from the modelView matrix means this
@@ -151,12 +228,50 @@ void main() {
   // guard, not an aesthetic one: additive blending means every pixel of every
   // point is a blend operation, and unbounded point size on an HD 620 turns
   // 8,000 particles into a full-screen overdraw storm.
-  // SIZE GROWS AT THE LIMB. The reference's rim blobs measured a mean area of
-  // 214.8 px against 6.3 px here — they have merged into continuous ribbons,
-  // and that merging is most of why its edge reads as a surface rather than as
-  // dots. Brightness alone cannot do it: separate points stay separate points.
-  // The clamp stays; it is the overdraw guard, not an aesthetic choice.
-  float size = uPointScale * uSizeScale / max(-viewPos.z, 0.001);
-  size *= 1.0 + uRimSize * vFresnel * vFresnel;
-  gl_PointSize = clamp(size, 1.0, 9.0);
+  // SIZE GROWS AT THE LIT LIMB, AND ONLY THERE.
+  //
+  // The reference's bright limb reaches a single CONNECTED blob of 3417 px.
+  // That is not dots at all, it is a continuous ribbon, and the merging is most
+  // of why its edge reads as a surface. Brightness alone cannot produce it:
+  // separate points stay separate points however bright they are. Size can,
+  // once the point diameter exceeds the projected spacing between neighbours,
+  // which at the limb is compressed by the same 1/sqrt(1-r²) foreshortening
+  // that puts the particles there in the first place.
+  //
+  // Gated on `face` so it is the CRESCENT that thickens. Growing both limbs
+  // would put a bright ring around a hollow middle, which is a bubble.
+  //
+  // The clamp stays; it is the overdraw guard, not an aesthetic choice. Every
+  // pixel of every point is an additive blend, and unbounded point size on an
+  // HD 620 turns 8,000 particles into a full-screen overdraw storm.
+  // THE EXPONENT, and it is the difference between a band and a line.
+  //
+  // Squared put all the growth in the last few degrees before the silhouette,
+  // which drew a thin bright wire on the edge. Measured against the reference
+  // side by side, its crescent is a BROAD GRANULAR BAND reaching well inboard:
+  // mean blob area at the lit mid-radius is 12.9 px there against 4.1 px at
+  // the square. `pow(f, 1.3)` starts the growth earlier and still leaves the
+  // middle of the disc alone, because f is near zero there whatever the power.
+  float face = smoothstep(-0.15, 0.85, vLight);
+  float grow = pow(vFresnel, uRimPow);
+  float base = uPointScale * uSizeScale / max(-viewPos.z, 0.001);
+  float want = base * (1.0 + uRimSize * grow * face);
+  float got  = clamp(want, 1.0, POINT_SIZE_MAX);
+  gl_PointSize = got;
+
+  // THE REALISED GROWTH, POST-CLAMP — and it has to be measured here, not
+  // assumed in the fragment stage.
+  //
+  // The fragment stage divides a particle's brightness by how much it grew, so
+  // that spreading light over a bigger sprite does not also multiply it (see
+  // uSpreadPow). The first version of that divided by the INTENDED growth,
+  // `1 + uRimSize * grow * face`, and was wrong in a way that only showed up at
+  // the extremes: the clamp is the overdraw guard, so past it the sprite stops
+  // getting bigger while the divisor keeps getting larger. The result was a
+  // crescent that went DARKER the harder it was pushed — measured, litLimb
+  // coverage collapsing from 45.9% to 9.1% while every setting said "wider".
+  //
+  // Passing the ratio the clamp actually delivered makes the two agree by
+  // construction, whatever the clamp is set to.
+  vSpread = got / max(base, 0.0001);
 }

@@ -30,7 +30,9 @@ import {
   type PtySession,
   type PttMode,
   type Snapshot,
+  type AgentStatePush,
   type TranscriptLine,
+  type TurnTiming,
   type ZoeyBridge,
 } from '../shared/ipc-contract.ts';
 
@@ -74,8 +76,17 @@ const bridge: ZoeyBridge = {
     };
   },
 
-  onAgentState: (listener: (state: string) => void): (() => void) => {
-    const handler = (_event: IpcRendererEvent, state: string): void => listener(state);
+  onTurnTiming: (listener: (timing: TurnTiming) => void): (() => void) => {
+    const handler = (_e: IpcRendererEvent, timing: TurnTiming) => listener(timing);
+    ipcRenderer.on(IPC.turnTiming, handler);
+    return () => {
+      ipcRenderer.off(IPC.turnTiming, handler);
+    };
+  },
+
+  onAgentState: (listener: (payload: AgentStatePush) => void): (() => void) => {
+    const handler = (_event: IpcRendererEvent, payload: AgentStatePush): void =>
+      listener(payload);
     ipcRenderer.on(IPC.agentStateChanged, handler);
     return () => {
       ipcRenderer.off(IPC.agentStateChanged, handler);
