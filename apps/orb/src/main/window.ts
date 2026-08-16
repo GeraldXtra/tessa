@@ -130,7 +130,39 @@ export function createOrbWindow(options: WindowOptions): BrowserWindow {
   // the previous one had left behind. A measurement should start from a known
   // geometry, not from the sediment of the last measurement.
   const restored = instrumented ? null : loadWindowState();
-  const initial: SavedWindowState = restored?.ok ? restored.state : fillWorkArea;
+
+  /**
+   * DEV ONLY. `--force-size=<w>x<h>` — CONTENT pixels, not window rect.
+   *
+   * The composition has to be proven at the minimum window, not asserted at it,
+   * and a maximised launch always fills the work area. This is the only way to
+   * put the surface at 900x600 without dragging an edge by hand and guessing
+   * when it was close enough.
+   *
+   * It matches the `--force-` prefix, so `isInstrumentedLaunch` already treats
+   * it as instrumentation: a sized run neither reads nor writes the owner's
+   * window state, and cannot leave a 900x600 behind in his config.
+   */
+  const forcedSize = (() => {
+    if (!options.isDev) return null;
+    const flag = process.argv.find((a) => a.startsWith('--force-size='));
+    if (!flag) return null;
+    const m = /^(\d{3,5})x(\d{3,5})$/.exec(flag.slice('--force-size='.length));
+    if (!m) return null;
+    return { w: Number.parseInt(m[1] as string, 10), h: Number.parseInt(m[2] as string, 10) };
+  })();
+
+  const initial: SavedWindowState = forcedSize
+    ? {
+        width: Math.max(MIN_WIDTH, forcedSize.w),
+        height: Math.max(MIN_HEIGHT, forcedSize.h),
+        x: workArea.x,
+        y: workArea.y,
+        isMaximized: false,
+      }
+    : restored?.ok
+      ? restored.state
+      : fillWorkArea;
 
   console.log(
     `[orb] window: workArea ${workAreaSize.width}x${workAreaSize.height} · ` +

@@ -15,9 +15,22 @@ uniform vec3  uColorCool;
 uniform float uCoolMix;
 uniform float uBrightness;
 
+/**
+ * How much of its brightness the FARTHEST particle keeps. 1.0 disables the
+ * effect entirely and reproduces the pre-depth shell exactly, which is what
+ * `--force-depth=1` does — so before/after is one flag on one binary rather
+ * than two builds, and a mismatched comparison is not possible.
+ */
+uniform float uDepthFar;
+
+/** Extra brightness at the silhouette. See vFresnel in the vertex stage. */
+uniform float uRimGain;
+
 varying float vRim;
 varying float vSeed;
 varying float vPulse;
+varying float vDepth;
+varying float vFresnel;
 
 void main() {
   // Round the point. gl_PointCoord is [0,1] across the sprite; work in squared
@@ -32,7 +45,12 @@ void main() {
 
   // Displaced particles drift toward the cool rim colour, which is what gives
   // the shell depth without a second draw call or any post-processing.
-  float mixAmount = clamp(uCoolMix + vRim * 0.55, 0.0, 1.0);
+  // The rim carries the SATURATION as well as the light. Measured on the
+  // reference's direct capture, the only region bright enough for 4:2:0 chroma
+  // to survive is the limb, at #B54E46 - hsl(4, 44%, 49%). The body reads as
+  // neutral grey there, and that is a compression artefact rather than a design
+  // fact, so it is not copied.
+  float mixAmount = clamp(uCoolMix + vRim * 0.55 + vFresnel * 0.45, 0.0, 1.0);
   vec3 tint = mix(uColorHot, uColorCool, mixAmount);
 
   // Per-particle brightness jitter so the shell does not look like a printed
@@ -43,6 +61,24 @@ void main() {
   // adding a separate ring: the pulse IS the shell reacting, not an overlay
   // drawn on top of it. Zero when no beat is in flight — enforced by uPulseGain
   // in the vertex stage, because phase zero is NOT the resting state.
-  float alpha = falloff * uBrightness * grain * (1.0 + vPulse * 1.6);
+  // DEPTH. The far side recedes, so the shell reads as a volume instead of a
+  // flat speckle. This is the one visual property the sphere was missing that
+  // is neither a rate nor a displacement: the three retired intensification
+  // levers all tried to encode a scalar through a rate the eye has no reference
+  // for, whereas this is a SPATIAL gradient with both of its ends visible in
+  // the same frame, which is self-referencing and needs no memory to read.
+  //
+  // Applied to alpha rather than to `tint`, so it dims without desaturating —
+  // the far side must recede, not change hue, or it would fight the colour
+  // temperature for the same channel.
+  float depthFade = mix(1.0, uDepthFar, vDepth);
+
+  // THE RIM. Squared so it stays off the face of the disc and climbs steeply
+  // only in the last few degrees before the silhouette — a linear ramp lifts
+  // the whole shell and just makes it uniformly brighter, which is the state it
+  // was already in and the state he rejected.
+  float rim = 1.0 + uRimGain * vFresnel * vFresnel;
+
+  float alpha = falloff * uBrightness * grain * depthFade * rim * (1.0 + vPulse * 1.6);
   gl_FragColor = vec4(tint * alpha, alpha);
 }

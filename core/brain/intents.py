@@ -152,15 +152,45 @@ def _is_bare_folder(c: str) -> bool:
     return any(c == name or c == folder_stem(name) for name in _KNOWN_FOLDERS)
 
 
+#: A path he SAID, or a drive letter. Item 1g.
+#:
+#: Three shapes, because he says all three: a full path with a drive, a UNC
+#: share, and a bare drive letter ("open D drive", "open the D drive").
+_PATH_RE = re.compile(r"([a-zA-Z]:[\\/][^\s\"']*|\\\\[^\s\"']+)")
+_DRIVE_RE = re.compile(r"\b(?:drive\s+([a-zA-Z])|([a-zA-Z])\s*(?::|\s)\s*drive)\b", re.I)
+
+
+def _explicit_path(text: str) -> Path | None:
+    """
+    A literal path or drive in what he said, or None.
+
+    Returned WITHOUT checking existence, so the caller can tell him the path is
+    missing rather than falling through to a fuzzy application match — which
+    would be the worst outcome: he names a folder that is not there and she
+    opens an unrelated program whose name happens to be close.
+    """
+    m = _PATH_RE.search(text or "")
+    if m:
+        return Path(m.group(1).rstrip(" .,!?"))
+    m = _DRIVE_RE.search(text or "")
+    if m:
+        letter = (m.group(1) or m.group(2) or "").upper()
+        if letter:
+            return Path(f"{letter}:\\")
+    return None
+
+
 class IntentParser:
     def __init__(self) -> None:
-        self._apps: dict[str, Path] | None = None
+        # ONE SHARED INDEX for the process, built lazily and cached to disk.
+        # See core/brain/appindex.py for what it covers and what it costs.
+        from .appindex import get_index
+        self._index = get_index()
 
     @property
     def apps(self) -> dict[str, Path]:
-        if self._apps is None:
-            self._apps = index_start_menu()
-        return self._apps
+        """Back-compat view for anything still expecting the old dict."""
+        return {e.key: Path(e.launch) for e in self._index.entries}
 
     def parse(self, utterance: str) -> Parse:
         out = Parse()
@@ -208,8 +238,32 @@ class IntentParser:
         if call is not None:
             return call, None
 
+        # ── AN EXPLICIT PATH OR DRIVE HE ASKED TO OPEN ──────────────────────
+        #
+        # BEFORE the machine-state keywords, and that position is the fix. The
+        # `\b(disk|storage|space|drive)\b` rule below is deliberately broad, and
+        # it swallowed "open the D drive" and answered with free space on C:.
+        # He asked her to OPEN something; an open verb plus a drive letter is
+        # not a question about storage.
+        #
+        # Guarded on the verb so "how much space is on my D drive" still reaches
+        # sys.disk, which is what that broad rule is for.
+        if re.search(r"\b(open|show|go to|take me to|browse)\b", c):
+            _p = _explicit_path(clause)
+            if _p is not None:
+                if _p.exists():
+                    return ToolCall("app.open_folder", {"path": str(_p)},
+                                    speech="Opening it."), None
+                return None, (f"There is nothing at {_p}, Emperor. "
+                              f"Check the path and say it again.")
+
         # ── machine state ───────────────────────────────────────────────────
-        if re.search(r"\b(disk|storage|space|drive)\b", c):
+        #
+        # "drive" is also half a product name. "open google drive" and "open
+        # onedrive" were reporting free space on C:, the same collision that
+        # made "open Google Chrome" run a web search. The negative lookbehind
+        # excludes the products; every real storage question still lands here.
+        if re.search(r"\b(disk|storage|space|(?<!google )(?<!one )(?<!sky )drive)\b", c):
             return ToolCall("sys.disk", speech="Checking disk."), None
         if re.search(r"\b(ram|memory)\b", c):
             return ToolCall("sys.memory", speech="Checking memory."), None
@@ -266,19 +320,39 @@ class IntentParser:
                 return ToolCall("app.open_folder", {"path": str(target)},
                                 speech="Opening it."), None
 
-            # ── applications, fuzzy ─────────────────────────────────────────
-            q = re.sub(r"\b(open|launch|start|run|show|my|the|app|application|please)\b", " ", c)
-            q = " ".join(q.split())
-            if q:
-                keys, how = fuzzy_match(q, self.apps)
-                if len(keys) == 1:
-                    return ToolCall("app.open", {"app": keys[0], "match": how},
-                                    speech=f"Opening {keys[0]}."), None
-                if len(keys) > 1:
-                    names = ", ".join(k.title() for k in keys[:3])
-                    return None, (
-                        f"I found more than one. Did you mean {names}?"
-                    )
+            # ── an EXPLICIT PATH or DRIVE, before the app index ─────────────
+            #
+            # Item 1g: "everything on my system" is not only applications. A
+            # literal path he names must open as itself and never be fuzzy
+            # matched against an application — "open C:\\dev\\zoey" hunting the
+            # Start Menu for something called "dev zoey" would be absurd.
+            explicit = _explicit_path(clause)
+            if explicit is not None:
+                if explicit.exists():
+                    return ToolCall("app.open_folder", {"path": str(explicit)},
+                                    speech="Opening it."), None
+                # AN HONEST MISS, NAMED. Silence here is the failure mode this
+                # codebase keeps designing against, and a wrong guess is worse:
+                # she must not open something else because the thing he asked
+                # for is absent.
+                return None, (f"There is nothing at {explicit}, Emperor. "
+                              f"Check the path and say it again.")
+
+            # ── applications ────────────────────────────────────────────────
+            #
+            # `appindex.resolve` does its own query normalisation — including
+            # dropping category nouns like "browser", which is the whole of the
+            # Chrome fix — so nothing is stripped here first.
+            entries, how = self._index.resolve(clause)
+            if len(entries) == 1:
+                e = entries[0]
+                return ToolCall("app.open", {"app": e.key, "match": how},
+                                speech=f"Opening {e.name}."), None
+            if len(entries) > 1:
+                names = ", ".join(e.name for e in entries[:3])
+                return None, (
+                    f"I found more than one. Did you mean {names}?"
+                )
         return None, None
 
     @staticmethod

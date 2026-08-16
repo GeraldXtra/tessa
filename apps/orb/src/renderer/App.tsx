@@ -21,16 +21,22 @@ import { AGENT_STATES, type AgentState } from '@zoey/protocol';
 import type { BootstrapInfo, SphereTier } from '../shared/ipc-contract.ts';
 import { parseDevScript, runDevScript } from './dev-drive.ts';
 import { tokenPx } from './design-tokens.ts';
+import { applyAura, auraState, auraSweep, setForcedAuraLoad } from './aura.ts';
 import { applyTheme, currentTheme, isThemeId, themeForKey, type ThemeId } from './theme.ts';
 import {
   approvalArrived,
   approvalCleared,
   approvalRefused,
+  approvalsStore,
   approvalsSweepExpired,
 } from './state/approval-store.ts';
 import { StateDwell } from './state/state-dwell.ts';
 import { ApprovalStack } from './layout/ApprovalCard.tsx';
+import { Column } from './layout/Column.tsx';
 import { Drawer } from './layout/Drawer.tsx';
+import { EdgeDetail } from './layout/EdgeDetail.tsx';
+import { TimeAxis } from './layout/TimeAxis.tsx';
+import { startTick } from './state/tick.ts';
 import { DevOverlay } from './layout/DevOverlay.tsx';
 import { LastLine } from './layout/LastLine.tsx';
 import { NotificationStack } from './layout/NotificationStack.tsx';
@@ -59,6 +65,46 @@ import {
   type RailId,
 } from './state/store.ts';
 
+/* ─────────────────────────────────────────────────────── the composition ──
+ *
+ * Direction A. The sphere is placed OFF-CENTRE by design and the right column
+ * occupies the space that opens up. A circle centred in a rectangle with equal
+ * emptiness on all four sides is the least dynamic arrangement available, and
+ * that bullseye is most of what read as unfinished.
+ *
+ * These fractions are of the WINDOW, not of the stage, because the composition
+ * is a property of what he sees rather than of an internal box.
+ */
+const SPHERE_X_FRACTION = 0.34;
+/** 0.47, not 0.5: vertical centring reads as LOW in a frame with a heavy
+ *  bottom edge, and this layout has an axis along the bottom. */
+const SPHERE_Y_FRACTION = 0.47;
+
+/** Status bar height. The column's own width lives in CSS (`--col-w`). */
+const STATUS_H = 28;
+
+/**
+ * Collapse thresholds. Measured against the WINDOW width.
+ *
+ * Order, first to go: sparklines fall back to their bare numbers (inside
+ * Sparkline), then the axis shortens its window, then the axis goes, then the
+ * column goes. Edge detailing is last because it costs nothing and is the final
+ * thing still saying "built".
+ */
+const AXIS_MIN_W = 1100;
+const COLUMN_MIN_W = 1040;
+const AXIS_SHORT_W = 1200;
+
+/**
+ * The sphere's on-screen radius as a fraction of canvas height.
+ *
+ * From the engine's own projection: uSizeScale = h / (2 tan(fov/2)) and pixels
+ * per world unit at the sphere's depth is uSizeScale / CAMERA_Z. With fov 42 and
+ * CAMERA_Z 3.2 that is h * 0.407 for a unit radius. 0.42 adds the margin that
+ * turbulence and breath need.
+ */
+const SPHERE_R_FRACTION = 0.42;
+
 /**
  * One probe reading as a log line. Three decimals on the offsets: the pass
  * condition for the instrument is that a motionless sphere reads the SAME every
@@ -85,6 +131,24 @@ export function App() {
   const [engine, setEngine] = useState<SphereEngine | null>(null);
   const readStats = engine ? engine.stats : null;
   const [showOverlay, setShowOverlay] = useState(false);
+
+  /**
+   * Window size, tracked so the composition can collapse rather than overflow.
+   * `resize` only; there is no polling and no rAF involvement.
+   */
+  const [viewport, setViewport] = useState(() => ({
+    w: window.innerWidth,
+    h: window.innerHeight,
+  }));
+  useEffect(() => {
+    const onResize = () => setViewport({ w: window.innerWidth, h: window.innerHeight });
+    window.addEventListener('resize', onResize);
+    return () => window.removeEventListener('resize', onResize);
+  }, []);
+
+  // The 1 Hz clock the whole telemetry layer reads. See state/tick.ts — this is
+  // the mechanism behind "an instrument reads as advanced because it is live".
+  useEffect(() => startTick(), []);
 
   /**
    * The one un-drawn state change, and when it arrived. Spec §4.
@@ -131,6 +195,10 @@ export function App() {
        * here is the second half of that, because a main that sent something
        * unexpected must produce a NAMED fallback rather than an unset accent.
        */
+      // Before the first heartbeat can arrive, so a forced run never renders
+      // one real frame at the real load first.
+      setForcedAuraLoad(info.forcedAura);
+
       const wanted: ThemeId = isThemeId(info.theme) ? info.theme : 'cyan';
       const steps = applyTheme(wanted);
       window.zoey.reportMetrics(
@@ -161,6 +229,7 @@ export function App() {
       if (snap.health) {
         healthStore.set(snap.health);
         pushHealthSample(snap.health);
+        applyAura(snap.health);
       }
       if (snap.audit.length > 0) auditStore.set([...snap.audit].reverse().slice(0, AUDIT_MAX));
       if (snap.ptySessions.length > 0) ptySessionsStore.set(snap.ptySessions);
@@ -174,11 +243,18 @@ export function App() {
     const offConnection = window.zoey.onConnection((status) => {
       connectionStore.set(status);
       // A dropped link must not leave a frozen uptime on screen looking live.
-      if (status.phase !== 'connected') healthStore.set(null);
+      // The aura goes out with it, for the same reason and by the same rule the
+      // equatorial pulse stops: an instrument holding its last value is a lie
+      // in the shape of a reading.
+      if (status.phase !== 'connected') {
+        healthStore.set(null);
+        applyAura(null);
+      }
     });
     const offHealth = window.zoey.onHealth((health) => {
       healthStore.set(health);
       pushHealthSample(health);
+      applyAura(health);
     });
 
     // SENTINEL's two real sources. History seeds the list; the live stream
@@ -337,6 +413,11 @@ export function App() {
           `APPROVAL-EXPIRED ${requestId} — invalidated locally, nothing sent (CONTRACT §5.1)`,
         );
       }
+      // One timer, not two. The aura goes flat if the beats stop while the
+      // socket stays up — a held value would be the frozen-instrument lie.
+      if (auraSweep()) {
+        window.zoey.reportMetrics('AURA-STALE no heartbeat in 15s — aura flattened');
+      }
     }, 1000);
     return () => window.clearInterval(id);
   }, []);
@@ -489,7 +570,7 @@ export function App() {
           `cost=${s.cost.p50.toFixed(2)}/${s.cost.p95.toFixed(2)} ` +
           `raf=${s.raf.p50.toFixed(1)}/${s.raf.p95.toFixed(1)} ` +
           `shown=${s.present.p50.toFixed(1)}/${s.present.p95.toFixed(1)} ` +
-          `fps=${s.fps.toFixed(1)} state=${agentStateStore.get()} ` +
+          `fps=${s.fps.toFixed(1)} state=${agentStateStore.get()} aura[${auraState()}] ` +
           `canvas=${s.canvas.cssW}x${s.canvas.cssH}css/${s.canvas.bufW}x${s.canvas.bufH}buf`,
       );
     }, 5000);
@@ -582,15 +663,65 @@ export function App() {
 
   // Keep the last panel mounted while the drawer slides shut, so the content
   // does not vanish a beat before the panel does.
-  const lastRail = useRef<RailId>('pulse');
+  const lastRail = useRef<RailId>('trace');
   if (rail) lastRail.current = rail;
 
-  // NEGATIVE, unlike the previous build. §R.7 puts the drawer immediately right
-  // of the rail, so the stage that remains is to its RIGHT and the sphere has to
-  // move right to stay centred in it. The old drawer was docked to the far right
-  // and the sphere moved left.
+  /* ── where the sphere goes, and it is ONE computation ──────────────────────
+   *
+   * The drawer used to own this value outright (`rail ? -drawerWidth : 0`),
+   * which was fine while the sphere lived at the stage centre and fatal the
+   * moment the composition placed it elsewhere: the two systems would each
+   * write the same number and the last one to run would win.
+   *
+   * So the target position is derived from the WHOLE layout at once — base
+   * placement, drawer open or shut — and converted to the engine's offset
+   * convention exactly once, here.
+   */
+  const railW = tokenPx('--rail-w', 48);
   const drawerWidth = tokenPx('--transcript-w', 320);
-  const offsetPx = rail ? -drawerWidth : 0;
+
+  const canvasW = Math.max(1, viewport.w - railW);
+  const canvasH = Math.max(1, viewport.h - STATUS_H);
+  const sphereR = canvasH * SPHERE_R_FRACTION;
+
+  /**
+   * The column yields to BOTH the drawer and the approval card.
+   *
+   * The card is anchored top-right and is opaque, which is where the column
+   * lives — and when a red-tier action is waiting, ambient telemetry is not
+   * what he should be reading. The column is ambient; the drawer and the card
+   * are deliberate, and deliberate wins.
+   */
+  const cardPresent = useStore(approvalsStore).length > 0;
+  const showColumn = viewport.w >= COLUMN_MIN_W && rail === null && !cardPresent;
+  const showAxis = viewport.w >= AXIS_MIN_W;
+  const axisWindowMs = viewport.w >= AXIS_SHORT_W ? 3 * 60_000 : 60_000;
+
+  /**
+   * With a drawer open the sphere must clear its right edge, or an opaque panel
+   * slides over the one thing that carries state. Otherwise it sits at the
+   * composition's fraction.
+   */
+  const targetCx = rail
+    ? Math.max(SPHERE_X_FRACTION * viewport.w, railW + drawerWidth + sphereR + 24)
+    : SPHERE_X_FRACTION * viewport.w;
+  const targetCy = SPHERE_Y_FRACTION * viewport.h;
+
+  // Engine convention: positive x moves LEFT by x/2, positive y moves UP by y/2.
+  const offsetPx = -2 * (targetCx - railW - canvasW / 2);
+  const offsetYPx = -2 * (targetCy - STATUS_H - canvasH / 2);
+
+  /**
+   * Published to CSS so the aura and the contact ellipse track the sphere
+   * without a second copy of this arithmetic. The aura is a radial centred on
+   * the sphere; if the sphere moves and the glow does not, it becomes a light
+   * with nothing in it.
+   */
+  const stageVars = {
+    '--sphere-cx': `${(targetCx - railW).toFixed(1)}px`,
+    '--sphere-cy': `${(targetCy - STATUS_H).toFixed(1)}px`,
+    '--sphere-r': `${sphereR.toFixed(1)}px`,
+  } as React.CSSProperties;
 
   const onTierChange = useCallback((next: SphereTier, reason: string) => {
     tierStore.set(next);
@@ -637,14 +768,14 @@ export function App() {
       <div className="app__body">
         <Rail />
 
-        <main className="stage">
+        <main className="stage" style={stageVars} data-column={showColumn}>
           {/* Nothing is drawn until bootstrap resolves and the tier is known.
               Rendering <Sphere> on the default 'med' first would create a WebGL
               context and allocate particle buffers, only to tear both down a
               frame later when the probe answers 'dom' — the exact machine where
               that answer is likeliest is the one least able to afford it. */}
           {!bootstrap ? null : tier === 'dom' ? (
-            <DomSphere offsetPx={offsetPx} />
+            <DomSphere offsetPx={offsetPx} offsetYPx={offsetYPx} />
           ) : (
             <Sphere
               tier={tier}
@@ -652,8 +783,15 @@ export function App() {
               onTierChange={onTierChange}
               onEngineReady={onEngineReady}
               onStateRendered={onStateRendered}
+              depthFar={bootstrap.forcedDepth}
+              rim={bootstrap.forcedSphere}
+              offsetYPx={offsetYPx}
             />
           )}
+
+
+          {/* Ornament. Asserts nothing, below AA by construction, no numerals. */}
+          <EdgeDetail />
 
           {/* §R.2 — the HUD sits over the stage, never inside a drawer.
               All three render nothing until they have something true to show.
@@ -665,6 +803,15 @@ export function App() {
           <ApprovalStack />
           <NotificationStack />
           <LastLine />
+
+          {/* The right column. Hidden while a drawer is open — the column is
+              ambient and the drawer is deliberate — and below 1040px, where it
+              would start squeezing the sphere rather than sitting beside it. */}
+          {showColumn ? <Column /> : null}
+
+          {/* The time axis. Renders nothing when no audit entry falls in the
+              window, ruler included: a ruler over nothing is an empty box. */}
+          {showAxis ? <TimeAxis windowMs={axisWindowMs} /> : null}
         </main>
 
         <Drawer

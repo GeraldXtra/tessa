@@ -1,0 +1,733 @@
+❯ SESSION 2 — ORB. Build A and C. Fix the card.
+
+  === OWNERSHIP ===
+  You own apps/orb/ and nothing else. Session 1 owns core/ and apps/console/ and
+  is building the wake phrase and speaker verification. Read core/ freely; never
+  edit a byte. CONTRACT.md and docs/ off limits. tokens.json remains CLOSED.
+  No git commands. Do NOT start a daemon. KILL ONLY BY RECORDED PID VIA ANCESTRY.
+
+  === THE DAEMON ===
+  pid 21856 on 47600 was live at the end of your last run and Gerald has not
+  restarted it. Nothing in this prompt requires it — the contrast fix is CSS, the
+  aura and the depth term are rendering. If it is gone, say so and continue; only
+  the aura's live-data behaviour needs it, and item 2d can be proven by forcing
+  the condition.
+
+  === FOUR CORRECTIONS YOU MADE TO MY BRIEF, ALL ACCEPTED ===
+   1. The command is cmd.permission.respond, not decide. You read the handler
+      rather than trusting me.
+   2. Ruling 3 was wrong. The fence clears UNCONDITIONALLY, and Session 1's actual
+      reasoning is stronger than the one I relayed: a page cannot provoke an
+      approval prompt in this architecture, because the model never picks a tool.
+      You refused to build UI for a refusal that cannot happen — "that would have
+      been inventing a behaviour and then proving it." Correct, and it is the
+      fabricated-data rule applied to behaviour rather than to values.
+   3. The 16 KB edit cap, not 256 KB.
+   4. Ambient drift is not in §R.1 at all. I offered it as "the obvious one" and
+      you pointed out the obvious one is unspecified while a specified one with a
+      live producer sits unused.
+  And your diagnosis beats mine: "the sphere is not what's wrong — the frame is.
+  A ~530px disc dead centre, a 28px bar, and roughly 60% of the screen at literal
+  #000000."
+
+  === GERALD'S RULING ON THE PROPOSALS ===
+  Build A and C now. B after he has seen them. Your recommendation, taken as given.
+
+  Do the following, in order, and nothing more.
+
+  === 1. THE CARD CONTRAST — first, because it is a security surface ===
+
+  You found backdrop-filter: blur(12px) is INERT on this machine — 3.56x luminance
+  jump across 2 pixels, individual ~2px particles still resolvable where a 12px
+  blur would smear them over ~24px. Consequence: the card interior is 1.6x
+  brighter where the sphere sits behind it, and the APPROVE glyphs measure 3.40:1
+  against their local background, under WCAG AA's 4.5:1.
+  That is the button that authorises irreversible actions, and it is unreadable
+  against the wrong backdrop. Gerald's ruling: FIX IT.
+    a. Raise the card's own opacity, or whatever you judge better. Your call.
+    b. Re-measure the same way you found it — worst-case local background, the
+       sphere directly behind. Report the ratio before and after. AA is 4.5:1 for
+       small text; say whether you cleared it and by how much.
+    c. CHECK ALL FIVE THEMES. You measured cyan. The accent-derived text colours
+       differ per theme and the sphere behind the card differs with them — ember's
+       body is #E2603C and emerald's is #2DB88A, and one of those may fail where
+       cyan passes. Report the worst theme's ratio, not the best.
+    d. §R.7 mandates blur(12px) on the DRAWER too, and it is equally inert there.
+       Say whether the drawer has the same readability problem or whether its
+       content sits somewhere the sphere does not reach. Do not fix it unasked —
+       report it and let him rule.
+    e. Do NOT chase why the blur is inert. It is an HD 620 with a legacy driver
+       and the answer is almost certainly the driver. Compensating is the right
+       move; investigating is not worth the hours.
+
+  === 2. PROPOSAL A — THE RESOURCE AURA ===
+
+  §R.1 specifies it, evt.daemon.health already carries cpuPct and memMB, and you
+  already consume both.
+    a. Drive .stage::before's radius from memMB and its intensity from cpuPct, on
+       the 5-second heartbeat with a slow CSS transition.
+    b. CLAMP IT HARD. Your own warning: it must never compete with the state
+       signal. §5.1's whole point is that the sphere tells him her state from
+       across the room, and an aura that reads as activity damages exactly that.
+    c. IT SHARES A SOURCE WITH THE COLOUR TEMPERATURE, and that is the risk nobody
+       has named. Colour temperature already tracks cpuPct — you wired it and
+       argued correctly that §R.1 lists temperature (her exertion) and resource
+       aura (the machine) as separate instruments. But on this machine both read
+       the SAME field, so under load the sphere warms AND the aura swells
+       together. Two instruments moving as one is a single louder instrument, not
+       two.
+       Say whether that is acceptable, or whether the aura should key off memMB
+       alone and leave cpuPct to the temperature. Your call with the reason — but
+       make it deliberate rather than something that falls out of the code.
+    d. prefers-reduced-motion pins it.
+    e. WHEN THE DAEMON DIES IT GOES FLAT, and you named that as information rather
+       than a failure. Make sure that is what happens — not a frozen last value,
+       which would be the same class of lie as a pulse frozen mid-travel. Prove it
+       by forcing the condition, not by reasoning about it.
+    f. Note the honest limit: cpuPct is the DAEMON PROCESS's CPU, normalised
+       across cores, not machine load. So the aura swells when SHE works, not when
+       the machine is busy. Arguably right for this — but say so plainly so nobody
+       later reads it as a system monitor.
+    g. IT MUST FOLLOW THE THEME. The aura is accent-derived like everything else;
+       confirm it does not carry a hardcoded hue. You found ~35 of those once.
+
+  === 3. PROPOSAL C — DEPTH SHADING ===
+
+  Front and back particles are currently shaded identically: depthTest and
+  depthWrite both off, additive blending, and brightness has no view-depth term.
+  vRim looks like a depth cue but is driven by radial displacement, not distance
+  from the camera.
+    a. Add a depth term to brightness so the far side recedes. Fresnel rim lift
+       optional, your call.
+    b. IT MUST NOT BREAK THE STATE SIGNATURES. Six states are tuned and Gerald has
+       approved how they read — thinking round and shimmering, working denser and
+       more emphatic, idle settled. A depth term changes every one of them.
+       Capture all six BEFORE and AFTER, AT THE SAME WINDOW SIZE — you flagged a
+       mismatched comparison yourself once (984x652 against 1366x720) and a
+       before/after across different geometries proves nothing. Confirm the
+       ordering survives: working still visibly more active than thinking,
+       thinking still busier than idle, none reading as distressed.
+    c. IT MUST NOT BREAK THE PULSE OR THE COLOUR TEMPERATURE. Both ride the same
+       brightness path. Confirm the equatorial pulse still reads and that resting
+       brightness has not shifted — you found a 14.82% resting inflation once
+       before, by measurement, invisible to the eye. Measure it the same way.
+    d. IT MUST NOT BREAK THE CENTRING INSTRUMENT. Your 18f probe is a
+       brightness-weighted centroid, and a depth term changes brightness
+       asymmetrically front to back. That should not move a centroid on a sphere
+       symmetric about the view axis — but confirm it rather than assume, one
+       reading at one size.
+    e. Your own prediction: it should fail VISIBLY within one capture if it fails,
+       rather than after three days of instrumentation. Hold yourself to that — if
+       it does not read as depth in the first capture, say so and stop rather than
+       tuning it into significance.
+
+  === 4. MEASURE ===
+
+  Your baseline, taken last run: idle and thinking both cost 0.10/0.20, raf
+  16.7/16.9-17.0, shown 33.3/33.5-33.6, fps 30.0, across 3,360 samples.
+    a. Re-measure both states after A and C. Grid-check every figure against
+       16.67 / 33.3 / 50.0 FIRST.
+    b. Your own caveat stands and I want it repeated: cost is a CPU timer and does
+       not measure GPU time. The acceptance test is `shown` holding at 33.3 and
+       fps at 30.0, not cost staying small. Judge by those.
+    c. Measure at LOW and HIGH tiers as well as MED if the tier system still
+       changes particle count. A depth term costs per-particle, so the tier that
+       draws most is where it would show. If tiers are equivalent on this machine,
+       say so and skip.
+
+  === 5. REPORT ===
+    a. Card contrast before and after, worst case, across all five themes. Whether
+       AA is cleared and by how much.
+    b. The drawer's readability under the same inert blur — reported, not fixed.
+    c. The aura: what drives what, the clamp, what it does when the daemon dies
+       (forced, not reasoned), and your ruling on the shared cpuPct source.
+    d. The cpuPct caveat stated plainly, and confirmation the aura follows theme.
+    e. All six states captured BEFORE and AFTER the depth term, one size, ordering
+       confirmed.
+    f. Pulse and colour temperature still correct; resting brightness unchanged;
+       the centroid unmoved.
+    g. Your verdict on C: does it read as depth. If not, say so — you predicted it
+       would fail visibly and fast.
+    h. Frame budget both states, grid-checked, judged on shown and fps. Tier
+       coverage or why you skipped it.
+    i. Typecheck both tsconfigs; contract gates with file count.
+    j. Processes you leave behind, with parent chains. State you started no daemon
+       and edited nothing outside apps/orb/.
+
+  This and nothing more. Do NOT build proposal B — Gerald wants to see A and C
+  first. Do NOT build the waveform ribbon, the externalAtRequest warning band
+  (your §4.1 diff is with him), Defender integration, the knowledge graph, the
+  command palette, tray, timeline scrubber, Wall/Ambient/Compact modes, the
+  switcher, or the dock. Do NOT touch tokens.json.
+
+  If you disagree with any item, say so with the reason and don't do it. Finding
+  that the blur was inert — by scanning a line profile across the silhouette
+  rather than by looking at it — is the standard, and it turned a cosmetic
+  complaint into a contrast failure on the approve button.
+
+  Report on each by number, don't summarize. Then STOP and report.
+
+Standing docs already read this session; ownership unchanged and tokens.json stays closed.
+
+Starting with the machine state and the exact code I'm about to change.
+
+  Ran 1 shell command
+
+Daemon 21856 alive and discoverable — so I can measure real health values and force the death case. Reading what I'm about to change.
+
+  Ran 2 shell commands
+
+Daemon is alive, so I can measure real health values and force the death case. Tiers do differ (high 20k / med 8k / low 3k), so item 4c applies.
+
+Starting with item 1 — but first, a correction to my own last-run measurement that changes the fix. Let me check the card's live state in that capture.
+
+  Searched for 1 pattern
+
+Confirmed — and it corrects my own last-run figure. That card was at opacity: 0.62 because the link was down, so 3.40:1 conflated two defects: sphere bleed and a blanket dim applied to the payload he still has to read. Both get fixed.
+
+● Update(apps\orb\src\renderer\styles\app.css)
+Added 12 lines, removed 1 line
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  background: var(--panel);
+  /* OPAQUE, and this is a contrast fix rather than a style choice.
+     §R.7 mandates backdrop-filter: blur(12px) and it is INERT on this HD 620 —
+     measured, not assumed: luminance jumps 3.56x across 2 pixels at the
+     sphere's silhouette INSIDE the card, and individual ~2px particles stay
+     resolvable where a 12px blur would smear them over ~24px. So --panel's 0.72
+     alpha was letting a sharp particle field straight through the one surface
+     that authorises irreversible actions.
+     A gradient layer over an opaque base rather than a new colour: --panel is
+     shared and tokens.json is closed, so the panel fill is composited over
+     --bg-void here instead of being redefined. The blur declaration stays for
+     the machines where it works. */
+  background: linear-gradient(var(--panel), var(--panel)), var(--bg-void);
+  border: var(--hairline) solid var(--panel-border);
+  /* The tier, as a solid edge. The WORD is in the badge — §R.7 forbids colour
+     alone — and this is the across-the-room half of the same signal. */
+
+● Update(apps\orb\src\renderer\styles\app.css)
+Added 13 lines, removed 2 lines
+
+/* Answered, void, or expired: the whole card recedes so a live one beside it
+   is unmistakably the one still asking. */
+.approval[data-live='false'] {
+  opacity: 0.62;
+/* THE RECEDE NO LONGER TOUCHES THE PAYLOAD.
+   This was `opacity: 0.62` on the whole card, and it dimmed the arguments he
+   still has to READ — a card whose link is down is un-actionable but its
+   request is still pending (Session 1's ruling 2), so the text matters as much
+   as ever. It also silently halved the contrast of the measurement that found
+   the blur problem. The chrome and the buttons recede; nothing that carries
+   information does. */
+.approval[data-live='false'] .approval__chrome {
+  opacity: 0.7;
+}
+
+.approval[data-live='false'] .approval__actions {
+  opacity: 0.55;
+}
+
+/* ── the chrome band: fixed text, no payload reaches it ── */
+.approval__chrome {
+  display: flex;
+
+Now the button label, which is where AA actually fails — violet's accent is only 4.46:1 on black.
+
+● Update(apps\orb\src\renderer\styles\app.css)
+Added 12 lines
+ */
+.app,
+body {
+  /**
+   * The ladder's TOP step, for text that must stay legible in every theme.
+   *
+   * --accent is the ladder's middle step, and on black it ranges from cyan's
+   * 13.98:1 down to violet's 4.46:1. Over the approval card's opaque fill that
+   * violet figure lands at ~4.07:1, under WCAG AA's 4.5:1 for small text — so
+   * the button that authorises an irreversible action would fail on one of the
+   * five themes and pass on the other four. The core step is 7.72:1 at its
+   * worst (violet again), which clears AA everywhere while still being the
+   * theme's own hue rather than a flat white.
+   */
+  --accent-bright: var(--sphere-hot);
+  /* The ambient radial behind the sphere, tinted by the accent instead of the
+     fixed navy. 14% keeps it a suggestion; the stage still reads as void. */
+  --bg-ambient: color-mix(in srgb, var(--accent) 14%, var(--theme-void));
+
+● Update(apps\orb\src\renderer\styles\app.css)
+Added 5 lines, removed 1 line
+  padding: var(--sp-2) var(--sp-4);
+  border: var(--hairline) solid var(--panel-border);
+  border-radius: var(--radius-sm);
+  font-size: var(--fs-label);
+  /* --fs-sm, not --fs-label. One pixel, and it buys real contrast: at 10px
+     these glyph strokes are thin enough that antialiasing keeps every pixel
+     short of the declared colour, which cost ~20% of the measured ratio. These
+     two words decide whether something irreversible happens. */
+  font-size: var(--fs-sm);
+  text-transform: var(--label-transform);
+  letter-spacing: var(--label-tracking);
+  transition: color var(--motion-fast) var(--motion-easing);
+
+● Update(apps\orb\src\renderer\styles\app.css)
+Added 5 lines, removed 1 line
+  color: var(--status-error);
+}
+
+/* The label takes the ladder's top step so it clears AA under every theme; the
+   BORDER keeps --accent, so the button still reads as the accent-coloured one
+   next to REJECT's neutral. Approve does not become the visual default: --text
+   is 15.9:1 and the core step is at or below that in four of five themes. */
+.approval__btn--approve {
+  color: var(--accent);
+  color: var(--accent-bright);
+  border-color: var(--accent-dim);
+}
+.approval__btn--approve:hover:not(:disabled) {
+
+Now the fixture/link interaction — a fixture decision never goes on the wire, so requiring a link makes it un-actionable for no reason.
+
+● Update(apps\orb\src\renderer\layout\ApprovalCard.tsx)
+Added 7 lines, removed 1 line
+  // socket behind it must not offer a button that silently does nothing —
+  // Session 1's ruling 2 means the request is still alive, so the honest
+  // rendering is "still pending, cannot answer from here yet".
+  const live = isActionable(entry) && linkUp && !oversize;
+  //
+  // A FIXTURE is exempt, because a fixture decision never goes on the wire:
+  // main resolves it locally and refuses to forward it. Gating it on the link
+  // made every fixture card un-actionable whenever no daemon was running, which
+  // is both untrue and the state most verification runs are in.
+  const needsLink = !request.fixture;
+  const live = isActionable(entry) && (linkUp || !needsLink) && !oversize;
+  const names = Object.keys(request.args);
+
+  return (
+
+● Update(apps\orb\src\renderer\layout\ApprovalCard.tsx)
+Added 1 line, removed 1 line
+
+      {/* Link down, request alive. The distinction Session 1's ruling 2 makes,
+          said in words: this did not go away, you just cannot answer it yet. */}
+      {!linkUp && !entry.invalidated && !entry.sent ? (
+      {!linkUp && needsLink && !entry.invalidated && !entry.sent ? (
+        <p className="approval__waiting">
+          No connection to the daemon. This request is still pending on its side — it survives
+          this window closing — but it cannot be answered from here until the link returns.
+
+Now item 2 — the aura. First, what do the health fields actually do? I'll not choose a driver before seeing the data.
+
+● Update(apps\orb\src\main\index.ts)
+Added 7 lines, removed 1 line
+        // thing that drives it rather than inferred from the animation.
+        if (isDev) {
+          healthBeats += 1;
+          log(`beat #${healthBeats} uptimeS=${health.uptimeS}`);
+          // cpuPct and memMB ride along because the resource aura (§R.1) is
+          // driven off them, and "which of these actually MOVES" is a question
+          // about this daemon on this machine, not one to answer from the spec.
+          log(
+            `beat #${healthBeats} uptimeS=${health.uptimeS} ` +
+              `cpuPct=${health.cpuPct} memMB=${health.memMB}`,
+          );
+        }
+        lastHealth = health;
+
+
+  Made 1 scratchpad edit +39, ran 2 shell commands
+
+PowerShell 5.1 reads .ps1 as ANSI without a BOM, so the em dashes broke the parse. Rewriting ASCII-only.
+
+  Made 1 scratchpad edit +42, ran 1 shell command
+
+memMB is flat — spread 0.0 over 75 s, and cpuPct spans only 0–2.8%. That kills my intended ruling: keying the aura to memMB would build a dead instrument. Checking how the colour temperature consumes the same field before I decide.
+
+  Searched for 1 pattern, ran 1 shell command
+
+Decisive, and it overturns my planned ruling: memMB spread is 0.0 — keying the aura to it would build a dead instrument. Also note the daemon now sends brainCalls and brainEngine, which my IPC type drops at the boundary.
+
+Writing the aura against what the data actually does.
+
+● Write(apps\orb\src\renderer\aura.ts)
+Wrote 136 lines to apps\orb\src\renderer\aura.ts
+/**
+ * §R.1's resource aura: "Ambient glow intensity tracks CPU and RAM.
+ * Subtle — felt, not read."
+ *
+ * ─────────────────────────────────────────────────────────────────────────────
+ * WHAT DRIVES IT, AND WHY IT IS NOT WHAT I INTENDED
+ *
+ * The plan was to key this to `memMB` and leave `cpuPct` to the colour
+ * temperature, so the sphere carried two independent facts instead of one fact
+ * twice. Fifteen consecutive heartbeats from the live daemon killed that:
+… +126 lines
+
+● Update(apps\orb\src\renderer\styles\app.css)
+Added 27 lines
+
+/* The ambient glow behind the sphere. CONTRACT §9.1: no card background on the
+   centre stage — this is a radial on the void itself, not a panel. */
+/* §R.1's resource aura. Driven from `evt.daemon.health` by renderer/aura.ts —
+   the two custom properties below are the whole interface.
+
+   Transform and opacity ONLY: both are compositor properties, so a swell costs
+   no layout and no repaint of anything else on the stage. The defaults are the
+   flat pre-aura appearance, so a renderer that never receives a heartbeat looks
+   exactly as it did before this existed rather than showing a floor value it
+   has no data for.
+
+   The mix is 20% where it was 14%: `--aura-alpha`'s floor of 0.70 puts the
+   RESTING stage back at the old 14%, and everything above that is headroom the
+   instrument needs. Idle is unchanged; only loaded is different. */
+.stage::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: radial-gradient(circle at 50% 48%, var(--bg-ambient), transparent 68%);
+  transform-origin: 50% 48%;
+  transform: scale(var(--aura-scale, 1));
+  opacity: var(--aura-alpha, 1);
+  transition:
+    transform 2400ms linear,
+    opacity 2400ms linear;
+  pointer-events: none;
+}
+
+/* §R.7's motion budget, and aura.ts pins the values as well — belt and braces,
+   because a transition left live here would animate on the one write it does
+   make. */
+@media (prefers-reduced-motion: reduce) {
+  .stage::before {
+    transition: none;
+  }
+}
+
+.sphere-canvas {
+  position: absolute;
+  inset: 0;
+
+● Update(apps\orb\src\renderer\styles\app.css)
+Added 1 line, removed 1 line
+  --accent-bright: var(--sphere-hot);
+  /* The ambient radial behind the sphere, tinted by the accent instead of the
+     fixed navy. 14% keeps it a suggestion; the stage still reads as void. */
+  --bg-ambient: color-mix(in srgb, var(--accent) 14%, var(--theme-void));
+  --bg-ambient: color-mix(in srgb, var(--accent) 20%, var(--theme-void));
+  /* §6.2's gutter for model-proposed text was a fixed orange at 75% alpha —
+     the accent's old value, hard-baked. Derived now, so it stays legible as
+     "the accent, muted" under every theme instead of clashing with four of
+
+Now wiring the aura to the real health path, including the death case.
+
+● Update(apps\orb\src\renderer\App.tsx)
+Added 8 lines, removed 1 line
+    const offConnection = window.zoey.onConnection((status) => {
+      connectionStore.set(status);
+      // A dropped link must not leave a frozen uptime on screen looking live.
+      if (status.phase !== 'connected') healthStore.set(null);
+      // The aura goes out with it, for the same reason and by the same rule the
+      // equatorial pulse stops: an instrument holding its last value is a lie
+      // in the shape of a reading.
+      if (status.phase !== 'connected') {
+        healthStore.set(null);
+        applyAura(null);
+      }
+    });
+    const offHealth = window.zoey.onHealth((health) => {
+      healthStore.set(health);
+      pushHealthSample(health);
+      applyAura(health);
+    });
+
+    // SENTINEL's two real sources. History seeds the list; the live stream
+
+● Update(apps\orb\src\renderer\App.tsx)
+Added 1 line
+      if (snap.health) {
+        healthStore.set(snap.health);
+        pushHealthSample(snap.health);
+        applyAura(snap.health);
+      }
+      if (snap.audit.length > 0) auditStore.set([...snap.audit].reverse().slice(0, AUDIT_MAX));
+      if (snap.ptySessions.length > 0) ptySessionsStore.set(snap.ptySessions);
+
+● Update(apps\orb\src\renderer\App.tsx)
+Added 1 line
+import type { BootstrapInfo, SphereTier } from '../shared/ipc-contract.ts';
+import { parseDevScript, runDevScript } from './dev-drive.ts';
+import { tokenPx } from './design-tokens.ts';
+import { applyAura, auraState } from './aura.ts';
+import { applyTheme, currentTheme, isThemeId, themeForKey, type ThemeId } from './theme.ts';
+import {
+  approvalArrived,
+
+● Update(apps\orb\src\renderer\App.tsx)
+Added 1 line, removed 1 line
+          `cost=${s.cost.p50.toFixed(2)}/${s.cost.p95.toFixed(2)} ` +
+          `raf=${s.raf.p50.toFixed(1)}/${s.raf.p95.toFixed(1)} ` +
+          `shown=${s.present.p50.toFixed(1)}/${s.present.p95.toFixed(1)} ` +
+          `fps=${s.fps.toFixed(1)} state=${agentStateStore.get()} ` +
+          `fps=${s.fps.toFixed(1)} state=${agentStateStore.get()} aura[${auraState()}] ` +
+          `canvas=${s.canvas.cssW}x${s.canvas.cssH}css/${s.canvas.bufW}x${s.canvas.bufH}buf`,
+      );
+    }, 5000);
+
+Now item 3 — the depth term, built as a tunable uniform so before/after is one flag, not a code edit.
+
+  Ran 1 shell command
+
+● Update(apps\orb\src\renderer\scene\shaders\particles.vert.glsl)
+Added 13 lines
+varying float vSeed;
+varying float vPulse;
+
+/**
+ * 0 at the nearest point of the shell, 1 at the farthest. VIEW depth, which is
+ * the thing this sphere has never had.
+ *
+ * `vRim` looks like a depth cue and is not: it is driven by radial
+ * DISPLACEMENT, so a particle thrown outward reads as "rim" whether it is in
+ * front of the shell or behind it. With depthTest and depthWrite both off and
+ * additive blending, the front and back halves have been shaded identically
+ * since this file was written, which is why the shell reads as a flat speckle
+ * with a bright limb rather than as a volume.
+ */
+varying float vDepth;
+
+// Three detuned sines instead of a hash. No texture fetch, no branching, and on
+// an integrated part the vertex stage has headroom that the fragment stage does
+// not.
+
+● Update(apps\orb\src\renderer\scene\shaders\particles.vert.glsl)
+Added 9 lines
+  vRim = clamp((radius / max(uRadius, 0.0001)) - 0.92, 0.0, 1.0);
+  vSeed = aSeed;
+
+  // View depth, normalised across the shell's own diameter rather than against
+  // a camera constant. Taking the centre from the modelView matrix means this
+  // stays correct if the camera or the sphere's transform ever changes, and
+  // costs one mat4*vec4 on a stage that has headroom (the fragment stage is the
+  // expensive one here, not this).
+  float centreZ = -(modelViewMatrix * vec4(0.0, 0.0, 0.0, 1.0)).z;
+  float span = max(uRadius, 0.0001);
+  vDepth = clamp(((-viewPos.z) - (centreZ - span)) / (2.0 * span), 0.0, 1.0);
+
+  gl_Position = projectionMatrix * viewPos;
+
+  // Perspective-correct point size, then CLAMPED. The clamp is a performance
+
+● Update(apps\orb\src\renderer\scene\shaders\particles.frag.glsl)
+Added 9 lines
+uniform float uCoolMix;
+uniform float uBrightness;
+
+/**
+ * How much of its brightness the FARTHEST particle keeps. 1.0 disables the
+ * effect entirely and reproduces the pre-depth shell exactly, which is what
+ * `--force-depth=1` does — so before/after is one flag on one binary rather
+ * than two builds, and a mismatched comparison is not possible.
+ */
+uniform float uDepthFar;
+
+varying float vRim;
+varying float vSeed;
+varying float vPulse;
+varying float vDepth;
+
+void main() {
+  // Round the point. gl_PointCoord is [0,1] across the sprite; work in squared
+
+● Update(apps\orb\src\renderer\scene\shaders\particles.frag.glsl)
+Added 13 lines, removed 1 line
+  // adding a separate ring: the pulse IS the shell reacting, not an overlay
+  // drawn on top of it. Zero when no beat is in flight — enforced by uPulseGain
+  // in the vertex stage, because phase zero is NOT the resting state.
+  float alpha = falloff * uBrightness * grain * (1.0 + vPulse * 1.6);
+  // DEPTH. The far side recedes, so the shell reads as a volume instead of a
+  // flat speckle. This is the one visual property the sphere was missing that
+  // is neither a rate nor a displacement: the three retired intensification
+  // levers all tried to encode a scalar through a rate the eye has no reference
+  // for, whereas this is a SPATIAL gradient with both of its ends visible in
+  // the same frame, which is self-referencing and needs no memory to read.
+  //
+  // Applied to alpha rather than to `tint`, so it dims without desaturating —
+  // the far side must recede, not change hue, or it would fight the colour
+  // temperature for the same channel.
+  float depthFade = mix(1.0, uDepthFar, vDepth);
+
+  float alpha = falloff * uBrightness * grain * depthFade * (1.0 + vPulse * 1.6);
+  gl_FragColor = vec4(tint * alpha, alpha);
+}
+
+Now the uniform and the --force-depth flag.
+
+● Update(apps\orb\src\renderer\scene\sphere-engine.ts)
+Added 14 lines
+    uColorCool: { value: tokenColor('--sphere-cool') },
+    uCoolMix: { value: 0.35 },
+    uBrightness: { value: 0.6 },
+    /**
+     * §R.1 depth shading. How much brightness the FARTHEST particle keeps.
+     *
+     * 0.42 is a judgement, not a measured threshold, and it is stated rather
+     * than hidden so it can be retuned by eye: the far side keeps 42% of its
+     * brightness, which is enough separation to read as volume and not so much
+     * that the back of the shell disappears and the sphere becomes a bowl.
+     *
+     * `--force-depth=<0..1>` overrides it, and 1.0 restores the pre-depth shell
+     * exactly. That is how the before/after captures are taken — one binary,
+     * one flag, identical geometry, so the comparison cannot be confounded the
+     * way a 984x652-against-1366x720 comparison once was.
+     */
+    uDepthFar: { value: depthFarFromFlag() },
+  };
+
+  const material = new ShaderMaterial({
+
+● Update(apps\orb\src\renderer\scene\sphere-engine.ts)
+Added 18 lines
+  return geometry;
+}
+
+/** Default depth falloff, and the `--force-depth=` override. See uDepthFar. */
+const DEPTH_FAR_DEFAULT = 0.42;
+
+function depthFarFromFlag(): number {
+  // The renderer has no `process`, by design (tsconfig.web omits node types),
+  // so the flag rides the query string the same way nothing else here needs to.
+  // Absent in production: `location.search` is empty for the packaged file://
+  // document, so this returns the default without a branch on isDev.
+  try {
+    const raw = new URLSearchParams(window.location.search).get('forceDepth');
+    if (raw === null) return DEPTH_FAR_DEFAULT;
+    const value = Number.parseFloat(raw);
+    return Number.isFinite(value) && value >= 0 && value <= 1 ? value : DEPTH_FAR_DEFAULT;
+  } catch {
+    return DEPTH_FAR_DEFAULT;
+  }
+}
+
+function percentile(sorted: readonly number[], fraction: number): number {
+  if (sorted.length === 0) return 0;
+  const index = Math.min(sorted.length - 1, Math.floor(sorted.length * fraction));
+
+Query-string plumbing is inconsistent with every other dev flag here. Switching to the established bootstrap path.
+
+  Searched for 1 pattern
+
+● Update(apps\orb\src\renderer\scene\sphere-engine.ts)
+Added 2 lines, removed 17 lines
+  return geometry;
+}
+
+/** Default depth falloff, and the `--force-depth=` override. See uDepthFar. */
+const DEPTH_FAR_DEFAULT = 0.42;
+/** Default depth falloff. `--force-depth=` overrides it via bootstrap. */
+export const DEPTH_FAR_DEFAULT = 0.42;
+
+function depthFarFromFlag(): number {
+  // The renderer has no `process`, by design (tsconfig.web omits node types),
+  // so the flag rides the query string the same way nothing else here needs to.
+  // Absent in production: `location.search` is empty for the packaged file://
+  // document, so this returns the default without a branch on isDev.
+  try {
+    const raw = new URLSearchParams(window.location.search).get('forceDepth');
+    if (raw === null) return DEPTH_FAR_DEFAULT;
+    const value = Number.parseFloat(raw);
+    return Number.isFinite(value) && value >= 0 && value <= 1 ? value : DEPTH_FAR_DEFAULT;
+  } catch {
+    return DEPTH_FAR_DEFAULT;
+  }
+}
+
+function percentile(sorted: readonly number[], fraction: number): number {
+  if (sorted.length === 0) return 0;
+  const index = Math.min(sorted.length - 1, Math.floor(sorted.length * fraction));
+
+● Update(apps\orb\src\renderer\scene\sphere-engine.ts)
+Added 1 line, removed 1 line
+     * one flag, identical geometry, so the comparison cannot be confounded the
+     * way a 984x652-against-1366x720 comparison once was.
+     */
+    uDepthFar: { value: depthFarFromFlag() },
+    uDepthFar: { value: options.depthFar ?? DEPTH_FAR_DEFAULT },
+  };
+
+  const material = new ShaderMaterial({
+
+● Update(apps\orb\src\renderer\scene\sphere-engine.ts)
+Added 6 lines
+export interface SphereEngineOptions {
+  canvas: HTMLCanvasElement;
+  initialTier: SphereTier;
+  /**
+   * DEV ONLY. `--force-depth=<0..1>`, the depth-shading falloff. Omitted uses
+   * DEPTH_FAR_DEFAULT; 1.0 disables depth and reproduces the pre-depth shell
+   * exactly, which is how the before/after captures are taken.
+   */
+  depthFar?: number;
+  /** Read each frame. Never a subscription — no React involvement. */
+  getState: () => AgentState;
+  /** Fired when the governor or a context loss changes the tier. */
+
+Now threading --force-depth through main → bootstrap → Sphere.
+
+● Update(apps\orb\src\shared\ipc-contract.ts)
+Added 9 lines
+  theme: string;
+  /** Why that theme. Logged, so a silent fallback to cyan cannot look chosen. */
+  themeReason: string;
+  /**
+   * DEV ONLY. `--force-depth=<0..1>` — §R.1 depth shading's falloff, or null
+   * for the engine default.
+   *
+   * 1.0 disables the depth term and reproduces the shell exactly as it was
+   * before it existed, so a before/after comparison is one flag on one binary
+   * at one window size rather than two builds.
+   */
+  forcedDepth: number | null;
+}
+
+/* ───────────────────────────────────────────────────── the bridge, in types */
+
+● Update(apps\orb\src\main\index.ts)
+Added 7 lines
+      gpu,
+      theme,
+      themeReason,
+      forcedDepth: (() => {
+        if (!isDev) return null;
+        const flag = process.argv.find((a) => a.startsWith('--force-depth='));
+        if (!flag) return null;
+        const value = Number.parseFloat(flag.slice('--force-depth='.length));
+        return Number.isFinite(value) && value >= 0 && value <= 1 ? value : null;
+      })(),
+      probeGeometryMs: probeFlagMs('probe-geometry'),
+      probePulseMs: probeFlagMs('probe-pulse'),
+      probeLimbMs: probeFlagMs('probe-limb'),
+
+  Ran 2 shell commands
+
+● Update(apps\orb\src\renderer\App.tsx)
+Added 1 line
+              onTierChange={onTierChange}
+              onEngineReady={onEngineReady}
+              onStateRendered={onStateRendered}
+              depthFar={bootstrap.forcedDepth}
+            />
+          )}
+
+
+  Ran 1 shell command
+
+All compiles. Now the measurement campaign — starting with the card, since it's the security surface.
+
+  Made 1 scratchpad edit +39, ran 1 shell command
+
+● API Error: Connection dropped (ECONNRESET)
+
+✻ Sautéed for 56m 34s
+
+※ recap: Building the Orb's approval card and theming for ZOEY_OS; the card's edit-then-approve path is wired and verified on the wire, but can't run end to end because no non-voice trigger exists to create a pending approval. Next: await your ruling on the three ambient proposals. (disable recaps in /config)

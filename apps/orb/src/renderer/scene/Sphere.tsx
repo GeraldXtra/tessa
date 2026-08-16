@@ -16,12 +16,26 @@ import type { AgentState } from '@zoey/protocol';
 
 import type { SphereTier } from '../../shared/ipc-contract.ts';
 import { agentStateStore } from '../state/store.ts';
-import { createSphereEngine, type SphereEngine } from './sphere-engine.ts';
+import {
+  createSphereEngine,
+  type SphereEngine,
+  type SphereEngineOptions,
+} from './sphere-engine.ts';
 
 interface SphereProps {
   tier: SphereTier;
-  /** How far to shift the sphere left, in pixels, when a drawer is open. */
+  /**
+   * Where the sphere sits, as a shift from the canvas centre. Positive x moves
+   * it left by x/2 px, positive y moves it up by y/2 px.
+   *
+   * ONE NUMBER PAIR FOR THE WHOLE LAYOUT. App computes it from the composition's
+   * base placement AND the drawer state together, so the two cannot fight — the
+   * drawer used to own this value outright, which meant a composition that
+   * starts the sphere off-centre would have been overwritten every time a
+   * drawer opened.
+   */
   offsetPx: number;
+  offsetYPx: number;
   onTierChange: (tier: SphereTier, reason: string) => void;
   /**
    * The engine itself, once. The dev overlay polls `stats()` and the dev probes
@@ -31,14 +45,21 @@ interface SphereProps {
   onEngineReady?: (engine: SphereEngine) => void;
   /** Spec §4 measurement. See SphereEngineOptions.onStateRendered. */
   onStateRendered?: (state: AgentState, at: number) => void;
+  /** DEV ONLY. `--force-depth=<0..1>`; null uses the engine default. */
+  depthFar?: number | null;
+  /** DEV ONLY. `--force-sphere=`; null uses the engine's measured defaults. */
+  rim?: SphereEngineOptions['rim'] | null;
 }
 
 export function Sphere({
   tier,
   offsetPx,
+  offsetYPx,
   onTierChange,
   onEngineReady,
   onStateRendered,
+  depthFar,
+  rim,
 }: SphereProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const engineRef = useRef<SphereEngine | null>(null);
@@ -62,6 +83,12 @@ export function Sphere({
       canvas,
       initialTier: initialTierRef.current,
       getState: () => agentStateStore.get(),
+      // Read through a ref-free capture on purpose: the mount effect is
+      // dependency-free and rebuilding the WebGL context to change a constant
+      // would be the most expensive thing in the app. A depth change needs a
+      // relaunch, which is exactly how the before/after is taken anyway.
+      ...(typeof depthFar === 'number' ? { depthFar } : {}),
+      ...(rim ? { rim } : {}),
       onTierChange: (next, reason) => onTierChangeRef.current(next, reason),
       onStateRendered: (state, at) => onStateRenderedRef.current?.(state, at),
     });
@@ -107,8 +134,8 @@ export function Sphere({
   }, [tier]);
 
   useEffect(() => {
-    engineRef.current?.setCentreOffsetPx(offsetPx);
-  }, [offsetPx]);
+    engineRef.current?.setCentreOffset(offsetPx, offsetYPx);
+  }, [offsetPx, offsetYPx]);
 
   return <canvas ref={canvasRef} className="sphere-canvas" aria-hidden="true" />;
 }

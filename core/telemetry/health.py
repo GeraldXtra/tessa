@@ -30,7 +30,14 @@ from __future__ import annotations
 import socket
 import time
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any
+
+
+def _iso_now() -> str:
+    """CONTRACT §3's envelope format: ISO-8601 UTC with milliseconds."""
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.") + \
+        f"{datetime.now(timezone.utc).microsecond // 1000:03d}Z"
 
 try:
     import psutil  # prebuilt wheel; never built from source (no MSVC here)
@@ -99,7 +106,8 @@ class HealthCollector:
     # ── the payload ──────────────────────────────────────────────────────────
 
     def sample(self, *, budget_spent: float, budget_cap: float,
-               brain_calls: int = 0, brain_engine: str = "") -> dict[str, Any]:
+               brain_calls: int = 0, brain_engine: str = "",
+               audit=None) -> dict[str, Any]:
         """
         CONTRACT §4.1's six fields, plus two ADDITIVE OPTIONAL ones.
 
@@ -136,7 +144,7 @@ class HealthCollector:
             except Exception:  # noqa: BLE001 - process may vanish mid-sample
                 pass
 
-        return {
+        out: dict[str, Any] = {
             "uptimeS": round(time.monotonic() - self._t0, 1),
             "cpuPct": cpu_pct,
             "memMB": mem_mb,
@@ -146,6 +154,33 @@ class HealthCollector:
             "brainCalls": int(brain_calls),
             "brainEngine": brain_engine,
         }
+
+        # ── chainVerified — the daemon answers it, never the renderer ────────
+        #
+        # Session 2 refused to verify the chain in the renderer and was right:
+        # byte-exact replication of `_canonical()` risks showing CHAIN BROKEN
+        # over a good chain, and a false alarm on the one thing this
+        # architecture is built around is worse than no indicator at all.
+        #
+        # INCREMENTAL, never a full re-walk. The log is append-only, so
+        # re-hashing all of it every 5 s is O(n) forever — 17,280 walks a day,
+        # each longer than the last, on two cores. `verify_incremental` reads
+        # only what was appended since the last beat, which is usually nothing,
+        # so the cost is a `seek` and a `tell`.
+        #
+        # `chainVerifiedAt` ships with it because a stale `true` is its own lie:
+        # without a timestamp a surface cannot tell "verified a moment ago" from
+        # "verified once, an hour ago, and the checker has been failing since".
+        if audit is not None:
+            try:
+                ok, _why = audit.verify_incremental()
+                out["chainVerified"] = bool(ok)
+                out["chainVerifiedAt"] = _iso_now()
+            except Exception:  # noqa: BLE001
+                # A checker that throws must not be reported as a broken chain.
+                # Omitting the field is honest; `false` would be an accusation.
+                pass
+        return out
 
     @property
     def psutil_available(self) -> bool:

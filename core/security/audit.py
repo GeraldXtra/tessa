@@ -234,6 +234,14 @@ class AuditLog:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.Lock()
         self._seq, self._head = self._recover()
+        #: Incremental-verification cursor. See `verify_incremental`.
+        #: `_vpos` is a byte offset, `_vseq`/`_vprev` the chain state at it, and
+        #: `_vbroken` latches the first failure so a broken chain cannot heal.
+        self._vpos = 0
+        self._vline = 0
+        self._vseq = 0
+        self._vprev = GENESIS
+        self._vbroken: str | None = None
 
     def _recover(self) -> tuple[int, str]:
         """
@@ -412,6 +420,93 @@ class AuditLog:
                 prev = recomputed
                 expected_seq += 1
                 n += 1
+
+        return True, None
+
+    def verify_incremental(self) -> tuple[bool, str | None]:
+        """
+        Verify only what has been APPENDED since the last call.
+
+        WHY NOT JUST CALL `verify()` EVERY HEARTBEAT. The audit log is
+        append-only and starts at commit one, so it only ever grows. Re-hashing
+        the whole chain every 5 seconds is O(n) forever — 17,280 full walks a
+        day, each one longer than the last, on two cores. It would eventually
+        dominate the daemon's CPU for a boolean that is almost always true.
+
+        The chain is a linked list, so a prefix that verified once cannot stop
+        verifying: changing any earlier entry breaks its own hash, and the next
+        call would have to re-read it to notice. That is the one real limitation
+        and it is stated rather than hidden — this detects TAMPERING WITH NEW
+        ENTRIES and a torn tail, which is what a live indicator is for. A full
+        `verify()` runs once at boot and catches edits to history.
+
+        Once broken it STAYS broken. A chain that heals itself is worse than no
+        indicator: the surface would flicker back to green while the log is
+        still wrong.
+        """
+        if self._vbroken is not None:
+            return False, self._vbroken
+        if not self.path.exists():
+            return True, None
+
+        try:
+            with self.path.open("r", encoding="utf-8") as fh:
+                fh.seek(self._vpos)
+                lineno = self._vline
+                # `readline()` RATHER THAN `for raw in fh`, and this was a live
+                # bug rather than a style choice. Python disables `tell()` on a
+                # file being iterated ("telling position disabled by next()
+                # call"), so the cursor never advanced while `_vseq` did — and
+                # the SECOND call re-read from byte 0 against an advanced
+                # sequence number and latched CHAIN BROKEN on a perfectly good
+                # log. A false alarm on the one thing this architecture is built
+                # around is worse than no indicator, which is the whole reason
+                # Session 2 refused to do this in the renderer.
+                while True:
+                    raw = fh.readline()
+                    if not raw:
+                        break
+                    lineno += 1
+                    stripped = raw.strip()
+                    if not stripped:
+                        self._vline = lineno
+                        self._vpos = fh.tell()
+                        continue
+                    # A partially-written final line is NOT a break. The daemon
+                    # may be mid-append, and reporting CHAIN BROKEN because we
+                    # read between the write and the newline would be the same
+                    # false alarm by a different route.
+                    if not raw.endswith("\n"):
+                        break
+                    try:
+                        entry = json.loads(stripped)
+                    except json.JSONDecodeError:
+                        self._vbroken = f"line {lineno}: malformed JSON (torn write?)"
+                        return False, self._vbroken
+
+                    if entry.get("seq") != self._vseq:
+                        self._vbroken = (f"line {lineno}: seq {entry.get('seq')} "
+                                         f"!= expected {self._vseq}")
+                        return False, self._vbroken
+                    if entry.get("prev") != self._vprev:
+                        self._vbroken = (f"seq {entry['seq']}: prev hash does not "
+                                         f"match previous entry")
+                        return False, self._vbroken
+
+                    stated = entry.pop("hash", None)
+                    recomputed = hashlib.sha256(_canonical(entry)).hexdigest()
+                    if stated != recomputed:
+                        self._vbroken = f"seq {entry['seq']}: content altered (hash mismatch)"
+                        return False, self._vbroken
+
+                    self._vprev = recomputed
+                    self._vseq += 1
+                    self._vline = lineno
+                    self._vpos = fh.tell()
+        except OSError as exc:
+            # Cannot read is NOT the same as broken, and must not be reported as
+            # a tamper. Leave the last good verdict standing.
+            return True, f"could not read the log ({exc})"
 
         return True, None
 

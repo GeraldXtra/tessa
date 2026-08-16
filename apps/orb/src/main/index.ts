@@ -413,6 +413,35 @@ if (!app.requestSingleInstanceLock()) {
       gpu,
       theme,
       themeReason,
+      forcedAura: (() => {
+        if (!isDev) return null;
+        const flag = process.argv.find((a) => a.startsWith('--force-aura='));
+        if (!flag) return null;
+        const raw = flag.slice('--force-aura='.length);
+        if (raw === 'cycle') return 'cycle' as const;
+        const value = Number.parseFloat(raw);
+        return Number.isFinite(value) && value >= 0 && value <= 1 ? value : null;
+      })(),
+      forcedDepth: (() => {
+        if (!isDev) return null;
+        const flag = process.argv.find((a) => a.startsWith('--force-depth='));
+        if (!flag) return null;
+        const value = Number.parseFloat(flag.slice('--force-depth='.length));
+        return Number.isFinite(value) && value >= 0 && value <= 1 ? value : null;
+      })(),
+      forcedSphere: (() => {
+        if (!isDev) return null;
+        const flag = process.argv.find((a) => a.startsWith('--force-sphere='));
+        if (!flag) return null;
+        const parts = flag.slice('--force-sphere='.length).split(',').map(Number);
+        if (parts.length !== 4 || parts.some((n) => !Number.isFinite(n) || n < 0)) {
+          log(`!! --force-sphere needs four non-negative numbers, got "${flag}"`);
+          return null;
+        }
+        const [gain, size, bodyBright, bodySize] = parts as [number, number, number, number];
+        log(`sphere: rimGain=${gain} rimSize=${size} bodyBright=${bodyBright} bodySize=${bodySize}`);
+        return { gain, size, bodyBright, bodySize };
+      })(),
       probeGeometryMs: probeFlagMs('probe-geometry'),
       probePulseMs: probeFlagMs('probe-pulse'),
       probeLimbMs: probeFlagMs('probe-limb'),
@@ -586,7 +615,13 @@ if (!app.requestSingleInstanceLock()) {
         // thing that drives it rather than inferred from the animation.
         if (isDev) {
           healthBeats += 1;
-          log(`beat #${healthBeats} uptimeS=${health.uptimeS}`);
+          // cpuPct and memMB ride along because the resource aura (§R.1) is
+          // driven off them, and "which of these actually MOVES" is a question
+          // about this daemon on this machine, not one to answer from the spec.
+          log(
+            `beat #${healthBeats} uptimeS=${health.uptimeS} ` +
+              `cpuPct=${health.cpuPct} memMB=${health.memMB}`,
+          );
         }
         lastHealth = health;
 

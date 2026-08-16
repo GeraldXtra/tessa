@@ -102,18 +102,59 @@ def _acl_is_locked_down(path: Path) -> tuple[bool, str]:
     return True, ""
 
 
-def write_runtime_file(port: int, token: str, pid: int | None = None) -> Path:
+def preflight_runtime_file() -> Path:
     """
-    Write runtime.json and lock it down. Raises if the ACL cannot be verified.
+    Create and lock down the file WITHOUT writing anything into it.
 
-    Order matters: the file is created empty and locked down BEFORE the token is
-    written into it, so the secret is never briefly present in a
-    world-readable file.
+    Split out of `write_runtime_file` so the daemon can pay the ACL check early
+    and the *advertisement* late.
+
+    THE PROBLEM THIS SOLVES. `runtime.json` used to be written before the voice
+    model loaded, and a `--voice` daemon spends 3-17 s in `WhisperModel(...)`
+    before `serve()` binds a socket. For that whole window the file said "there
+    is a daemon on this port, here is its token" and a surface that believed it
+    got ECONNREFUSED — or, worse, sampled the process and recorded a 65 MB
+    daemon that was about to become a 314 MB one. That is the 5x memMB
+    discrepancy Session 2 reported, and it was a real ordering bug rather than a
+    measurement artefact.
+
+    THE ACL CHECK CANNOT MOVE WITH IT. If the token file is world-readable the
+    daemon must refuse to start, and discovering that after a 17 s model load is
+    17 s of wasted work on a 2-core machine. So the check stays at the front and
+    only the secret moves to the back.
+
+    `touch(exist_ok=True)` deliberately does not truncate. A previous daemon's
+    entry stays intact and valid until this one is genuinely listening, instead
+    of being clobbered 17 s early and leaving BOTH undiscoverable.
     """
     path = runtime_path()
     path.parent.mkdir(parents=True, exist_ok=True)
 
-    # 1. create empty, 2. restrict, 3. verify, 4. only then write the secret
+    # CLEAR A DEAD DAEMON'S ENTRY, AND ONLY A DEAD ONE.
+    #
+    # Deferring the write has one cost: a stale file from a force-killed daemon
+    # now survives ~20 s longer, because this daemon no longer overwrites it
+    # early. `read_runtime_file` already refuses a dead pid per CONTRACT §1, so
+    # a conforming surface is safe either way — but leaving a corpse readable
+    # for the whole boot is worse than removing it, and this is the moment we
+    # know it is a corpse.
+    #
+    # A LIVE pid is left strictly alone. Another daemon may legitimately own
+    # this file (two are running on this machine right now), and clobbering a
+    # working daemon's entry to announce one that is 20 s from ready would make
+    # BOTH undiscoverable.
+    try:
+        if path.exists() and path.stat().st_size > 0:
+            stale = json.loads(path.read_text(encoding="utf-8"))
+            owner = int(stale.get("pid", 0))
+            if owner and owner != os.getpid() and not pid_is_alive(owner):
+                path.unlink(missing_ok=True)
+    except (json.JSONDecodeError, OSError, ValueError, TypeError):
+        # An unreadable file is not evidence of a live daemon; leave it to be
+        # overwritten rather than guessing at its contents.
+        pass
+
+    # 1. create empty, 2. restrict, 3. verify — the secret comes later.
     path.touch(mode=0o600, exist_ok=True)
     _lock_down_acl(path)
     ok, why = _acl_is_locked_down(path)
@@ -121,6 +162,22 @@ def write_runtime_file(port: int, token: str, pid: int | None = None) -> Path:
         raise RuntimeError(
             f"Refusing to start: {why}. The auth token would be readable by other users."
         )
+    return path
+
+
+def write_runtime_file(port: int, token: str, pid: int | None = None) -> Path:
+    """
+    Write runtime.json and lock it down. Raises if the ACL cannot be verified.
+
+    Order matters: the file is created empty and locked down BEFORE the token is
+    written into it, so the secret is never briefly present in a
+    world-readable file.
+
+    CALL THIS ONLY ONCE THE LISTENER IS BOUND. Writing it is the act of
+    advertising, and a daemon must not advertise a port it is not yet serving.
+    See `preflight_runtime_file`.
+    """
+    path = preflight_runtime_file()
 
     payload: dict[str, Any] = {
         "protocolVersion": PROTOCOL_VERSION,

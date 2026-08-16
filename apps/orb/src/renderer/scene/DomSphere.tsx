@@ -15,14 +15,16 @@
 
 import { useStore, agentStateStore } from '../state/store.ts';
 
-export function DomSphere({ offsetPx }: { offsetPx: number }) {
+export function DomSphere({ offsetPx, offsetYPx }: { offsetPx: number; offsetYPx: number }) {
   const state = useStore(agentStateStore);
 
   return (
     <div
       className="dom-sphere"
       data-state={state}
-      style={{ transform: `translateX(${-offsetPx * 0.5}px)` }}
+      // Same halved convention as the WebGL rung, both axes, so the bottom
+      // fallback sits where the composition says rather than dead centre.
+      style={{ transform: `translate(${-offsetPx * 0.5}px, ${-offsetYPx * 0.5}px)` }}
       aria-hidden="true"
     >
       <span className="dom-sphere__ring dom-sphere__ring--outer" />

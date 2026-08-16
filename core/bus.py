@@ -74,12 +74,26 @@ class AudioBus:
     def state(self) -> AgentState:
         return self._state
 
-    def set_state(self, state: AgentState) -> None:
-        if state is self._state:
+    def set_state(self, state: AgentState, detail: dict | None = None) -> None:
+        """
+        CONTRACT §4.1 `evt.agent.state`, which already declares `detail?`.
+
+        THE DEDUPE IS ON STATE ONLY, DELIBERATELY. Two consecutive `working`
+        transitions with DIFFERENT detail are two different facts — "working:
+        fs.list" then "working: fs.delete" — and swallowing the second would
+        leave the Orb showing the wrong target for the rest of the turn. That is
+        the safety dimension Session 2 asked for: the difference between "she is
+        working" and "she is about to delete that file".
+        """
+        if state is self._state and detail is None:
             return
         self._state = state
         if self._on_state is not None:
-            self._on_state(state)
+            try:
+                self._on_state(state, detail)
+            except TypeError:
+                # A caller that predates `detail` still works unchanged.
+                self._on_state(state)
 
     @property
     def is_speaking(self) -> bool:

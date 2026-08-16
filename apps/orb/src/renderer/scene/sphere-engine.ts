@@ -381,6 +381,9 @@ export interface ProbeReading {
    */
   dx: number;
   dy: number;
+  /** Where the engine COMMANDED the centre to be. See the note at the read. */
+  expectedCx: number;
+  expectedCy: number;
   /** Total luminance over the region — the pulse's signal. */
   sum: number;
   /**
@@ -434,6 +437,27 @@ export interface ProbeReading {
 export interface SphereEngineOptions {
   canvas: HTMLCanvasElement;
   initialTier: SphereTier;
+  /**
+   * DEV ONLY. `--force-depth=<0..1>`, the depth-shading falloff. Omitted uses
+   * DEPTH_FAR_DEFAULT; 1.0 disables depth and reproduces the pre-depth shell
+   * exactly, which is how the before/after captures are taken.
+   */
+  depthFar?: number;
+  /**
+   * DEV ONLY. `--force-sphere=<rimGain>,<rimSize>,<bodyBright>,<bodySize>`.
+   *
+   * The rim was tuned by MEASUREMENT, not by eye, and a cold build of this app
+   * takes ~100 s. Four numbers on the command line turn a sweep of twelve
+   * candidate settings from twenty minutes of rebuilds into one build and
+   * twelve launches, which is the difference between measuring the rim and
+   * guessing at it. It matches the `--force-` prefix, so it is already treated
+   * as an instrumented launch and can never write window or theme state.
+   *
+   * `bodyBright` and `bodySize` are MULTIPLIERS on the per-state values in
+   * states.ts, so the six states keep their relative ordering under a sweep —
+   * the thing item 2f has to survive.
+   */
+  rim?: { gain: number; size: number; bodyBright: number; bodySize: number };
   /** Read each frame. Never a subscription — no React involvement. */
   getState: () => AgentState;
   /** Fired when the governor or a context loss changes the tier. */
@@ -453,8 +477,22 @@ export interface SphereEngineOptions {
 
 export interface SphereEngine {
   setTier(tier: SphereTier): void;
-  /** Shift the sphere left when a drawer opens. Pixels, animated internally. */
-  setCentreOffsetPx(pixels: number): void;
+  /**
+   * Where the sphere sits, as a shift from the canvas centre. Animated.
+   *
+   * TWO AXES NOW, and the reason is the composition rather than the drawer: the
+   * sphere is placed off-centre by design (34% of width, 47% of height), and
+   * the drawer shift has to compose with that rather than fight it. The caller
+   * computes one target position from the whole layout — base placement, drawer
+   * open or shut, column visible or not — and passes the result. This engine
+   * does not know what a drawer is.
+   *
+   * Units are the same as before: a positive `xPx` moves the sphere LEFT on
+   * screen by `xPx / 2` pixels, a positive `yPx` moves it UP by `yPx / 2`. That
+   * halving is inherited — it is what made a 320px drawer shift the sphere by
+   * the 160px its available space actually moved.
+   */
+  setCentreOffset(xPx: number, yPx: number): void;
   /**
    * Discard the measured refresh rate and re-derive the frame divider.
    *
@@ -604,6 +642,19 @@ function buildGeometry(count: number): BufferGeometry {
   return geometry;
 }
 
+/** Default depth falloff. `--force-depth=` overrides it via bootstrap. */
+export const DEPTH_FAR_DEFAULT = 0.42;
+
+/**
+ * THE RIM — extra brightness and extra point size at the silhouette.
+ *
+ * Both numbers are MEASURED, not chosen. See the sweep in item 2 of the build
+ * report and the varying `vFresnel` in particles.vert.glsl. `--force-sphere=`
+ * overrides all four rim/body numbers so a sweep needs one build, not twelve.
+ */
+export const RIM_GAIN_DEFAULT = 2.6;
+export const RIM_SIZE_DEFAULT = 1.4;
+
 function percentile(sorted: readonly number[], fraction: number): number {
   if (sorted.length === 0) return 0;
   const index = Math.min(sorted.length - 1, Math.floor(sorted.length * fraction));
@@ -660,7 +711,40 @@ export function createSphereEngine(options: SphereEngineOptions): SphereEngine {
     uColorCool: { value: tokenColor('--sphere-cool') },
     uCoolMix: { value: 0.35 },
     uBrightness: { value: 0.6 },
+    /**
+     * §R.1 depth shading. How much brightness the FARTHEST particle keeps.
+     *
+     * 0.42 is a judgement, not a measured threshold, and it is stated rather
+     * than hidden so it can be retuned by eye: the far side keeps 42% of its
+     * brightness, which is enough separation to read as volume and not so much
+     * that the back of the shell disappears and the sphere becomes a bowl.
+     *
+     * `--force-depth=<0..1>` overrides it, and 1.0 restores the pre-depth shell
+     * exactly. That is how the before/after captures are taken — one binary,
+     * one flag, identical geometry, so the comparison cannot be confounded the
+     * way a 984x652-against-1366x720 comparison once was.
+     */
+    uDepthFar: { value: options.depthFar ?? DEPTH_FAR_DEFAULT },
+    /**
+     * THE RIM. See vFresnel in the vertex stage for the measurement that
+     * produced these two numbers.
+     *
+     * `uRimGain` is extra brightness at the silhouette, `uRimSize` extra point
+     * size there. Both are needed: brightness alone leaves separate dots
+     * separate, and the reference's limb reads as a surface precisely because
+     * its particles have merged (mean blob 214.8 px against 6.3 px here).
+     *
+     * They also pay back the depth term's 38%. Depth removed brightness from
+     * the whole shell, which was right for form and wrong for mass; this puts
+     * it back at the edge, where it builds a boundary instead of a fog.
+     */
+    uRimGain: { value: options.rim?.gain ?? RIM_GAIN_DEFAULT },
+    uRimSize: { value: options.rim?.size ?? RIM_SIZE_DEFAULT },
   };
+
+  // Multipliers on the per-state body values. 1 unless a sweep is running.
+  const bodyBrightMul = options.rim?.bodyBright ?? 1;
+  const bodySizeMul = options.rim?.bodySize ?? 1;
 
   const material = new ShaderMaterial({
     uniforms,
@@ -723,6 +807,8 @@ export function createSphereEngine(options: SphereEngineOptions): SphereEngine {
 
   let offsetTargetPx = 0;
   let offsetCurrentPx = 0;
+  let offsetTargetYPx = 0;
+  let offsetCurrentYPx = 0;
   let worldPerPixel = 0.002;
 
   /* ── frame accounting ──────────────────────────────────────────────────── */
@@ -955,13 +1041,13 @@ export function createSphereEngine(options: SphereEngineOptions): SphereEngine {
     uniforms.uTurbulence.value = smooth.turbulence * (1 + TURB_AMP_GAIN * focusCurrent);
     uniforms.uBreath.value = Math.sin(breathPhase) * smooth.breathDepth;
     uniforms.uAmpGain.value = smooth.amplitudeGain;
-    uniforms.uPointScale.value = smooth.pointScale;
+    uniforms.uPointScale.value = smooth.pointScale * bodySizeMul;
     // §R.1: hotter under load. coolMix 1 is fully --sphere-cool and 0 is fully
     // --sphere-hot, so load pulls it DOWN toward hot from whatever the current
     // state's resting temperature is.
     loadCurrent = approach(loadCurrent, loadTarget, rate);
     uniforms.uCoolMix.value = smooth.coolMix * (1 - loadCurrent);
-    uniforms.uBrightness.value = smooth.brightness;
+    uniforms.uBrightness.value = smooth.brightness * bodyBrightMul;
 
     points.rotation.y = spinAngle;
 
@@ -969,7 +1055,10 @@ export function createSphereEngine(options: SphereEngineOptions): SphereEngine {
     // the canvas. Reallocating a WebGL drawing buffer every frame of a 200 ms
     // drawer animation would be far more expensive than the animation itself.
     offsetCurrentPx = approach(offsetCurrentPx, offsetTargetPx, rate);
+    offsetCurrentYPx = approach(offsetCurrentYPx, offsetTargetYPx, rate);
     points.position.x = -offsetCurrentPx * 0.5 * worldPerPixel;
+    // World +y is screen UP, so a positive yPx lifts the sphere.
+    points.position.y = offsetCurrentYPx * 0.5 * worldPerPixel;
 
     renderer.render(scene, camera);
 
@@ -1087,8 +1176,23 @@ export function createSphereEngine(options: SphereEngineOptions): SphereEngine {
     probePrev.set(px.subarray(0, needed));
     probePrevLen = needed;
 
-    const centreX = (bufW - 1) / 2;
-    const centreY = (bufH - 1) / 2;
+    /**
+     * MEASURED AGAINST WHERE THE ENGINE PUT IT, not against the middle of the
+     * window.
+     *
+     * This used to be `cx - (bufW-1)/2`, which asked "is the sphere centred in
+     * the buffer". The moment the composition placed it at 34% of the width
+     * that question had a large permanent answer and the instrument stopped
+     * measuring anything — it would have reported a ~243 px error forever, on a
+     * sphere that was exactly where it was told to be.
+     *
+     * The question worth asking is "is the sphere where the engine commanded
+     * it", which stays valid at any composition, any window size, and with a
+     * drawer open. Both numbers are carried out so a reader sees the position
+     * and the expectation rather than trusting a difference.
+     */
+    const expectedCx = (bufW - 1) / 2 - offsetCurrentPx * 0.5;
+    const expectedCy = (bufH - 1) / 2 - offsetCurrentYPx * 0.5;
     const cx = sum > 0 ? sx / sum : Number.NaN;
     const cy = sum > 0 ? sy / sum : Number.NaN;
 
@@ -1101,8 +1205,10 @@ export function createSphereEngine(options: SphereEngineOptions): SphereEngine {
       x1: x0 + width,
       cx,
       cy,
-      dx: cx - centreX,
-      dy: cy - centreY,
+      expectedCx,
+      expectedCy,
+      dx: cx - expectedCx,
+      dy: cy - expectedCy,
       sum,
       pixelDelta,
       lit,
@@ -1245,8 +1351,9 @@ export function createSphereEngine(options: SphereEngineOptions): SphereEngine {
   return {
     setTier,
 
-    setCentreOffsetPx(pixels: number) {
-      offsetTargetPx = pixels;
+    setCentreOffset(xPx: number, yPx: number) {
+      offsetTargetPx = Number.isFinite(xPx) ? xPx : 0;
+      offsetTargetYPx = Number.isFinite(yPx) ? yPx : 0;
     },
 
     setLoad(load: number) {

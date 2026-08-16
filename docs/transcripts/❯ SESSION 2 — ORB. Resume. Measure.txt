@@ -1,0 +1,107 @@
+❯ SESSION 2 — ORB. Redesign the frame. Propose only.
+
+  === OWNERSHIP ===
+  You own apps/orb/ and nothing else. Session 1 owns core/ and apps/console/.
+  Read core/ freely; never edit a byte. CONTRACT.md and docs/ off limits.
+  tokens.json remains CLOSED. No git commands. Do NOT start a daemon.
+  KILL ONLY BY RECORDED PID VIA ANCESTRY.
+
+  === WHAT YOU JUST CLOSED — do not redo ===
+  Card contrast: four of ten button combinations were failing AA, not one. Violet
+  AND ember failed on both buttons, emerald sat exactly on the line, and in five of
+  ten boxes the brightest pixel was an isolated sphere particle rather than a
+  glyph. Now worst case 7.13:1 — clears AA by 58% and clears AAA. REJECT 15.86
+  everywhere.
+  The aura: dormant at idle, near full scale at the 24% cpuPct a restarting daemon
+  produces. You caught the trap in your own numbers — those idle deltas read as
+  "+348%" and as two grey levels, and "the percentage is the misleading number
+  here."
+  Depth: reads as depth in the first capture, no tuning, and the pulse reads
+  BETTER (+64.3% over rest against +36.1%).
+  And you refused to fake the null: your linearity test was 8.6% off because dim
+  particles fall below threshold, so you rested it on measured monotonicity plus
+  bit-identical repeats plus stated arithmetic, and said "I am not dressing (a)+(b)
+  up as more than they are."
+
+  === THE COMPLAINT, AND IT IS NOT THE SPHERE ===
+  Gerald has said this three times and I kept mishearing it as a sphere problem.
+  It is not. His words: "I didn't mean the Orb, I meant the whole Interface. It
+  looks scanty and empty and not technical, professional and advanced."
+  Your own diagnosis was right the first time: "the sphere is not what's wrong —
+  the frame is. A ~530px disc dead centre, a 28px bar, five vertical labels, and
+  roughly 60% of the screen at literal #000000."
+  Three things his screenshot makes plain:
+   - EVERYTHING IS ONE VISUAL WEIGHT. Rail labels, status bar and sphere sit at
+     roughly the same value. Nothing leads. A designed interface has a primary, a
+     secondary and a recessive tier; this has one.
+   - THE COMPOSITION IS A BULLSEYE. A circle centred in a rectangle with equal
+     emptiness on all four sides is the least dynamic arrangement available.
+   - NO CRAFT AT THE EDGES. No frame, no grid, no depth, no detailing. Nothing
+     that says this was built rather than sketched.
+
+  === WHAT HE ASKED FOR ===
+  "Real information in it, but don't bring back the old one" — density, without the
+  fabricated calendar and Done 394 that were removed for good
+  ──── (150 lines hidden) ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  k, no hardcoded hex.
+    f. THE THEME SYSTEM MUST SURVIVE. Everything is accent-derived and must work in
+       all five palettes. Say if any element breaks under ember or emerald — you
+       already know violet's accent is 4.46:1 on black, so any new small text on a
+       dark fill needs the same ladder treatment the approve button got.
+    g. SAY WHAT YOU WOULD NEED FROM SESSION 1. If your best ideas need events that
+       do not exist, say so now — Session 1 has a prompt queued and could carry
+       them. The latency trace and the speaker identity are the obvious candidates.
+    h. PROPOSAL B — dust and parallax — is still unruled. If a floor plane does the
+       same job better, say so; he may not need both.
+
+  === 6. AND THE TWO THINGS ALREADY BUILT ===
+
+    a. The RESOURCE AURA sits behind the sphere. If the sphere moves, the aura
+       moves with it — confirm that is what you intend, and whether an off-centre
+       aura still reads as ambient rather than as a lopsided glow.
+    b. DEPTH SHADING made the sphere 38% dimmer. Against a floor plane and a
+       right-hand column, say whether that reads as sophisticated or as faded.
+       This is the one place where the sphere and the frame genuinely interact.
+
+  === 7. REPORT ===
+     a. Your two or three complete directions, with ASCII layouts.
+     b. Which of the eighteen you would build, which you would not, and what each
+        shows with no data.
+     c. Anything blocked on a Session 1 event, named, with what you would ask for.
+     d. Predicted frame cost per direction.
+     e. Which you would build and why.
+     f. What would make each fail.
+     g. Behaviour at 900x600 and at F11. What collapses first.
+     h. Whether the drawer becomes unreadable in each proposal, and your fix.
+     i. Where the approval card lives, and the dev overlay.
+     j. Your ruling on the rails.
+     k. What 18f should measure once the sphere is off-centre.
+     l. How each interacts with the aura and the depth term.
+     m. Whether anything breaks under a non-default theme.
+     n. Typecheck both tsconfigs; contract gates with file count.
+     o. Processes you leave behind, with parent chains.
+
+  This and nothing more. BUILD NOTHING. Do not start proposal B either. Do not
+  touch tokens.json.
+
+  If you disagree with the whole framing — if you think the frame is fine and
+  something else is wrong — say so. His verdict is real but the diagnosis is still
+  yours to make, and your first diagnosis of it was better than mine.
+
+  Report on each by number, don't summarize. Then STOP and report.
+
+Build nothing this run — recon, then a design document. First, what is actually on the wire, because item 2d hinges on it.
+
+  Searched for 1 pattern, ran 1 shell command
+
+Two important results: the latency trace is blocked (on_stage goes to log() at server.py:1436, never to a broadcast), and Session 1 built brainCalls/brainEngine explicitly for the surface. Checking two more before I design.
+
+  Ran 1 shell command
+
+Confirmed: evt.agent.state carries only {companionId, state} — no detail. So 2g is blocked too. Final verification, then the document.
+
+  Ran 2 shell commands
+
+● API Error: Connection lost mid-response. The response above may be incomplete.
+
+✻ Brewed for 53m 26s

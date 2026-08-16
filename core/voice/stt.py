@@ -67,6 +67,21 @@ VOCABULARY_PRIME = (
     "Tweet that I am building an AI assistant. Post this to X. Repost that. "
     "Reply to post two. Read my timeline. Check my notifications. "
     "Forget that, start fresh. Yes, please. Go on. "
+    # ── THE CONTROL PHRASES ──────────────────────────────────────────────────
+    #
+    # His transcripts show "stop listening" coming back as "Stop, listen." and
+    # "Stop List Me." for the same three syllables, on clips whose own enrolment
+    # RMS was 328-944 — so this is the decoder, not his microphone.
+    #
+    # They are the hardest shape for Whisper in this whole vocabulary: two or
+    # three short words, said quickly, with no surrounding sentence to condition
+    # on. Exactly what an initial_prompt is for, and exactly why they are
+    # written here as SENTENCES rather than as a word list — a list of isolated
+    # phrases primes isolated phrases, which is the mistake the comment above
+    # records having already made once.
+    "Hey Zoey. Hey Zoey, are you there? Stop listening. Zoey, stop listening. "
+    "Go to sleep. Stop the wake word. Go back to sleep, Zoey. "
+    "Stop. Be quiet. Cancel that. "
     "google.com, x.com, web.whatsapp.com, github.com. "
     "LedgerWatch, Aptech, naira, Titan Wave, ZOEY_OS, Lagos."
 )

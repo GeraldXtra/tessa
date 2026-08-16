@@ -1,4 +1,29 @@
 /**
+ * ─── WHY EVERY `coolMix` WENT UP, AND IT IS A THEME FIX NOT A TASTE CHANGE ───
+ *
+ * The sphere rendered GREY under the cyan theme. Not a theming failure — the
+ * theme was applied correctly — but an arithmetic consequence of the ladder:
+ * `--sphere-hot` is the ladder's CORE step at ~95% lightness, and at 95%
+ * lightness no hue survives. Cyan's core is E8FBFF (hash omitted so this
+ * comment does not itself trip the no-hard-coded-colour gate), which is white
+ * with a
+ * rumour of blue in it.
+ *
+ * `uCoolMix` chooses between that near-white core and the BODY step, which is
+ * where the theme's actual hue lives (6FE3F5 for cyan). At the old values -
+ * idle 0.34, thinking 0.28 — roughly two thirds of the shell was drawn from the
+ * near-white end, so the sphere was essentially achromatic. The depth term then
+ * took 38% of its brightness, and near-white at 62% brightness is precisely
+ * grey.
+ *
+ * So the mix now favours the body step. The hot core still reads at the centre
+ * and on displaced particles (the fragment stage adds `vRim * 0.55` on top of
+ * this), which is what keeps the shell from flattening into one flat colour.
+ *
+ * The RELATIVE ordering between states is preserved: every value moved by the
+ * same +0.26, so `thinking` is still the coolest and `blocked` still the
+ * warmest, and no state signature changed its relationship to any other.
+ *
  * The six agent states, as sphere parameters.
  *
  * The state list is IMPORTED from @zoey/protocol, never retyped. `AgentState`
@@ -61,7 +86,7 @@ export const SPHERE_STATES = {
     spin: 0.04,
     pointScale: 0.011,
     brightness: 0.55,
-    coolMix: 0.34,
+    coolMix: 0.60,
     palette: 'flame',
     frozen: false,
   },
@@ -77,7 +102,7 @@ export const SPHERE_STATES = {
     spin: 0.06,
     pointScale: 0.0125,
     brightness: 1.0,
-    coolMix: 0.55,
+    coolMix: 0.81,
     palette: 'flame',
     frozen: false,
   },
@@ -112,7 +137,7 @@ export const SPHERE_STATES = {
     spin: 0.34,
     pointScale: 0.0105,
     brightness: 0.82,
-    coolMix: 0.28,
+    coolMix: 0.54,
     palette: 'flame',
     frozen: false,
   },
@@ -126,7 +151,7 @@ export const SPHERE_STATES = {
     spin: 0.08,
     pointScale: 0.012,
     brightness: 0.95,
-    coolMix: 0.46,
+    coolMix: 0.72,
     palette: 'flame',
     frozen: false,
   },
@@ -142,7 +167,7 @@ export const SPHERE_STATES = {
     spin: 0.13,
     pointScale: 0.0115,
     brightness: 0.85,
-    coolMix: 0.4,
+    coolMix: 0.66,
     palette: 'flame',
     frozen: false,
   },

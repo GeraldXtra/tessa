@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import platform
 import random
+from functools import lru_cache
 import re
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -45,6 +46,9 @@ class Intent(str, Enum):
     PRESENCE = "presence"
     STOP = "stop"
     STATUS = "status"
+    #: "Stop listening." Distinct from STOP, which only silences her speech.
+    #: This one closes the ear. See `Routed.sleeps_wake`.
+    SLEEP = "sleep"
     UNROUTED = "unrouted"
 
 
@@ -57,6 +61,14 @@ class Routed:
     score: float = 0.0
     #: Structured tool calls — NAME + ARGS, never a command string (invariant 4).
     calls: list = field(default_factory=list)
+    #: "Stop listening" / "go to sleep" — put the wake detector to sleep.
+    #:
+    #: SEPARATE FROM `halts_speech` because they are different requests that
+    #: sound similar. "Stop" means stop TALKING and she keeps listening; "stop
+    #: listening" means stop HEARING and she keeps her voice. Collapsing them
+    #: would mean every "stop" mid-sentence also went deaf, and he would have no
+    #: idea why the wake word had died.
+    sleeps_wake: bool = False
 
     @property
     def handled_locally(self) -> bool:
@@ -147,10 +159,24 @@ _SPECS = (
     IntentSpec(Intent.STATUS, ("how are you", "status", "how are things",
                                "running", "how is it going", "doing"),
                boost=("cpu", "memory", "uptime", "system", "yourself")),
+    # "can you hear" was unreachable: `normalise` peels "can you" as a filler,
+    # so the text reaching the scorer was "hear me" and never matched. Keeping
+    # the old key AND the post-strip form, because the filler list is allowed to
+    # change and a rule that only works on one side of it is a trap.
     IntentSpec(Intent.PRESENCE, ("are you there", "you there", "hello", "hi",
-                                 "are you awake", "you awake", "can you hear")),
+                                 "are you awake", "you awake", "can you hear",
+                                 "hear me", "you listening", "still there")),
     IntentSpec(Intent.STOP, ("stop", "mute", "stand down", "be quiet", "shut up",
-                             "quiet", "enough", "cancel that")),
+                             "quiet", "enough", "cancel that"),
+               # THE VETO IS WHAT KEEPS THE TWO APART. "stop listening" contains
+               # "stop", so without this it scores 1.0 for STOP and 1.0 for
+               # SLEEP — a tie decided by tuple order, which is not a decision.
+               # He would say "stop listening" and she would go quiet and keep
+               # listening, which is the exact opposite of what he asked for.
+               veto=("listening", "sleep", "wake word")),
+    IntentSpec(Intent.SLEEP, ("stop listening", "go to sleep", "stop the wake word",
+                              "sleep now", "stop listening to me", "go to sleep now",
+                              "stop listening for me")),
 )
 
 #: Below this, she does not guess. Deliberately not lower: a router that fires
@@ -158,16 +184,72 @@ _SPECS = (
 #: already happened by the time he notices.
 MATCH_THRESHOLD = 1.0
 
+#: How long a silence makes his next word a RETURN rather than a continuation.
+#:
+#: TWENTY MINUTES, and the number is a trade between his two sentences. "When
+#: we're done doing something and I come back again" must greet him; a pause
+#: inside a task must not. Reading a page, taking a call, or thinking about
+#: what to ask next runs to ten or fifteen minutes and is plainly the same
+#: sitting. An hour away is plainly not. Twenty minutes clears the longest
+#: ordinary pause and still greets him when he comes back from lunch.
+#:
+#: Erring long is the safer direction: a missed greeting is a small
+#: disappointment, while being greeted every few minutes makes her feel
+#: broken — the same reasoning that made the VAD silence window 1200 ms rather
+#: than 600.
+RETURN_GAP_S = 20 * 60
+
+#: An utterance that is ONLY a greeting, with or without her name.
+#:
+#: Matched against the RAW text, because by the time `normalise` has run these
+#: words are all in `_FILLERS` and nothing is left to recognise.
+_GREETING_ONLY = re.compile(
+    r"^\s*(?:hey|hi|hiya|hello|yo|greetings|"
+    r"good\s+(?:morning|afternoon|evening|day))"
+    r"(?:\s+(?:there|again|zoey|zoi|zoe|joey|zooey))*"
+    r"\s*[.,!?]*\s*$", re.I)
+
+#: What she says when he addresses her again inside the gap — item 2d.
+#: SHORT, because it is an acknowledgement and not a conversation, and none of
+#: them repeat the time of day.
+_ACKNOWLEDGE = [
+    "Emperor?",
+    "Still here.",
+    "Yes, Emperor?",
+    "Listening.",
+    "Here, sir.",
+]
+
+
+@lru_cache(maxsize=512)
+def _kw(keyword: str) -> re.Pattern[str]:
+    return re.compile(rf"\b{re.escape(keyword)}\b")
+
+
+def _has(norm: str, keyword: str) -> bool:
+    """
+    WORD BOUNDARIES, NOT SUBSTRINGS, and this was a live bug.
+
+    `k in norm` matched PRESENCE's "hi" inside "t-HI-s", so "open this" scored
+    as a greeting and she answered "Good morning, Emperor." to a command. The
+    same flaw reaches further than that one case: "stop" matches "stopwatch",
+    "date" matches "update", "doing" matches "undoing".
+
+    Conversational keywords are WORDS. Matching them as substrings was never
+    intended; it was just what `in` does.
+    """
+    return _kw(keyword).search(norm) is not None
+
 
 def score_intents(norm: str) -> list[tuple[Intent, float]]:
     out: list[tuple[Intent, float]] = []
     for spec in _SPECS:
-        if any(v in norm for v in spec.veto):
+        if any(_has(norm, v) for v in spec.veto):
             continue
-        hits = sum(1 for k in spec.must_any if k in norm)
+        hits = sum(1 for k in spec.must_any if _has(norm, k))
         if not hits:
             continue
-        score = float(hits) + 0.5 * sum(1 for b in spec.boost if b in norm)
+        score = float(hits) + 0.5 * sum(1 for b in spec.boost if _has(norm, b))
         out.append((spec.intent, score))
     return sorted(out, key=lambda x: -x[1])
 
@@ -247,10 +329,84 @@ class Router:
         self.turns = 0
         #: Set per turn by `repair` — did he actually say her name.
         self.addressed_by_name = False
+        #: When he last said anything at all, and when she last greeted him.
+        #:
+        #: HIS RULE: "when we're done doing something and I come back again and
+        #: say Hey Zoey, she should also reply back." So a greeting is not once
+        #: per session, it is once per RETURN — and a return is defined by a gap
+        #: of silence, which is the only signal available without asking him.
+        self.last_turn_at: float | None = None
+        self.last_greeted_at: float | None = None
+        #: Only ever set from something OBSERVED. See `greeting`'s docstring:
+        #: she never invents a reason to have noticed something.
+        self._seen_after_three = False
+        self._greet_variant = 0
+        #: Snapshot of "was this a return", taken in `route` before the
+        #: activity timestamp moves. None when `address_only` is called directly.
+        self._was_return: bool | None = None
 
     @property
     def first_contact(self) -> bool:
         return self.turns <= 1
+
+    def _note_activity(self, now: datetime | None = None) -> None:
+        now = now or datetime.now()
+        if 3 <= now.hour < 5:
+            self._seen_after_three = True
+        self.last_turn_at = now.timestamp()
+
+    def is_return(self, now: datetime | None = None) -> bool:
+        """
+        Has he been away long enough that this is a RETURN rather than a pause?
+
+        Never spoken to before counts as a return — that is first contact.
+        """
+        if self.last_turn_at is None:
+            return True
+        now = now or datetime.now()
+        return (now.timestamp() - self.last_turn_at) >= RETURN_GAP_S
+
+    def address_only(self, now: datetime | None = None) -> Routed:
+        """
+        He said her name and nothing else. That is a greeting, not a command.
+
+        THREE OUTCOMES, and the middle one is the point:
+
+          first contact, or back after a gap  -> the full time-aware greeting
+          said again inside the gap           -> an ACKNOWLEDGEMENT, not a repeat
+          nothing else                        -> never silence
+
+        Item 2d: repeating "Good evening, Emperor" every thirty seconds is how a
+        greeting stops being a greeting and becomes a noise the machine makes.
+        Acknowledging is the honest version of "I heard you, I already said
+        hello" — short, in her voice, and it does not pretend the first one did
+        not happen.
+        """
+        now = now or datetime.now()
+        # Use the snapshot taken before `last_turn_at` moved, when there is one.
+        returning = self._was_return if self._was_return is not None else self.is_return(now)
+        self._was_return = None
+        self._note_activity(now)
+
+        if returning:
+            self.last_greeted_at = now.timestamp()
+            # USE THEN INCREMENT, so the FIRST greeting of a session is
+            # variant 0 — the full "Good evening, Emperor." Incrementing first
+            # made first contact the clipped "Evening, Emperor.", which is the
+            # right line for the fourth return and the wrong one for hello.
+            variant = self._greet_variant
+            self._greet_variant += 1
+            fact = None
+            # A REAL FACT OR NONE. `_seen_after_three` is only true if she
+            # actually observed him talking to her between 03:00 and 05:00.
+            if self._seen_after_three and now.hour >= 5:
+                fact = "You were up past three."
+                self._seen_after_three = False
+            return Routed(Intent.PRESENCE,
+                          greeting(now, variant=variant, late_fact=fact),
+                          score=1.0)
+
+        return Routed(Intent.PRESENCE, _pick(_ACKNOWLEDGE), score=1.0)
 
     def route(self, text: str) -> Routed:
         """
@@ -275,7 +431,34 @@ class Router:
         raw, self.addressed_by_name = repair(collapse_repetition(text or ""))
         norm = normalise(raw)
         if not norm:
+            # ── HE SAID HER NAME AND NOTHING ELSE ────────────────────────────
+            #
+            # This is item 2a, and the old behaviour was actively wrong. "Hey
+            # Zoey" reaches here with `raw` empty — `repair` has stripped the
+            # name — so it fell through to `_SILENCE`: "I did not catch that."
+            # She heard him perfectly and told him she had not.
+            #
+            # The distinction between a greeting and a command is exactly
+            # whether anything survived the strip. Nothing did, so there is no
+            # command, so he was saying hello.
+            # A BARE GREETING WITH NO NAME LANDS HERE TOO, and it was broken
+            # before any of this: "hello" is in `_FILLERS`, so `normalise`
+            # peeled it and left an empty string, and she answered "I did not
+            # catch anything, Emperor." to a word she had heard perfectly.
+            #
+            # Item 2e requires the chord plus "hello" to greet, so the test is
+            # against the ORIGINAL utterance rather than the stripped one —
+            # after stripping there is by definition nothing left to look at.
+            if self.addressed_by_name or _GREETING_ONLY.match(text or ""):
+                return self.address_only()
             return Routed(Intent.UNROUTED, _pick(_SILENCE))
+        # ORDER MATTERS AND IT BIT ME. `_note_activity` sets `last_turn_at`,
+        # which is the ONLY thing `is_return` reads — so calling it before the
+        # routing decision made every greeting look like a continuation, and a
+        # fresh "hi" answered "Yes, Emperor?" instead of greeting him.
+        # The answer is snapshotted here, before the timestamp moves.
+        self._was_return = self.is_return()
+        self._note_activity()
 
         parsed = self._tools.parse(raw)
         if parsed.question:
@@ -312,15 +495,39 @@ class Router:
             ]), score=score)
 
         if intent is Intent.PRESENCE:
-            # He greeted her, so she greets back — that is the half of his rule
-            # that always applied. On any later turn a bare "you there?" gets
-            # the short form instead of a fresh salutation.
-            if self.first_contact:
-                return Routed(intent, greeting(now) + " Ready when you are.", score=score)
-            return Routed(intent, _pick(_PRESENCE), score=score)
+            # ONE RULE, NOT TWO. He greeted her in words ("hello", "you there?")
+            # rather than by name alone, but it is the same question and it gets
+            # the same answer, so this defers to `address_only` instead of
+            # keeping a parallel greeting policy that could drift from it.
+            #
+            # `first_contact` is subsumed: `is_return()` is true when
+            # `last_turn_at` is None, which is exactly first contact. The old
+            # `turns <= 1` test stays on the class because other code reads it,
+            # but the greeting decision no longer depends on two definitions of
+            # "have we spoken".
+            #
+            # This is also what keeps push-to-talk working unchanged: pressing
+            # the chord and saying "hello" routes to PRESENCE and lands here,
+            # with no knowledge of whether a wake phrase was involved.
+            return self.address_only(now)
 
         if intent is Intent.STOP:
             return Routed(intent, "", halts_speech=True, score=score)
+
+        if intent is Intent.SLEEP:
+            # SHE SAYS THE WAY BACK, EVERY TIME.
+            #
+            # An off switch with no stated on switch is a trap: he says "stop
+            # listening", she goes quiet, and the feature is simply gone with no
+            # discoverable route back. It cannot be a spoken phrase — if a phrase
+            # could wake her she would still be listening for it, so she would
+            # never really have stopped. The chord is always live and is the
+            # honest answer, so she names it rather than leaving him to find it.
+            return Routed(intent, _pick([
+                "Not listening, Emperor. Press the chord when you want me.",
+                "Ear closed, sir. The chord still works.",
+                "Sleeping. Use push-to-talk to bring me back, Emperor.",
+            ]), sleeps_wake=True, score=score)
 
         if intent is Intent.STATUS:
             if self._health is None:

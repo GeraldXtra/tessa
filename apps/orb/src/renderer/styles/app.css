@@ -39,9 +39,21 @@
  */
 .app,
 body {
+  /**
+   * The ladder's TOP step, for text that must stay legible in every theme.
+   *
+   * --accent is the ladder's middle step, and on black it ranges from cyan's
+   * 13.98:1 down to violet's 4.46:1. Over the approval card's opaque fill that
+   * violet figure lands at ~4.07:1, under WCAG AA's 4.5:1 for small text — so
+   * the button that authorises an irreversible action would fail on one of the
+   * five themes and pass on the other four. The core step is 7.72:1 at its
+   * worst (violet again), which clears AA everywhere while still being the
+   * theme's own hue rather than a flat white.
+   */
+  --accent-bright: var(--sphere-hot);
   /* The ambient radial behind the sphere, tinted by the accent instead of the
      fixed navy. 14% keeps it a suggestion; the stage still reads as void. */
-  --bg-ambient: color-mix(in srgb, var(--accent) 14%, var(--theme-void));
+  --bg-ambient: color-mix(in srgb, var(--accent) 20%, var(--theme-void));
   /* §6.2's gutter for model-proposed text was a fixed orange at 75% alpha —
      the accent's old value, hard-baked. Derived now, so it stays legible as
      "the accent, muted" under every theme instead of clashing with four of
@@ -404,11 +416,15 @@ ol {
      3. IT IS OBVIOUSLY THE ORB'S. The chrome band carries the wordmark in
         --accent, so it follows the theme and matches the rails around it. */
 
+/* ANCHORED TOP-RIGHT, where the column was, and NOT centred.
+   The card is opaque, so wherever it sits it occludes rather than overlays —
+   and centred it covered half the sphere, which is the one thing that must
+   stay readable when a red-tier action is waiting. It displaces the column
+   instead: ambient telemetry yields to a decision. */
 .approvals {
   position: absolute;
   top: var(--sp-4);
-  left: 50%;
-  transform: translateX(-50%);
+  right: var(--sp-5);
   /* Above the notification stack (3). A toast must never land on the buttons
      of a red-tier action. */
   z-index: 4;
@@ -427,7 +443,18 @@ ol {
   display: flex;
   flex-direction: column;
   min-height: 0;
-  background: var(--panel);
+  /* OPAQUE, and this is a contrast fix rather than a style choice.
+     §R.7 mandates backdrop-filter: blur(12px) and it is INERT on this HD 620 —
+     measured, not assumed: luminance jumps 3.56x across 2 pixels at the
+     sphere's silhouette INSIDE the card, and individual ~2px particles stay
+     resolvable where a 12px blur would smear them over ~24px. So --panel's 0.72
+     alpha was letting a sharp particle field straight through the one surface
+     that authorises irreversible actions.
+     A gradient layer over an opaque base rather than a new colour: --panel is
+     shared and tokens.json is closed, so the panel fill is composited over
+     --bg-void here instead of being redefined. The blur declaration stays for
+     the machines where it works. */
+  background: linear-gradient(var(--panel), var(--panel)), var(--bg-void);
   border: var(--hairline) solid var(--panel-border);
   /* The tier, as a solid edge. The WORD is in the badge — §R.7 forbids colour
      alone — and this is the across-the-room half of the same signal. */
@@ -448,8 +475,19 @@ ol {
 
 /* Answered, void, or expired: the whole card recedes so a live one beside it
    is unmistakably the one still asking. */
-.approval[data-live='false'] {
-  opacity: 0.62;
+/* THE RECEDE NO LONGER TOUCHES THE PAYLOAD.
+   This was `opacity: 0.62` on the whole card, and it dimmed the arguments he
+   still has to READ — a card whose link is down is un-actionable but its
+   request is still pending (Session 1's ruling 2), so the text matters as much
+   as ever. It also silently halved the contrast of the measurement that found
+   the blur problem. The chrome and the buttons recede; nothing that carries
+   information does. */
+.approval[data-live='false'] .approval__chrome {
+  opacity: 0.7;
+}
+
+.approval[data-live='false'] .approval__actions {
+  opacity: 0.55;
 }
 
 /* ── the chrome band: fixed text, no payload reaches it ── */
@@ -662,7 +700,11 @@ ol {
   padding: var(--sp-2) var(--sp-4);
   border: var(--hairline) solid var(--panel-border);
   border-radius: var(--radius-sm);
-  font-size: var(--fs-label);
+  /* --fs-sm, not --fs-label. One pixel, and it buys real contrast: at 10px
+     these glyph strokes are thin enough that antialiasing keeps every pixel
+     short of the declared colour, which cost ~20% of the measured ratio. These
+     two words decide whether something irreversible happens. */
+  font-size: var(--fs-sm);
   text-transform: var(--label-transform);
   letter-spacing: var(--label-tracking);
   transition: color var(--motion-fast) var(--motion-easing);
@@ -679,8 +721,12 @@ ol {
   color: var(--status-error);
 }
 
+/* The label takes the ladder's top step so it clears AA under every theme; the
+   BORDER keeps --accent, so the button still reads as the accent-coloured one
+   next to REJECT's neutral. Approve does not become the visual default: --text
+   is 15.9:1 and the core step is at or below that in four of five themes. */
 .approval__btn--approve {
-  color: var(--accent);
+  color: var(--accent-bright);
   border-color: var(--accent-dim);
 }
 .approval__btn--approve:hover:not(:disabled) {
@@ -725,13 +771,25 @@ ol {
   color: var(--status-error);
 }
 
-/* ── §R.2 under the sphere: one line, fading ── */
-.lastline {
+/* ── §R.2 under the sphere: HEARD and SAID, as a pair ──
+   Anchored to the SPHERE's x, not the window's, because the sphere is
+   off-centre and words that belong to it should sit under it. Lifted clear of
+   the time axis at the bottom edge. */
+.lastlines {
   position: absolute;
-  left: 50%;
-  bottom: var(--sp-6);
+  left: var(--sphere-cx, 50%);
+  bottom: 64px;
   transform: translateX(-50%);
-  max-width: 60%;
+  width: min(560px, 60%);
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+  z-index: 1;
+  pointer-events: none;
+}
+
+.lastline {
+  max-width: 100%;
   display: flex;
   align-items: baseline;
   gap: var(--sp-2);
@@ -918,12 +976,52 @@ ol {
 
 /* The ambient glow behind the sphere. CONTRACT §9.1: no card background on the
    centre stage — this is a radial on the void itself, not a panel. */
+/* §R.1's resource aura. Driven from `evt.daemon.health` by renderer/aura.ts —
+   the two custom properties below are the whole interface.
+
+   Transform and opacity ONLY: both are compositor properties, so a swell costs
+   no layout and no repaint of anything else on the stage. The defaults are the
+   flat pre-aura appearance, so a renderer that never receives a heartbeat looks
+   exactly as it did before this existed rather than showing a floor value it
+   has no data for.
+
+   The mix is 20% where it was 14%: `--aura-alpha`'s floor of 0.70 puts the
+   RESTING stage back at the old 14%, and everything above that is headroom the
+   instrument needs. Idle is unchanged; only loaded is different. */
 .stage::before {
   content: '';
   position: absolute;
   inset: 0;
-  background: radial-gradient(circle at 50% 48%, var(--bg-ambient), transparent 68%);
+  /* Centred on the SPHERE, not on the stage. The sphere is off-centre by
+     design, and an ambient glow that stays in the middle of the window is a
+     light with nothing inside it. `--sphere-cx/cy` are published by App from
+     the same arithmetic that positions the sphere, so there is one computation
+     rather than two that can drift apart.
+
+     Off-centre at full scale this clips against the frame, and that is
+     intended: a glow cut by an edge reads as deliberate, a glow floating in
+     open space reads as a mistake. */
+  background: radial-gradient(
+    circle at var(--sphere-cx, 50%) var(--sphere-cy, 48%),
+    var(--bg-ambient),
+    transparent 68%
+  );
+  transform-origin: var(--sphere-cx, 50%) var(--sphere-cy, 48%);
+  transform: scale(var(--aura-scale, 1));
+  opacity: var(--aura-alpha, 1);
+  transition:
+    transform 2400ms linear,
+    opacity 2400ms linear;
   pointer-events: none;
+}
+
+/* §R.7's motion budget, and aura.ts pins the values as well — belt and braces,
+   because a transition left live here would animate on the one write it does
+   make. */
+@media (prefers-reduced-motion: reduce) {
+  .stage::before {
+    transition: none;
+  }
 }
 
 .sphere-canvas {
@@ -1446,6 +1544,348 @@ ol {
   border-top: var(--hairline) solid var(--panel-border);
   margin-top: var(--sp-1);
   padding-top: var(--sp-1);
+}
+
+/* ═══════════════════════════════════════════ DIRECTION A — the composition ══
+   The sphere sits off-centre; the right column, the time axis and the edge
+   detailing occupy the space that opens up. Four weights, per the hierarchy
+   table this was designed against:
+
+     primary    the sphere      ~19:1 peak, large, the only thing that moves
+     secondary  live values     --text        15.86:1 at 11px, low fill
+     recessive  labels, rails   --text-muted   5.60:1 at 10px
+     ornament   edge detailing  ~2.2:1, BELOW AA on purpose, never a numeral
+*/
+
+:root {
+  --col-w: 300px;
+  /* Ornament. Below AA by construction — see EdgeDetail.tsx for why being
+     unreadable is the safety mechanism rather than a compromise. */
+  --ornament: color-mix(in srgb, var(--text-muted) 40%, var(--theme-void));
+
+  /**
+   * LABELS, and this exists because a measurement caught an error in my own
+   * hierarchy table.
+   *
+   * That table quoted `--text-muted` as 5.60:1 against black. It is not — the
+   * real figure is 3.96:1, and the labels measured 3.93-3.95:1 in all three
+   * themes sampled. Below AA's 4.5:1, at 10px, on a surface being built to
+   * read as professional.
+   *
+   * `--text-muted` is a SHARED token used across this app since Phase 1 and
+   * tokens.json is closed, so the fix is local: a derived label colour at
+   * ~6.6:1. Still plainly recessive against a 17.16:1 value — the hierarchy is
+   * intact — but legible, which 3.96 was not. Theme-independent, like the
+   * value colour it sits beside.
+   */
+  --col-label: color-mix(in srgb, var(--text) 35%, var(--theme-void));
+}
+
+/* ── the right column ────────────────────────────────────────────────────────
+   Borderless, no panel, right-aligned mono on void. §9.1 forbids a card
+   background on the centre stage and this obeys it literally: no fill, no
+   border, no radius — only text. */
+.col {
+  position: absolute;
+  top: var(--sp-5);
+  right: var(--sp-5);
+  width: var(--col-w);
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-4);
+  pointer-events: none;
+  z-index: 2;
+}
+
+.col__group {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.col__group--identity {
+  gap: 0;
+  align-items: flex-end;
+  margin-bottom: var(--sp-1);
+}
+
+/* Her name, with more presence than a 10px wordmark — and still not competing
+   with the sphere, because it is static and the sphere moves. */
+.col__mark {
+  font-size: var(--fs-lg);
+  line-height: 1;
+  letter-spacing: 0.18em;
+  color: var(--accent-bright);
+}
+
+.col__sub {
+  font-size: var(--fs-label);
+  letter-spacing: var(--label-tracking);
+  color: var(--text-muted);
+}
+
+/* RECESSIVE, not heavy. A section heading is context; the value under it is the
+   information. `font-weight: 400` is load-bearing — an <h3> defaults to bold
+   and that inverted the hierarchy in the first render. */
+.col__title {
+  margin: var(--sp-2) 0 2px;
+  font-size: var(--fs-label);
+  font-weight: 400;
+  text-transform: var(--label-transform);
+  letter-spacing: var(--label-tracking);
+  color: var(--col-label);
+  border-bottom: var(--hairline) solid var(--panel-border);
+  padding-bottom: 3px;
+}
+
+/* Label left, value right, with the gap between them doing the separating.
+   Without this the two run together as "uptime7m 23s". */
+.col__row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--sp-3);
+  min-height: 15px;
+  font-size: var(--fs-sm);
+  font-variant-numeric: tabular-nums;
+}
+
+.col__row--trace {
+  flex-wrap: wrap;
+}
+
+.col__label {
+  flex: none;
+  color: var(--col-label);
+  font-size: var(--fs-label);
+  letter-spacing: var(--label-tracking);
+  text-transform: var(--label-transform);
+}
+
+/* --text, never --accent. Violet's accent is 4.46:1 on black and would fail AA
+   at this size — the same defect measured on the approve button. */
+.col__value {
+  color: var(--text);
+  text-align: right;
+  overflow-wrap: anywhere;
+}
+
+.col__hint {
+  color: var(--text-muted);
+}
+
+/* The inline trace. The global .spark is 40px tall and full-drawer wide; this
+   is 14px and column-wide, and it must override all three of those. */
+.spark--inline {
+  flex-basis: 100%;
+  display: block;
+  width: 100%;
+  height: 14px;
+  margin: 2px 0 0;
+}
+
+/* THE GREEN, FIXED. The global rule strokes every sparkline with
+   --status-active, which is the alarm green and deliberately does not theme —
+   so a cyan Orb drew green traces. Not a hex literal, which is why the contract
+   gate correctly reported zero. Inline traces take the accent's top step, which
+   follows the theme and clears AA in all five palettes. */
+.spark--inline path {
+  stroke: var(--accent-bright);
+}
+
+.bar--inline {
+  margin: var(--sp-1) 0 0;
+  height: 3px;
+}
+
+/* ── the time axis ───────────────────────────────────────────────────────────
+   One mark per audit entry, positioned by timestamp, coloured by tier. The
+   ruler is what stops a quiet stretch reading as a broken widget. */
+.axis {
+  position: absolute;
+  left: var(--sp-5);
+  right: var(--sp-5);
+  bottom: var(--sp-4);
+  height: 34px;
+  pointer-events: none;
+  z-index: 1;
+}
+
+.axis__track {
+  position: relative;
+  height: 18px;
+  border-bottom: var(--hairline) solid var(--panel-border);
+}
+
+.axis__mark {
+  position: absolute;
+  bottom: 0;
+  width: 1px;
+  height: 9px;
+  background: var(--text-muted);
+}
+
+/* Tier colours are the status tokens and are deliberately unthemed: a red-tier
+   action is red under every palette. */
+.axis__mark[data-tier='green'] {
+  background: var(--status-active);
+}
+.axis__mark[data-tier='amber'] {
+  background: var(--status-warn);
+  height: 13px;
+}
+.axis__mark[data-tier='red'] {
+  background: var(--status-error);
+  height: 18px;
+}
+
+.axis__ruler {
+  position: relative;
+  height: 14px;
+  font-size: var(--fs-label);
+  letter-spacing: var(--label-tracking);
+  color: var(--col-label);
+  font-variant-numeric: tabular-nums;
+}
+
+.axis__tick {
+  position: absolute;
+  top: 2px;
+  transform: translateX(-50%);
+}
+
+.axis__count {
+  position: absolute;
+  right: 0;
+  top: 2px;
+  color: var(--text-muted);
+}
+
+/* ── edge detailing. Ornament: ~2.2:1, no numerals, asserts nothing. ───────── */
+.edge {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 0;
+}
+
+.edge__frame {
+  position: absolute;
+  inset: 12px;
+  border: var(--hairline) solid var(--ornament);
+}
+
+.edge__bracket {
+  position: absolute;
+  width: 14px;
+  height: 14px;
+  border: 0 solid var(--ornament);
+}
+.edge__bracket--tl {
+  top: 22px;
+  left: 22px;
+  border-top-width: 1px;
+  border-left-width: 1px;
+}
+.edge__bracket--tr {
+  top: 22px;
+  right: 22px;
+  border-top-width: 1px;
+  border-right-width: 1px;
+}
+.edge__bracket--bl {
+  bottom: 22px;
+  left: 22px;
+  border-bottom-width: 1px;
+  border-left-width: 1px;
+}
+.edge__bracket--br {
+  bottom: 22px;
+  right: 22px;
+  border-bottom-width: 1px;
+  border-right-width: 1px;
+}
+
+.edge__scale {
+  position: absolute;
+  left: 5px;
+  top: 16%;
+  bottom: 16%;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+}
+
+.edge__tick {
+  width: 3px;
+  height: 1px;
+  background: var(--ornament);
+}
+.edge__tick[data-major='true'] {
+  width: 8px;
+}
+
+.edge__reg {
+  position: absolute;
+  width: 7px;
+  height: 7px;
+  border-left: var(--hairline) solid var(--ornament);
+  border-bottom: var(--hairline) solid var(--ornament);
+}
+.edge__reg--axis {
+  left: 13px;
+  bottom: 54px;
+}
+.edge__reg--column {
+  right: 13px;
+  bottom: 54px;
+}
+
+/* ── the rails go recessive ──────────────────────────────────────────────────
+   Two rails now, and they must not sit at the same visual weight as everything
+   else — that sameness was a third of the original complaint. */
+.rail__item {
+  opacity: 0.62;
+}
+.rail__item:hover,
+.rail__item[data-active='true'] {
+  opacity: 1;
+}
+
+/* ── the drawer becomes opaque ───────────────────────────────────────────────
+   Its readability today is luck: nothing bright sits behind it only because the
+   sphere is offset right when it opens. This composition removes the luck.
+   Measured on the approval card — backdrop-filter is inert on this HD 620, so a
+   0.72-alpha panel passes a sharp particle field straight through. The blur
+   declaration stays for machines where it works. */
+.drawer {
+  background: linear-gradient(var(--panel), var(--panel)), var(--bg-void);
+}
+
+/* ── the dev overlay moves to bottom-right ───────────────────────────────────
+   Reserving space for something he never sees is the exact mistake this
+   composition corrects, so it overlays. Bottom-right puts it over ambient
+   telemetry rather than over the sphere. */
+.dev-overlay {
+  left: auto;
+  right: var(--sp-3);
+  bottom: var(--sp-3);
+}
+
+/* ── collapse ───────────────────────────────────────────────────────────────
+   App stops rendering the column below 1040 and the axis below 1100; these are
+   the geometry adjustments for what remains. */
+@media (max-width: 1039px) {
+  .axis {
+    left: var(--sp-3);
+    right: var(--sp-3);
+  }
+}
+
+@media (max-height: 620px) {
+  .axis {
+    display: none;
+  }
 }
 
 /* ──────────────────────────────────────────────────────── reduced motion ── */

@@ -1,5 +1,18 @@
 /**
- * The five rails, in the order §R.3 fixes: PULSE · SENTINEL · FLOW · INTEL · TRACE.
+ * TWO rails: SENTINEL and TRACE. §R.3 fixes five; three of them have no
+ * producer, and this is a deliberate, reversible subtraction.
+ *
+ * ─── why three left ───
+ * PULSE's contents are now permanently on screen in the right column, which was
+ * the entire point of building the column — a rail whose data is already
+ * visible has no reason to be opened. FLOW and INTEL have never had a source:
+ * there are no `evt.job.*` broadcasts in core/ and no knowledge graph, so both
+ * said NO DATA every time they were opened.
+ *
+ * Three rails saying NO DATA is a permanent statement that this app is mostly
+ * empty, which is precisely the complaint this composition answers. Re-adding
+ * one is a single line in this table plus its panel import — the panels are
+ * still on disk, unimported, waiting for producers rather than deleted.
  *
  * One table so the rail tabs, the drawer titles and the panel routing cannot
  * disagree with each other — the previous three-rail build kept those in three
@@ -9,9 +22,6 @@
 import type { ReactNode } from 'react';
 
 import type { RailId } from '../state/store.ts';
-import { FlowPanel } from './FlowPanel.tsx';
-import { IntelPanel } from './IntelPanel.tsx';
-import { PulsePanel } from './PulsePanel.tsx';
 import { SentinelPanel } from './SentinelPanel.tsx';
 import { TracePanel } from './TracePanel.tsx';
 
@@ -25,10 +35,7 @@ export interface RailDef {
 }
 
 export const RAILS: readonly RailDef[] = [
-  { id: 'pulse', label: 'Pulse', answers: 'Is my machine healthy?', render: () => <PulsePanel /> },
   { id: 'sentinel', label: 'Sentinel', answers: 'Is it safe?', render: () => <SentinelPanel /> },
-  { id: 'flow', label: 'Flow', answers: 'What is it doing for me?', render: () => <FlowPanel /> },
-  { id: 'intel', label: 'Intel', answers: 'What does it know?', render: () => <IntelPanel /> },
   { id: 'trace', label: 'Trace', answers: 'What did we say?', render: () => <TracePanel /> },
 ];
 

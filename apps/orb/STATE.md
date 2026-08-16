@@ -24,19 +24,23 @@ a HUD. It talks to the Python daemon in `core/` over one WebSocket held in the
 | **Push-to-talk** | `cmd.voice.pushToTalk { action }`. **Toggle** (default) holds the global chord `Ctrl+Alt+Shift+Space`; **hold** (`--ptt-mode=hold`) releases the chord and works focus-only, because `globalShortcut` has no key-release callback. A claim is capped at **90 s**. The indicator lights only from a daemon `res.ok`, never local intent. |
 | **Dev driver** | `--dev-drive=` with `click` · `wait` · `state` · `type` · `dump` · `key` · `respond`, all through the real handlers. `type` goes via the prototype value setter so React's `onChange` actually fires; `dump` reads an element back into the process log so a claim can be checked against a recorded value; `respond` calls the bridge directly, bypassing the card's own guard, which is the only way to test main's one-shot rule. No foreground, no synthetic input. |
 | **Probes** | `gl.readPixels` from inside the renderer: `full` / `column` / `limb` / `centre`. Five reads of a frozen sphere agree to **0.000 px**. |
+| **Resource aura (§R.1)** | `.stage::before` scale+opacity driven from `evt.daemon.health.cpuPct`, quantised at 0.05 so nothing animates at rest, flattened to zero on disconnect AND on 15 s of heartbeat silence. Clamp alpha 0.70-1.00 / scale 0.97-1.18. **Measured invisible across the 0-1.2% cpuPct the daemon shows at idle (1-3 of 255); visible at the 24% observed during daemon startup.** Dormant by design, not dead. |
+| **Depth shading (§R.1)** | A view-depth term on alpha (not tint), `uDepthFar` 0.42, `--force-depth=<0..1>` to override; 1.0 restores the pre-depth shell. Reads as volume in the first capture. Scales every state by 0.602-0.634, so it cannot reorder the six signatures, and it touches no position — turbulence, spin and breath are bit-identical. |
 | **Frame budget** | MED, 8,000 particles, focused, at `thinking`, quiet machine: **cost p50 0.10 / p95 0.20 ms · raf 16.7/17.0 · shown 33.3/33.6 · 30.0 fps**. Budget is 12 ms. |
 | **Themes** | Five (cyan · amber · violet · emerald · ember), `Ctrl+Shift+C/A/V/M/E`, persisted to `orb-theme.json`. Accent-derived values are injected with `setProperty` on `documentElement` — see the header of `renderer/theme.ts`; **tokens.json is not authoritative at runtime for those five properties**. Alarm colours (`--status-error/-warn/-active/-idle`) are deliberately excluded and do not theme. Stage background measured **`#000000`** in all five. |
-| **Approval card** | §R.2 floating card for `evt.permission.request`. Editable payload, explicit APPROVE/REJECT with no default and no timeout-approves, stacking at 3 visible, one-shot enforced in **main** (not the renderer), cleared on daemon death. Proven with `--fixture-approval`; see "unlit" below for what is NOT proven. |
+| **Approval card** | §R.2 floating card for `evt.permission.request`. Editable payload sent as CONTRACT §5.1's `editedArgs` (only the changed keys, 16 KB cap shown live), explicit APPROVE/REJECT with no default and no timeout-approves, stacking at 3 visible, one-shot enforced in **main**. Daemon refusals render on the card and a rejected edit **keeps his text**. Frame shape confirmed on the wire against a live daemon; see "unlit" for what is still unproven. |
+| **Approval lifecycle** | A pending request **survives this surface's disconnect** — cards stay, go un-actionable, and say the request is still live. It does **not** survive a daemon restart, detected by comparing the daemon instance (`pid@startedAt` from runtime.json) across handshakes, because `res.hello`'s `sessionId` is per-connection and cannot answer "same daemon?". The unchanged branch is proven against a live daemon. |
 
 ---
 
 ## Built but UNLIT — deliberately dark, not broken
 
-- **The approval card cannot complete a round trip.** `cmd.permission.respond` is in CONTRACT §5.1 and in the daemon's `KNOWN_COMMANDS` (`core/server.py:125`), but it has **no handler** — the map at `server.py:485–493` has no entry, so `_dispatch` falls to `495–501`. Observed on the wire against a live daemon: `err.internal` / *"'cmd.permission.respond' is in the contract but not yet implemented"*. Worse, `ApprovalGate` (`core/brain/approvals.py:65`) has only `request()` and `sweep()` — **no `resolve()`, and `PendingApproval` stores no continuation**, so approving would have to re-dispatch the tool by name+args. Daemon-side work, Session 1's.
-- **An EDITED payload cannot be sent at all.** §5.1 is `{ requestId, decision, remember? }` — no field carries edited args. The card therefore **fails closed**: APPROVE disables itself the moment a field changes and names the missing field on screen; REJECT stays live. A §5.1 diff is proposed and awaiting a ruling.
+- **Edit-then-approve has never executed end to end, and cannot be driven from here.** Session 1 landed the handler (`core/server.py:1069 _h_permission_respond`) and the `editedArgs` field, and the frame shape is confirmed on the wire. What is missing is a way to CREATE a pending request without speaking: the red gate fires only inside a voice turn, `cmd.agent.message` is in `KNOWN_COMMANDS` but has no handler, and the only non-voice trigger is `--inject-wav`, a daemon **startup** flag. A surface cannot restart the daemon. Until someone speaks a red-tier command with an Orb attached, the last hop is unproven.
+- **The card cannot tell him external content was in context.** `PendingApproval.external_at_request` exists (`core/brain/approvals.py:84`) and reaches the audit log, but it is **not in the `evt.permission.request` payload** (`approvals.py:213-221`). So the one §6.2 fact most relevant to authorising a red action — was a web page in the room when this was requested — is invisible on the card. Needs a §4.1 additive field.
 - **SENTINEL status colour** — mechanism complete, `currentSentinelSource()` returns `null` unconditionally (`rails/sentinel-status.ts:67`). The rail can therefore never show red today. Waits on Defender integration (P6).
 - **Notification stack** — complete. Has shown exactly one real message (a global-shortcut registration failure). Waits on `evt.notification`.
 - **Provenance gutter** — only three of six values have tokens (`prov-human`, `prov-program`, `prov-agent`). `schedule`, `external` and `system` fall back to the *program* tint, which is the untrusted side, so the fallback is safe but wrong. **`external` is the prompt-injection category and should not stay quiet** — needs a `tokens.json` addition, which is Gerald's to approve.
+- **`backdrop-filter: blur(12px)` is INERT on this machine.** §R.7 mandates it on the drawer and the approval card uses it too. Measured across the sphere's silhouette inside the card: luminance jumps **3.56x in 2 pixels** and individual ~2px particles stay resolvable. A 12px blur would smear that over ~24px. Consequence: the card is a 72%-opaque panel with a sharp particle field straight through it — its interior is **1.6x brighter** where the sphere sits behind, and the APPROVE glyphs measure **3.40:1** against their local background, under WCAG AA's 4.5:1. Raising `--panel` opacity for the approval card would fix it; it is a readability defect on a security surface and Gerald's to rule on.
 - **Waveform ribbon (§R.1)** — not built. There are **zero `evt.voice.*` broadcast sites in `core/`**, so a ribbon would be animating nothing. A §4.3 payload diff is proposed and awaiting a ruling.
 - **ACTIVE PTY GRANTS** — always `NO DATA`. `evt.pty.sessions` is broadcast at exactly one site, the end of `_h_pty_report`, so it only fires when the Console reports and never on subscribe. Daemon-side gap; the Orb's subscription is correct.
 
@@ -48,6 +52,8 @@ a HUD. It talks to the Python daemon in `core/` over one WebSocket held in the
 - **Screen-capture measurement (GDI `CopyFromScreen`)** — photographs whatever owns the foreground; once returned the owner's browser instead of the Orb. Replaced by `webContents.capturePage()`.
 - **Synthetic input (`keybd_event` / `SetCursorPos`)** — needs the foreground, which on a shared machine is a coin toss; cost more hours than any measurement here. Replaced by the dev driver.
 - **Finding the window by `MainWindowTitle`** — empty until first paint, and it once resolved to *another user's* Orb. Use ancestry from a recorded launcher PID.
+- **`--stop-beats-after` takes SECONDS.** Passing `25000` means seven hours, and the test silently proves nothing because the block never fires. Cost two runs.
+- **Comparing `blocked`-state probe sums across launches that reached it differently.** `blocked` freezes at whatever rotation it had; a run that cycled five states first is a different frozen configuration from one launched straight into it. Enter it the same way in every leg or the numbers are not comparable.
 - **Matching a keyboard shortcut on `event.code` alone.** Done twice now. `code` comes from the hardware scancode, and synthetic input — on-screen keyboards, remote desktop, accessibility tools, `keybd_event` — arrives with scancode 0 and no usable `code`. The theme shortcuts were written that way, took the foreground, and did nothing. Match `code` **then** `key`; see `themeForKey()`.
 
 ---
@@ -71,6 +77,21 @@ a HUD. It talks to the Python daemon in `core/` over one WebSocket held in the
   — against 36.1 for amber, 47.6 violet, 57.8 cyan, 66.2 emerald. The tier WORD
   (§R.7) still distinguishes them; the colour-only signals (the 3px mic rule, the
   rail's 2px marker) do not. `#FF9163` would separate to ΔE 15.8.
+
+## BASELINES INVALIDATED BY THE DEPTH TERM — read before comparing anything
+
+The depth term scales total sphere brightness to **~0.62x** its former value. So:
+
+- **Every `sum` / `lit` figure from `probeFrame` taken before 2026-08-15 evening is
+  no longer comparable.** Total brightness at `blocked` went 3,746,270 -> 2,289,506.
+- **The five theme UI captures reported the previous run show the PRE-depth sphere.**
+  Comparing one of those to a current screenshot compares two different shells.
+- **NOT invalidated: the colour-space verification.** At `vDepth = 0` the depth
+  factor is exactly 1.0, so the NEAREST particles are untouched at any setting —
+  brightest-pixel-versus-declared-token measurements still hold.
+- **NOT invalidated: the card contrast figures.** The card is opaque; what is
+  behind it cannot reach it, measured identical with the aura at rest and at max.
+- **NOT invalidated: frame timing.** Re-measured after both changes, unchanged.
 
 ## Instrumentation notes you cannot recover from the source
 

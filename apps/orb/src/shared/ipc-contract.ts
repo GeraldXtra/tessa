@@ -202,6 +202,24 @@ export interface DaemonHealth {
   /** Spend and cap in naira. CONTRACT §4.1; the cap is a hard nightly stop. */
   budgetSpent: number;
   budgetCap: number;
+  /**
+   * How many times the brain has been called this daemon run, and BY WHAT.
+   *
+   * Session 1 added both to `evt.daemon.health` explicitly for this surface
+   * (core/telemetry/health.py:120-147 — its own comment reads "PULSE shows
+   * gemini - 14 calls"). They were arriving and this interface was dropping
+   * them at the boundary, which is why nothing on screen has ever named the
+   * engine answering.
+   *
+   * `brainEngine` is the single most consequential fact available: a silent
+   * fallback from a cloud model to a local one changes accuracy, latency and
+   * spend, and until now nothing would have shown it.
+   *
+   * Optional because an older daemon does not send them, and §3.2 requires
+   * tolerating that rather than rendering a zero that looks like a measurement.
+   */
+  brainCalls?: number;
+  brainEngine?: string;
   /** Wall clock of arrival, for the staleness check. */
   receivedAt: number;
 }
@@ -448,6 +466,40 @@ export interface BootstrapInfo {
   theme: string;
   /** Why that theme. Logged, so a silent fallback to cyan cannot look chosen. */
   themeReason: string;
+  /**
+   * DEV ONLY. `--force-depth=<0..1>` — §R.1 depth shading's falloff, or null
+   * for the engine default.
+   *
+   * 1.0 disables the depth term and reproduces the shell exactly as it was
+   * before it existed, so a before/after comparison is one flag on one binary
+   * at one window size rather than two builds.
+   */
+  forcedDepth: number | null;
+  /**
+   * DEV ONLY. `--force-sphere=<rimGain>,<rimSize>,<bodyBright>,<bodySize>`.
+   *
+   * The four numbers that decide whether the shell reads as a surface or as a
+   * translucent cloud. The rim was measured against the reference's own direct
+   * capture rather than judged by eye, and a cold build takes ~100 s — this
+   * flag is what makes a twelve-point sweep affordable. `bodyBright` and
+   * `bodySize` are multipliers on the per-state values, so a sweep cannot
+   * disturb the ordering between the six states.
+   */
+  forcedSphere: {
+    gain: number;
+    size: number;
+    bodyBright: number;
+    bodySize: number;
+  } | null;
+  /**
+   * DEV ONLY. `--force-aura=<0..1>` pins the resource aura's load.
+   *
+   * The aura is driven by the daemon's own cpuPct, which idles at 0-2.8%.
+   * Making that climb means making her work, which needs a voice turn. This
+   * exists so the instrument's visible range can be rendered and measured
+   * rather than argued about.
+   */
+  forcedAura: number | 'cycle' | null;
 }
 
 /* ───────────────────────────────────────────────────── the bridge, in types */

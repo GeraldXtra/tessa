@@ -79,7 +79,7 @@ export const connectionStore = createStore<ConnectionStatus>({ phase: 'offline' 
 export const healthStore = createStore<DaemonHealth | null>(null);
 
 /**
- * The five rails, §R.3. Order is fixed and is the order they render.
+ * The rails, §R.3. Order is fixed and is the order they render.
  *
  * These replace AGENDA / JOBS / TRANSCRIPT wholesale. Those three were built
  * against an earlier reading of the dashboard and are gone — not renamed, not
@@ -87,7 +87,7 @@ export const healthStore = createStore<DaemonHealth | null>(null);
  * a different thing: provenance-gutted, per-companion, and empty until the
  * voice pipeline produces events.
  */
-export const RAIL_IDS = ['pulse', 'sentinel', 'flow', 'intel', 'trace'] as const;
+export const RAIL_IDS = ['sentinel', 'trace'] as const;
 export type RailId = (typeof RAIL_IDS)[number];
 
 /** Exactly one rail open, or none. §R.7 — one drawer at a time below 1600px. */

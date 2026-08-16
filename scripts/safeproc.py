@@ -92,6 +92,61 @@ def owns(pid: int, roots: set[int], table: dict[int, ProcInfo] | None = None) ->
     return False, trail
 
 
+#: Ancestors shared by every process on the machine. A root set containing any
+#: of these makes "does it descend from me" true for everything.
+_SHARED_ANCESTORS = {
+    "wininit.exe", "services.exe", "svchost.exe", "winlogon.exe",
+    "csrss.exe", "smss.exe", "explorer.exe", "userinit.exe",
+    "windowsterminal.exe", "openconsole.exe", "conhost.exe",
+}
+
+
+def my_roots(table: dict[int, ProcInfo] | None = None) -> set[int]:
+    """
+    Every pid in MY OWN ancestry — the only roots that are provably mine.
+
+    THIS EXISTS BECAUSE I DEFEATED THIS MODULE TWICE BY HAND. Both times I
+    called `kill_if_ours(pid, {ancestry(pid)[1].pid})` — passing the target's
+    OWN PARENT as the trusted root. That makes the ownership test a tautology:
+    every process descends from its own parent, so the check always passes and
+    the tool becomes an expensive `taskkill`.
+
+    The second time, the parent was Gerald's `powershell.exe` and the child was
+    HIS daemon. I killed it.
+
+    A root has to be derived, not supplied. `kill_if_descends_from_me` below
+    takes no roots argument at all, so there is nothing to get wrong.
+
+    THE WALK STOPS AT THE SESSION HOST, and that is not tidiness either. My
+    own ancestry runs all the way up through `svchost.exe`, `services.exe` and
+    `wininit.exe` — which are ancestors of EVERY process on the machine. Include
+    those and the test passes for anything, which is a guard in name only. The
+    walk therefore stops before the first shared ancestor, leaving only the
+    processes genuinely inside my own session.
+    """
+    import os
+
+    table = table or snapshot()
+    roots: set[int] = set()
+    for p in ancestry(os.getpid(), table):
+        if p.name.lower() in _SHARED_ANCESTORS:
+            break
+        roots.add(p.pid)
+    return roots
+
+
+def kill_if_descends_from_me(pid: int, table: dict[int, ProcInfo] | None = None) -> str:
+    """
+    Kill `pid` ONLY if it descends from this very process's ancestry.
+
+    No `roots` parameter, by design. Use this one. `kill_if_ours` stays for the
+    case where a caller genuinely recorded a root at spawn time and can say so,
+    but if you find yourself computing the root from the target, stop.
+    """
+    table = table or snapshot()
+    return kill_if_ours(pid, my_roots(table), table)
+
+
 def kill_if_ours(pid: int, roots: set[int], table: dict[int, ProcInfo] | None = None) -> str:
     """Kill only on proven ancestry. Returns what was decided and why."""
     table = table or snapshot()

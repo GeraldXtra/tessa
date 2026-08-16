@@ -196,7 +196,15 @@ _RULES: list[tuple[re.Pattern[str], str, Builder, str]] = [
     # WEB SEARCH needs an explicit web marker. Bare "search for invoice" stays
     # with `fs.search` — he is far likelier to mean his own disk, and guessing
     # wrong sends a private filename to a search engine.
-    (re.compile(r"\b(?:google|search\s+(?:the\s+)?(?:web|online|internet)\s+for|"
+    # "GOOGLE" IS ALSO HALF AN APPLICATION NAME, and that collision is live:
+    # "open Google Chrome" — the exact name on the shortcut — matched this rule
+    # and ran a WEB SEARCH for "chrome" instead of opening his browser.
+    #
+    # The lookaheads exclude the product names only. "google the weather" and
+    # "google chrome extensions for React" both still search, because the second
+    # one has more after the product name than the bare noun.
+    (re.compile(r"\b(?:google(?!\s+(?:chrome|drive|docs|meet|maps|photos|play)\b)|"
+                r"search\s+(?:the\s+)?(?:web|online|internet)\s+for|"
                 r"look\s+up|search\s+for\s+(?P<q2>.+?)\s+(?:online|on\s+the\s+web))\b\s*(?P<q>.*)$", re.I),
      "browser.search", lambda m: {"query": _clean(m["q"] or m["q2"] or "")},
      "Searching."),
@@ -287,7 +295,20 @@ _RULES: list[tuple[re.Pattern[str], str, Builder, str]] = [
     (re.compile(r"\bwi\s?-?fi\b|\bwireless\s+networks?\b", re.I),
      "sys.wifi", lambda m: {},
      "Scanning."),
-    (re.compile(r"\b(?:go\s+to\s+sleep|sleep\s+the\s+(?:machine|laptop|pc|computer)|suspend)\b", re.I),
+    # SUSPENDING THE MACHINE REQUIRES NAMING THE MACHINE.
+    #
+    # This pattern used to include a bare `go to sleep`, and that was a real
+    # collision rather than a stylistic one: "go to sleep" is the most natural
+    # way to tell HER to stop listening, and it resolved to sys.sleep — a GREEN
+    # tool, so it executed with no confirmation and suspended his laptop.
+    # He would have said four ordinary words and watched the machine go dark
+    # mid-job.
+    #
+    # Addressed to Zoey, "go to sleep" means Zoey. Suspending the computer is a
+    # different and more consequential act, so it now has to say so.
+    (re.compile(r"\b(?:sleep\s+the\s+(?:machine|laptop|pc|computer)|"
+                r"put\s+the\s+(?:machine|laptop|pc|computer)\s+to\s+sleep|"
+                r"suspend)\b", re.I),
      "sys.sleep", lambda m: {},
      "Sleeping."),
 
@@ -389,6 +410,63 @@ _RULES: list[tuple[re.Pattern[str], str, Builder, str]] = [
 ]
 
 
+#: Words that can never be the NAME of a thing on his disk.
+#:
+#: Pronouns and deictics. He says them constantly — "read me that", "open it" —
+#: and they refer to something in the conversation, never to a file called
+#: "that".
+_NOT_A_NAME = {
+    "me", "it", "that", "this", "these", "those", "them", "they", "you",
+    "us", "him", "her", "there", "here", "now", "then", "one", "thing",
+    "stuff", "something", "anything", "everything", "please", "again",
+    "yes", "no", "ok", "okay", "up", "down", "back",
+}
+
+#: (tool, argument) pairs whose value must NAME AN EXISTING THING.
+#:
+#: Deliberately NOT including `fs.search.name`, and that exclusion is the whole
+#: reason this is a list rather than a blanket rule: "find me a file called
+#: invoice" passes a SEARCH TERM, and a search term is allowed to name something
+#: that does not exist — that is what searching is.
+_MUST_NAME_A_THING = {
+    ("fs.list", "path"), ("fs.usage", "path"), ("fs.read", "path"),
+    ("fs.delete", "path"), ("fs.move", "path"), ("fs.open", "path"),
+    ("app.open_folder", "path"),
+}
+
+
+def _is_nameable(value: str) -> bool:
+    """
+    Could this string plausibly name something on his machine?
+
+    THE BUG THIS EXISTS FOR: Whisper returned "Stop List Me." for "stop
+    listening", the `list <thing>` rule matched, and `fs.list` fired with
+    `path="Me"`. She answered "That failed, sir. Me is not there." — a garbled
+    phrase turned into an action against a nonsense argument, and the error
+    message made it sound like his fault.
+
+    DELIBERATELY NARROW. The test is not "does this exist" — he is allowed to
+    ask about a folder that turns out to be missing, and the tool saying so is
+    more useful than a refusal. The test is whether every word is a PRONOUN,
+    because a path made entirely of pronouns is not a mistranscribed name, it is
+    a mistranscribed sentence.
+
+    Making it stricter would break the thing that makes her usable: the router
+    meets him halfway, and a rule that demanded every argument resolve would
+    turn "what's in my invoices folder" into a refusal instead of an answer.
+    """
+    v = " ".join(str(value or "").split()).strip(" .,?!\"'").lower()
+    if not v:
+        return False
+    # A path shape is self-evidently a name, whatever words are in it.
+    if any(ch in v for ch in ("\\", "/", ":")):
+        return True
+    words = [w for w in re.split(r"[^\w]+", v) if w]
+    if not words:
+        return False
+    return not all(w in _NOT_A_NAME for w in words)
+
+
 def match(clause: str) -> ToolCall | None:
     """First rule that fires. Returns None so the caller can fall through."""
     c = (clause or "").strip()
@@ -402,6 +480,17 @@ def match(clause: str) -> ToolCall | None:
             args = build(m)
         except (ValueError, TypeError, KeyError):
             continue
+
+        # ── THE NEAR-MISS BOUNDARY ──────────────────────────────────────────
+        #
+        # `continue`, not `return None`: a later rule may still match this
+        # clause legitimately. Falling through to UNROUTED is what produces the
+        # honest "I did not catch that" rather than an action on a nonsense
+        # argument.
+        if any((name, k) in _MUST_NAME_A_THING and not _is_nameable(v)
+               for k, v in args.items()):
+            continue
+
         from core.tools import REGISTRY
 
         spec = REGISTRY.get(name)

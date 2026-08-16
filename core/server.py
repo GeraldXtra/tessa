@@ -1270,6 +1270,10 @@ class ZoeyDaemon:
                     budget_cap=self.budget_cap,
                     brain_calls=getattr(self.brain, "calls", 0),
                     brain_engine=getattr(self.brain, "name", ""),
+                    # Incremental chain verification, on the SAME worker thread
+                    # as the rest of the sample so a file read never touches the
+                    # event loop.
+                    audit=self.audit,
                 )
             except Exception as err:  # noqa: BLE001
                 # A health sample must never kill the beat the Orb renders from.
@@ -1390,9 +1394,39 @@ async def main() -> None:
         _state = "ready" if _usable else f"UNUSABLE ({_why})"
         log(f"brain: {_mark} {_name:<10} {_state}")
 
-    runtime_file = rt.write_runtime_file(port, daemon.token)
-    log(f"runtime file: {runtime_file}")
-    log(f"listening on ws://127.0.0.1:{port}{WS_PATH}")
+    # ── WARM THE APPLICATION INDEX ───────────────────────────────────────────
+    #
+    # Fast tier inline (~45 ms: both Start Menu roots, both Desktops, App Paths,
+    # shell built-ins), slow tier on a background thread (~2-4 s: Get-StartApps
+    # for UWP packages, and resolving every shortcut target so a dead one is
+    # never offered). Cached to data/appindex.json, so a normal restart reloads
+    # 440 entries in ~16 ms and builds nothing.
+    #
+    # Started HERE rather than lazily on his first "open X" so that the one
+    # command he uses most never pays for the index.
+    try:
+        from core.brain.appindex import warm as _warm_apps
+
+        _idx = _warm_apps(background=True)
+        log(f"apps: index warming - {len(_idx.entries)} entries ready, "
+            f"UWP tier building in the background")
+    except Exception as exc:  # noqa: BLE001
+        log(f"apps: index unavailable ({exc}) - she will fall back per query")
+
+    # THE ACL GATE RUNS NOW; THE ADVERTISEMENT DOES NOT.
+    #
+    # `runtime.json` is how every surface finds this daemon, so writing it is
+    # the act of saying "I am up". It used to be written HERE — before the
+    # Whisper load below and ~17 s before `serve()` binds a socket — which meant
+    # that for the whole of that window the file advertised a port nothing was
+    # listening on. A surface that polled it got ECONNREFUSED, and anything that
+    # sampled the pid recorded a ~65 MB daemon that was about to be ~314 MB.
+    # That window IS the 5x memMB discrepancy Session 2 reported.
+    #
+    # The ACL verification stays at the front, because refusing to start on a
+    # world-readable token file must not cost a 17 s model load first.
+    rt.preflight_runtime_file()
+    log("runtime file: ACL verified; advertisement deferred until the socket is bound")
     log(f"allowed origins: {', '.join(sorted(ALLOWED_ORIGINS))}")
     if args.dev:
         # CONTRACT §2.3: "The daemon NEVER logs the token value, in any log
@@ -1419,14 +1453,24 @@ async def main() -> None:
         tts = PiperTTS()
         loop_ref = asyncio.get_running_loop()
 
-        def _emit_state(state: str) -> None:
+        def _emit_state(state: str, detail: dict | None = None) -> None:
             # Called from the worker thread; hop back to the loop to broadcast.
+            #
+            # CONTRACT §4.1 already declares `detail?`, so including it is
+            # additive and does not move PROTOCOL_VERSION. It is OMITTED rather
+            # than sent as null when there is nothing to say — §3.2 makes an
+            # absent optional field the normal case, and a surface switching on
+            # its presence should not have to distinguish "absent" from "null".
+            payload: dict[str, Any] = {
+                "companionId": DEFAULT_COMPANION_ID, "state": state,
+            }
+            if detail:
+                payload["detail"] = detail
             asyncio.run_coroutine_threadsafe(
-                daemon.broadcast("evt.agent.state",
-                                 {"companionId": DEFAULT_COMPANION_ID, "state": state}), loop_ref
+                daemon.broadcast("evt.agent.state", payload), loop_ref
             )
 
-        bus = AudioBus(on_state=lambda s: _emit_state(s.value))
+        bus = AudioBus(on_state=lambda s, d=None: _emit_state(s.value, d))
         daemon.voice = VoiceLoop(
             mic=mic, stt=stt, tts=tts,
             router=Router(health_sample=lambda: daemon.health.sample(
@@ -1434,6 +1478,10 @@ async def main() -> None:
                 budget_cap=daemon.budget_cap)),
             bus=bus, on_state=_emit_state,
             on_stage=lambda name, ms: log(f"  [turn] {ms:8.1f} ms  {name}"),
+            on_turn_timing=lambda payload: asyncio.run_coroutine_threadsafe(
+                daemon.broadcast("evt.turn.timing",
+                                 {"companionId": DEFAULT_COMPANION_ID, **payload}),
+                loop_ref),
             dump_segments=args.dump_segments,
             session=daemon.session, audit=daemon.audit, brain=daemon.brain,
             conversation=daemon.conversation,
@@ -1464,6 +1512,123 @@ async def main() -> None:
             log(f"voice: piper pre-warmed in {(time.monotonic() - _t_warm) * 1000:.0f} ms")
         except Exception as exc:  # noqa: BLE001
             log(f"voice: piper pre-warm failed ({exc}) - first reply will be slower")
+
+        # ── THE WAKE PHRASE ──────────────────────────────────────────────────
+        #
+        # OFF unless settings.yaml says otherwise, and off by default there,
+        # because the only model that exists says "hey jarvis" rather than her
+        # name. The plumbing is complete so that swapping in a Colab-trained
+        # hey_zoey.onnx is one config line and no code change.
+        _wake_cfg = (daemon.settings.get("voice", {}) or {}).get("wake", {}) or {}
+        if _wake_cfg.get("enabled"):
+            from core.voice.wake import WakeDetector, chime as _wake_chime
+
+            _model = (_wake_cfg.get("model") or "").strip()
+            if _model and not Path(_model).is_absolute():
+                _model = str(Path(__file__).resolve().parents[1] / _model)
+
+            detector = WakeDetector(
+                model_path=_model or None,
+                threshold=float(_wake_cfg.get("threshold", 0.5)),
+                refractory_s=float(_wake_cfg.get("refractory_s", 2.0)),
+                # THE COEXISTENCE RULE (item 1e), and it is one line because the
+                # daemon already owns the answer. `ptt_active` is true from the
+                # moment the chord is pressed or a wake segment opens, so the
+                # detector declines in BOTH directions: the chord pressed while
+                # it is listening, and the phrase spoken inside an open segment.
+                # One flag, one source of truth, no second state machine.
+                is_armed=lambda: daemon.ptt_active,
+            )
+            if detector.load():
+                _use_chime = bool(_wake_cfg.get("chime"))
+                _loop_w = asyncio.get_running_loop()
+
+                async def _open_wake_segment(evt) -> None:
+                    # THE CHIME GOES IN FRONT OF THE ARM, NOT BEHIND IT.
+                    # `voice.start()` barges in on the bus and then arms, so a
+                    # chime played after arming would land in `_captured` — the
+                    # only audio the VAD's `loudest` tracker reads — and raise
+                    # the relative silence threshold. Played here it lands in the
+                    # pre-roll, which the VAD never looks at. Nothing is lost
+                    # from his command either: the pre-roll reaches 1.0 s
+                    # BACKWARDS, so the phrase and everything after it is already
+                    # in the ring before this runs.
+                    if _use_chime:
+                        try:
+                            bus.speak(_wake_chime(), 16_000, blocking=True)
+                        except Exception as exc:  # noqa: BLE001
+                            log(f"  [wake] chime failed: {exc}")
+
+                    def _auto_stop(reason: str) -> None:
+                        log(f"  [turn] VAD closed the WAKE segment ({reason})")
+                        daemon.ptt_active = False
+                        asyncio.run_coroutine_threadsafe(
+                            daemon._run_voice_turn(), _loop_w)
+
+                    daemon.ptt_active = True
+                    await asyncio.to_thread(
+                        lambda: daemon.voice.start(on_auto_stop=_auto_stop))
+
+                    # AUDITED SEPARATELY FROM voice.ptt.start, AND THIS IS THE
+                    # RULING FOR ITEM 1g.
+                    #
+                    # `voice.ptt.start` means "the owner pressed a key", which is
+                    # the only thing in this system that PROVES he is present.
+                    # A wake segment proves that a phrase was heard, which anyone
+                    # in the room, a television or a recording can produce. Those
+                    # are different facts about his machine and folding them into
+                    # one audit tool name would make the log unable to answer
+                    # "did HE start this?" — the one question the log exists for.
+                    #
+                    # Provenance is `program`, not `human`, deliberately.
+                    # CONTRACT §6.2 makes `human` the only trusted source and a
+                    # wake phrase has not earned it. It becomes `human` only once
+                    # speaker verification passes on the segment.
+                    daemon.audit.append(
+                        actor="system", tool="voice.wake.fired", tier="amber",
+                        summary=(f"wake phrase '{evt.phrase}' detected "
+                                 f"(score {evt.score:.3f}) - segment opened"),
+                        detail={"phrase": evt.phrase,
+                                "score": round(evt.score, 4),
+                                "threshold": detector.threshold},
+                        provenance="program",
+                    )
+
+                def _on_wake(evt) -> None:
+                    # Runs INSIDE the audio callback. Do nothing here but hand
+                    # off — any real work in this thread stalls the stream that
+                    # push-to-talk also depends on.
+                    log(f"  [wake] '{evt.phrase}' score={evt.score:.3f} "
+                        f"decide={evt.decide_ms:.1f} ms")
+                    asyncio.run_coroutine_threadsafe(
+                        _open_wake_segment(evt), _loop_w)
+
+                detector._on_wake = _on_wake
+                mic.on_block = detector.feed
+                daemon.voice.wake = detector
+
+                log(f"voice: wake phrase ARMED - '{detector.phrase}' "
+                    f"threshold {detector.threshold} "
+                    f"chime={'on' if _use_chime else 'off'}")
+                if not _model:
+                    log("voice: WARNING - no wake model configured, using the "
+                        "'hey_jarvis' proxy. She will not answer to her name.")
+                # CONTINUOUS DETECTION IS A DIFFERENT FACT FROM AN ARMED RING.
+                # Audited once at boot, at amber, because from here every sound
+                # in the room is being evaluated rather than merely buffered.
+                daemon.audit.append(
+                    actor="system", tool="voice.wake.armed", tier="amber",
+                    summary=(f"continuous wake detection ON - phrase "
+                             f"'{detector.phrase}', every sound in the room is "
+                             f"now evaluated, not just buffered"),
+                    detail={"phrase": detector.phrase,
+                            "threshold": detector.threshold,
+                            "model": _model or "bundled hey_jarvis proxy"},
+                    provenance="system",
+                )
+            else:
+                log(f"voice: wake phrase UNAVAILABLE ({detector.load_error}) "
+                    f"- push-to-talk is unaffected")
 
         mic.open()
         daemon.audit_mic_open(pre_roll_s=1.0, device="default input")
@@ -1544,6 +1709,17 @@ async def main() -> None:
         ping_interval=20,
         ping_timeout=20,
     ):
+        # NOW the daemon exists. The socket is bound and accepting, Whisper and
+        # Piper are resident, and the brain has been selected — so a surface
+        # that reads this file and connects will succeed.
+        #
+        # This is the ONLY place runtime.json is written. Discoverable now
+        # implies connectable, which was not true when it was written before the
+        # model load.
+        runtime_file = rt.write_runtime_file(port, daemon.token)
+        log(f"runtime file: {runtime_file}")
+        log(f"listening on ws://127.0.0.1:{port}{WS_PATH}")
+
         hb = asyncio.create_task(daemon.heartbeat())
         sweeper = asyncio.create_task(daemon.sweep_grants())
         approval_sweeper = asyncio.create_task(daemon.sweep_approvals())

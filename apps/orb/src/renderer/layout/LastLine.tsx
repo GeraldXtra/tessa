@@ -35,22 +35,30 @@
  */
 
 import { excerpt } from '../rails/format.ts';
+import type { TranscriptLine } from '../../shared/ipc-contract.ts';
 import { railStore, transcriptStore, useStore } from '../state/store.ts';
 
-export function LastLine() {
-  const lines = useStore(transcriptStore);
-  const last = lines.length > 0 ? lines[lines.length - 1] : null;
-
-  if (!last) return null;
-
-  const { head, remainingWords } = excerpt(last.text);
-  const truncated = remainingWords > 0;
-
+/**
+ * ─── HEARD and SAID, as a PAIR, and this is the canonical place for them ───
+ *
+ * They were briefly in the right column as well, and the same sentence appeared
+ * twice on one screen. Under the sphere wins for two reasons: §R.2 puts the
+ * transcript here by name, and the words belong beside the thing that spoke
+ * them rather than in a telemetry stack next to the memory figure.
+ *
+ * WHY BOTH LINES AND NOT JUST HERS. His own words have never been on screen at
+ * all, and seeing the pair is the only way he learns she misheard — Whisper has
+ * turned "documents" into "Taluts" and his name into "Zoi". A wrong answer to a
+ * question she misheard is indistinguishable from a wrong answer, unless the
+ * question is visible too.
+ */
+function Line({ line, label }: { line: TranscriptLine; label: string }) {
+  const { head, remainingWords } = excerpt(line.text);
   return (
-    <p className="lastline" data-provenance={last.provenance} key={last.messageId}>
-      <span className="lastline__role">{last.role}</span>
+    <p className="lastline" data-provenance={line.provenance} key={line.messageId}>
+      <span className="lastline__role">{label}</span>
       <span className="lastline__text">{head}</span>
-      {truncated ? (
+      {remainingWords > 0 ? (
         <button
           type="button"
           className="lastline__more"
@@ -61,5 +69,25 @@ export function LastLine() {
         </button>
       ) : null}
     </p>
+  );
+}
+
+export function LastLine() {
+  const lines = useStore(transcriptStore);
+
+  // Newest of each, independently: she may answer twice, or he may speak twice
+  // before she replies, and the pair should show the latest of each side rather
+  // than the last two rows.
+  const heard = [...lines].reverse().find((l) => l.provenance === 'human') ?? null;
+  const said = [...lines].reverse().find((l) => l.provenance === 'agent') ?? null;
+
+  // Nothing said, no DOM node. Same discipline as everything else here.
+  if (!heard && !said) return null;
+
+  return (
+    <div className="lastlines">
+      {heard ? <Line line={heard} label="heard" /> : null}
+      {said ? <Line line={said} label="said" /> : null}
+    </div>
   );
 }

@@ -653,6 +653,16 @@ export class DaemonConnection {
           apiReachable: health.apiReachable === true,
           budgetSpent: num(health.budgetSpent),
           budgetCap: num(health.budgetCap),
+          // Forwarded only when present. An absent field stays absent rather
+          // than becoming 0 or "unknown": the column renders nothing for a
+          // value it does not have, and a placeholder would be a fabrication.
+          ...(typeof (health as { brainCalls?: unknown }).brainCalls === 'number'
+            ? { brainCalls: (health as unknown as { brainCalls: number }).brainCalls }
+            : {}),
+          ...(typeof (health as { brainEngine?: unknown }).brainEngine === 'string' &&
+          (health as unknown as { brainEngine: string }).brainEngine
+            ? { brainEngine: (health as unknown as { brainEngine: string }).brainEngine }
+            : {}),
           receivedAt: Date.now(),
         });
       }

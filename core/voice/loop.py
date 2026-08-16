@@ -76,9 +76,41 @@ class TurnTiming:
     """Where the wall clock actually goes. Measured, not apportioned."""
     stt_s: float = 0.0
     route_s: float = 0.0
+    #: Tool EXECUTION, split out from `tts_s`.
+    #:
+    #: It used to be inside it: `tts_s` was measured from the end of routing to
+    #: the end of synthesis, so every tool turn reported its `os.startfile` and
+    #: its Explorer spawn as TTS time. That made the one stage he actually waits
+    #: on unattributable — a 12.4 s turn looked like slow Piper when it was
+    #: Defender scanning an opened folder.
+    tool_s: float = 0.0
     tts_s: float = 0.0
     playback_start_s: float = 0.0
     audio_s: float = 0.0
+
+    def stages(self) -> list[dict]:
+        """
+        CONTRACT §7.2 additive `evt.turn.timing` — the CLOSED vocabulary.
+
+        `name` is one of stt | route | tool | tts | playback and nothing else.
+
+        THE REASON IT IS CLOSED IS NOT TIDINESS. The daemon's other stage log
+        carries prose like `transcribe.returned 'Zoey, open the LedgerWatch
+        folder...'` — it contains WHAT HE SAID. Shipping those strings on a
+        broadcast event would put his transcript into a field a surface will
+        render and may persist, on an event that has nothing to do with
+        transcripts. The prose stays in the log; the wire gets five words.
+
+        Zero-length stages are omitted rather than sent as 0, so a conversational
+        turn does not claim to have run a tool for no milliseconds.
+        """
+        out = []
+        for name, secs in (("stt", self.stt_s), ("route", self.route_s),
+                           ("tool", self.tool_s), ("tts", self.tts_s),
+                           ("playback", self.playback_start_s)):
+            if secs > 0:
+                out.append({"name": name, "ms": round(secs * 1000.0, 1)})
+        return out
 
     @property
     def total_to_first_audio_s(self) -> float:
@@ -126,11 +158,13 @@ class VoiceLoop:
         on_state: Callable[[str], None] | None = None,
         on_message: Callable[[str, str], None] | None = None,
         on_stage: Callable[[str, float], None] | None = None,
+        on_turn_timing: Callable[[dict], None] | None = None,
         dump_segments: bool = False,
         session=None,        # core.brain.provenance.SessionContext — the fence
         audit=None,          # core.security.audit.AuditLog
         brain=None,          # core.brain.llm.LLMAdapter — the fallback for questions
         conversation=None,   # core.brain.conversation.Conversation — the thread
+        wake=None,           # core.voice.wake.WakeDetector — optional, may be None
     ) -> None:
         self.mic = mic
         self.stt = stt
@@ -144,8 +178,9 @@ class VoiceLoop:
         # daemon owns one of each; a voice loop that made its own would give the
         # microphone path a second, empty injection flag and a second, unchained
         # audit file — both of which would look like they were working.
-        self.executor = Executor(on_state=lambda st: self._state(AgentState(st)),
-                                 session=session, audit=audit)
+        self.executor = Executor(
+            on_state=lambda st, detail=None: self._state(AgentState(st), detail),
+            session=session, audit=audit)
         # THE BRAIN. Injected, like the fence and the audit log, because the
         # daemon owns one and a second would be a second call counter and a
         # second set of rate-limit state.
@@ -153,16 +188,24 @@ class VoiceLoop:
         # THE THREAD. Injected like everything else the daemon owns, so a
         # second VoiceLoop cannot open a second file over the same JSON.
         self.conversation = conversation if conversation is not None else Conversation()
+        #: The wake detector, or None when the phrase is off.
+        #:
+        #: Held so "stop listening" can close the ear. Optional throughout: every
+        #: use is guarded, because push-to-talk must keep working unchanged when
+        #: there is no detector — which is the state Gerald is in until his own
+        #: model comes back from Colab.
+        self.wake = wake
         self._empty_turns = 0
         self.tool_outcomes: list = []
         self._on_stage = on_stage
+        self._on_turn_timing = on_turn_timing
         self.dump_segments = dump_segments
         self.stages: list[tuple[str, float]] = []
         self.last_segment_path: str | None = None
         #: Populated from settings.yaml by the daemon so he can tune without code.
         self.vad_config: dict = {}
 
-    def _state(self, s: AgentState) -> None:
+    def _state(self, s: AgentState, detail: dict | None = None) -> None:
         """
         ONE OWNER OF THE BROADCAST: the bus.
 
@@ -176,7 +219,7 @@ class VoiceLoop:
         everything through it means one source of truth rather than two that
         agree most of the time.
         """
-        self.bus.set_state(s)
+        self.bus.set_state(s, detail)
 
     def _ask_brain(self, question: str, t0: float) -> str:
         """
@@ -200,6 +243,21 @@ class VoiceLoop:
         which is the exact failure this whole file is fixing.
         """
         from core.brain.llm import LLMUnavailable, Message
+        from core.brain.repair import strip_wake_name
+
+        # HER NAME COMES OFF BEFORE THE MODEL SEES IT.
+        #
+        # The router already strips it via `normalise`'s filler list, and the
+        # search path strips it via `repair()`. This path did not: the model was
+        # handed "Hey Zoey, what is a closure in JavaScript?" verbatim. It copes,
+        # but it pays for the tokens and it invites her to answer as though a
+        # third party had been named — the same failure that made a web search
+        # for "Zoey, what is the weather?" return a Zoey-branded weather tweet.
+        #
+        # `strip_wake_name` is used rather than the router's `_FILLERS` because
+        # the filler list only knows the literal spelling, while this regex knows
+        # the nine renderings Whisper actually produces (zoi, zoe, joey, soy...).
+        question = strip_wake_name(question)[0] or question
 
         # THE THREAD GOES IN FRONT OF THE QUESTION. This is the whole of the
         # "yes, please" fix: without it every call was standalone and her own
@@ -531,11 +589,31 @@ class VoiceLoop:
                         f"{type(exc).__name__}: {exc}", "Say it again and I will retry."))
                     self.tool_outcomes.append((call.name, False, f"{type(exc).__name__}: {exc}"))
             routed.speech = " ".join(r for r in tool_results if r).strip()
+        # The tool boundary, so `tts_s` stops absorbing execution time.
+        t_tools = time.perf_counter()
 
         # A tool that produced no words is still a bug, but she must not go
         # silent because of it.
         if not routed.speech:
             routed.speech = "Done, Emperor."
+
+        # ── "STOP LISTENING" — LOCAL, NO MODEL CALL ──────────────────────────
+        #
+        # Handled here rather than in the tool loop because it resolves to no
+        # tool: it is a change to what the daemon is DOING, not something it
+        # does for him. She still speaks — unlike STOP, which silences her —
+        # because an off switch that goes quiet as it fires is indistinguishable
+        # from one that did not work.
+        if routed.sleeps_wake:
+            if self.wake is not None:
+                self.wake.sleep()
+                self._stage("wake.slept", t0)
+            else:
+                # He asked her to stop listening and there was nothing
+                # listening. Say the true thing rather than the reassuring one.
+                routed.speech = ("The wake phrase is already off, Emperor. "
+                                 "Push-to-talk is how I hear you.")
+                self._stage("wake.sleep requested but no detector", t0)
 
         # STOP is not an answer, it is an instruction: comply and stay silent.
         if routed.halts_speech:
@@ -562,10 +640,27 @@ class VoiceLoop:
         timing = TurnTiming(
             stt_s=t_stt - t0,
             route_s=t_route - t_stt,
-            tts_s=t_tts - t_route,
+            tool_s=t_tools - t_route,
+            tts_s=t_tts - t_tools,
             playback_start_s=t_play - t_tts,
             audio_s=cap.duration_s,
         )
+        # ── evt.turn.timing, ONCE, at turn end ───────────────────────────────
+        #
+        # `on_stage` reached `log()` and nothing else, so this data existed and
+        # was thrown away every turn. Emitted through a separate hook rather
+        # than folded into `on_stage`, because the two have different audiences:
+        # `on_stage` is prose for the log and fires many times per turn, and
+        # this is one structured frame for the wire.
+        if self._on_turn_timing is not None:
+            try:
+                self._on_turn_timing({
+                    "turnId": f"{int(t0 * 1000)}",
+                    "totalMs": round(timing.total_to_first_audio_s * 1000.0, 1),
+                    "stages": timing.stages(),
+                })
+            except Exception:  # noqa: BLE001
+                pass          # telemetry must never take a turn down
         return Turn(heard=heard, said=routed.speech, intent=routed.intent,
                     timing=timing, tools=list(self.tool_outcomes))
 

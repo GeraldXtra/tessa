@@ -297,7 +297,10 @@ _SYSTEM = [
     ),
     _spec(
         name="sys.sleep", tier="green", capability="system.control", handler=sysctl.sleep,
-        phrasings=("go to sleep", "sleep the machine", "suspend"),
+        # NOT "go to sleep" — that is how he tells HER to stop listening, and
+        # this tool is green, so the collision suspended his laptop with no
+        # confirmation. Suspending the machine names the machine.
+        phrasings=("sleep the machine", "sleep the computer", "suspend"),
         success="Sleeping, Emperor.",
         audit="sleep",
     ),

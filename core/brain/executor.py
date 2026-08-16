@@ -74,12 +74,54 @@ class Executor:
         self.approvals = ApprovalGate(on_request=on_permission_request)
         self.last_injection: dict[str, Any] | None = None
 
-    def _state(self, s: str) -> None:
-        if self._on_state is not None:
+    def _state(self, s: str, detail: dict | None = None) -> None:
+        if self._on_state is None:
+            return
+        try:
+            self._on_state(s, detail)
+        except TypeError:
             self._on_state(s)
 
+    @staticmethod
+    def state_detail(call: ToolCall) -> dict:
+        """
+        CONTRACT §4.1 `evt.agent.state.detail` — `{ tool?, target?, note? }`.
+
+        REDACTED BEFORE IT LEAVES, AND THIS IS NOT OPTIONAL.
+
+        `evt.agent.state` is broadcast to EVERY subscriber. The audit log
+        redacts secrets before write (CLAUDE.md invariant 7), and this event
+        would otherwise walk straight past that redactor: `shell.execute` args
+        carry command lines, `browser.open_url` carries URLs, and either can
+        contain a token. A surface will render this field and may persist it.
+        So the same `redact()` the audit log uses runs here, on the way out.
+
+        TRUNCATED TOO. 120 characters is enough to recognise a path and short
+        enough that a pasted blob cannot ride out inside a status event.
+
+        `target` reuses `_red_detail`'s key order — path, command, text, url,
+        name — which is the same question ("what is this action ABOUT") asked
+        for the approval card. Session 2 read that as a field copy; it is one
+        function call, because `_red_detail` only ran on the red-tier path.
+        """
+        from core.security.audit import redact
+
+        args = dict(call.args or {})
+        target = ""
+        for key in ("path", "command", "text", "url", "name", "app", "query"):
+            val = args.get(key)
+            if val:
+                target = str(val)
+                break
+
+        detail: dict[str, Any] = {"tool": call.name}
+        if target:
+            safe = redact(target[:120])
+            detail["target"] = safe if isinstance(safe, str) else str(safe)
+        return detail
+
     def run(self, call: ToolCall) -> str:
-        self._state("working")
+        self._state("working", self.state_detail(call))
         try:
             return self._dispatch(call)
         except InjectionRefusal as refusal:
@@ -599,11 +641,23 @@ class Executor:
         if name == "app.open":
             app = str(args["app"])
             himself = memory.he_opened_it_himself(app)
-            from .tools_local import index_start_menu
-            lnk = index_start_menu().get(app)
-            if lnk is None:
+            # RE-RESOLVED HERE RATHER THAN CARRIED IN THE ARGS.
+            #
+            # The router already picked this entry, and it could have passed the
+            # launch path along — but then a path would ride in a tool argument
+            # that is audited and, once evt.agent.state.detail ships, broadcast.
+            # The key is enough: `resolve` exact-matches it and dedupes, so the
+            # answer is the same one the router chose, derived in Python at the
+            # moment of execution. CLAUDE.md invariant 4 in spirit as well as
+            # letter — the model supplies a name, Python supplies the command.
+            from .appindex import get_index, launch
+            entries, _how = get_index().resolve(app)
+            if not entries:
                 return action_failed(f"I cannot find {app}", "Say the name again?")
-            open_path(lnk)
+            ok, detail = launch(entries[0])
+            if not ok:
+                return action_failed(f"{app} would not start ({detail})",
+                                     "Try it again, or name it differently.")
             memory.record(name, app)
             return action_done(he_did_it_himself=himself)
 

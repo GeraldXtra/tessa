@@ -121,3 +121,53 @@ voice:
   vad_hard_cap_s: 20
   # false = press once and it ends on silence. true = the old toggle.
   require_second_press: false
+
+  # ── wake phrase ─────────────────────────────────────────────────────────────
+  #
+  # THE SWAP IS ONE LINE. `model` is the only thing that changes when Gerald
+  # brings a Colab-trained hey_zoey.onnx back — no code, no rebuild.
+  #
+  # WHY IT SHIPS AGAINST hey_jarvis: openWakeWord has no "Hey Zoey" model and one
+  # cannot be trained here. The full set is alexa, hey_jarvis, hey_mycroft,
+  # hey_rhasspy plus two command models. Training needs the `full` extra (torch +
+  # tensorflow-cpu 2.8.1 + datasets) and GB-scale negative corpora on 2 cores
+  # with no GPU. hey_jarvis is the PROXY the plumbing was measured against;
+  # the per-frame cost is identical whatever the phrase is.
+  #
+  # MEASURED: 0.6% of this 2-core machine, p95 inference 9.31 ms against an 80 ms
+  # frame budget, and 0 of 46 frames late while a Whisper transcription
+  # saturated the box at 77%.
+  wake:
+    # OFF until his own model exists. Turning this on today makes her answer to
+    # "hey jarvis", which is not her name.
+    enabled: false
+
+    # Absolute path or repo-relative path to a .onnx. Empty = the bundled
+    # hey_jarvis proxy. Put his Colab output at data/models/wake/hey_zoey.onnx
+    # and name it here.
+    model: ""
+
+    # Confidence to fire at. 0.5 is openWakeWord's calibrated operating point.
+    #
+    # TUNE IT ASYMMETRICALLY. A false wake costs a sphere lighting up and a
+    # segment that transcribes to nothing. A missed wake costs the feature.
+    # Prefer too sensitive over too deaf.
+    threshold: 0.5
+
+    # Ignore the detector for this long after it fires. Without it one utterance
+    # fires on several consecutive frames and she arms, disarms and re-arms
+    # mid-sentence.
+    refractory_s: 2.0
+
+    # What she does on waking. Spec §4 allows 200 ms.
+    #
+    # false = the state transition alone (evt.agent.state -> listening), which
+    # the Orb already renders and which costs ~0 ms.
+    # true  = a generated 80 ms blip as well, played BEFORE arming.
+    #
+    # THE ORDERING IS LOAD-BEARING, not cosmetic. The VAD tracks `loudest` over
+    # captured audio only, never the pre-roll. A chime played BEFORE the arm
+    # lands in the pre-roll and is invisible to it; played AFTER, it would raise
+    # `loudest`, which raises the relative silence threshold, which makes her
+    # slower to notice he stopped talking.
+    chime: false

@@ -1,12 +1,26 @@
 """
 core/voice/audio_io.py — microphone capture for push-to-talk.
 
-PUSH-TO-TALK ONLY. There is no wake word and no VAD in this module, and that is
-a design decision rather than an omission: you hold a key, you release it, and
-that IS the segment boundary. A voice-activity detector exists to guess where
-speech starts and stops; a key press does not need to guess. That keeps Silero
-and its torch dependency — hundreds of megabytes on a metered connection — out
-of the sprint entirely.
+THE KEY PRESS IS STILL THE TRUSTED PATH. Everything else attaches to it.
+
+This module began as push-to-talk only, on the reasoning that a key press does
+not need to GUESS where speech starts and stops. That reasoning still holds and
+is why the chord is permanent (CAPABILITIES §A.4) — on a call, at 2am, in a loud
+room, when the wake word mishears.
+
+Two things have since attached to the same stream, and neither replaced it:
+
+  * VAD, so he presses ONCE instead of twice. It lives in `watch_for_silence`
+    below and is RMS-based, NOT Silero — Silero drags torch, hundreds of
+    megabytes on a metered connection, to decide something a hybrid
+    absolute+relative energy floor decides correctly on his measured voice.
+  * A TAP (`on_block`), so the wake detector can read this stream instead of
+    opening a second one. See `core/voice/wake.py` for why a second stream is
+    possible here and still wrong.
+
+The trust distinction between them is the important part and is stated in
+wake.py: a key press earns provenance `human` by itself, and a wake phrase does
+not, because anyone in the room can say it.
 
 16 kHz mono int16 throughout. Whisper resamples anything else to 16 kHz
 internally, so capturing at 44.1 or 48 kHz would mean paying for the samples on
@@ -177,6 +191,21 @@ class ArmedMicrophone:
     def __init__(self, pre_roll_s: float = 1.0, device: int | None = None) -> None:
         self.pre_roll_s = pre_roll_s
         self.device = device
+        #: THE TAP. One optional callable, handed every block that arrives,
+        #: armed or not.
+        #:
+        #: This exists so the wake detector does not open a SECOND input stream.
+        #: A second stream demonstrably works on this machine (measured: a third
+        #: and fourth do too, because the default host API is MME and it shares)
+        #: — but it would be a second device client with its own AGC, and the
+        #: voiceprint has to be scored through the same chain it was enrolled
+        #: through. One stream, one source of truth.
+        #:
+        #: It is called BEFORE the armed/ring split below, so a consumer sees an
+        #: unbroken stream even while a segment is open. The detector itself
+        #: declines to act during a segment; that decision belongs to it, not
+        #: here, because "should I fire" is policy and this is plumbing.
+        self.on_block: Callable[[np.ndarray], None] | None = None
         self._ring = np.zeros(int(pre_roll_s * SAMPLE_RATE), dtype=np.int16)
         self._write = 0            # next write index, wraps
         self._filled = 0           # how much of the ring is real audio
@@ -191,6 +220,17 @@ class ArmedMicrophone:
 
     def _callback(self, indata: np.ndarray, _frames: int, _t: Any, status: Any) -> None:
         block = indata.reshape(-1)
+        # THE TAP RUNS FIRST AND CANNOT TAKE THE STREAM DOWN.
+        #
+        # An exception escaping an audio callback stops the stream, and this
+        # stream is push-to-talk's too. A wake detector that throws must cost
+        # the wake word and nothing else — he has a key press that has never
+        # failed him and it must not become collateral.
+        if self.on_block is not None:
+            try:
+                self.on_block(block)
+            except Exception:  # noqa: BLE001
+                pass
         if self._captured is not None:
             if self._first_after_arm is None:
                 self._first_after_arm = time.perf_counter()

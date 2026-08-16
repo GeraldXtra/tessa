@@ -152,7 +152,13 @@ function Card({
   // socket behind it must not offer a button that silently does nothing —
   // Session 1's ruling 2 means the request is still alive, so the honest
   // rendering is "still pending, cannot answer from here yet".
-  const live = isActionable(entry) && linkUp && !oversize;
+  //
+  // A FIXTURE is exempt, because a fixture decision never goes on the wire:
+  // main resolves it locally and refuses to forward it. Gating it on the link
+  // made every fixture card un-actionable whenever no daemon was running, which
+  // is both untrue and the state most verification runs are in.
+  const needsLink = !request.fixture;
+  const live = isActionable(entry) && (linkUp || !needsLink) && !oversize;
   const names = Object.keys(request.args);
 
   return (
@@ -246,7 +252,7 @@ function Card({
 
       {/* Link down, request alive. The distinction Session 1's ruling 2 makes,
           said in words: this did not go away, you just cannot answer it yet. */}
-      {!linkUp && !entry.invalidated && !entry.sent ? (
+      {!linkUp && needsLink && !entry.invalidated && !entry.sent ? (
         <p className="approval__waiting">
           No connection to the daemon. This request is still pending on its side — it survives
           this window closing — but it cannot be answered from here until the link returns.
