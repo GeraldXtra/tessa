@@ -110,10 +110,27 @@ pty:
 # segment when he stops, so he presses ONCE. A second press still ends it
 # immediately - the manual override outranks the automatic one.
 voice:
-  # End the segment after this much quiet. 1200 ms clears a mid-sentence
-  # hesitation ("open the... downloads folder", ~600-900 ms) with margin.
-  # Shorter truncates him mid-thought, which is worse than pressing twice.
-  vad_silence_ms: 1200
+  # End the segment after this much quiet.
+  #
+  # RAISED FROM 1200 BECAUSE IT WAS CUTTING HIM OFF. His words: "when giving her
+  # instructions it seems she has a few seconds then stops listening."
+  #
+  # MEASURED, on his own recorded segments, replaying the live decision block by
+  # block. seg-160002 — a real turn where he paused mid-instruction — closed
+  # early at 1200 ms and survives to the end at 2500 ms. The room clip
+  # (seg-154456: 2.5 s of speech then 17 s of empty room) still closes promptly
+  # at 6.70 s, so patience did not become permanence.
+  #
+  # I TESTED THE OTHER TWO CANDIDATES AND REJECTED BOTH:
+  #   * lowering `vad_floor_rms` changes nothing — for his normal speaking voice
+  #     the RELATIVE term sets the bar (397-573 RMS), so floor=60 and floor=300
+  #     cut off exactly the same clips;
+  #   * decaying `loudest` over a trailing window made seg-160002 WORSE, closing
+  #     it at 11.75 s where the all-time maximum let it run.
+  #
+  # THE COST is that she starts ~1.3 s later after he finishes. He was explicit:
+  # he would far rather wait a second than be cut off.
+  vad_silence_ms: 2500
   # RMS above which a block counts as speech. Measured ambient here is ~74
   # (-33.8 dBFS); his speech measured 2966. 300 is 4x the floor.
   vad_floor_rms: 300
@@ -121,6 +138,34 @@ voice:
   vad_hard_cap_s: 20
   # false = press once and it ends on silence. true = the old toggle.
   require_second_press: false
+
+  # ── the conversation session ────────────────────────────────────────────────
+  #
+  # HIS WORDS: "After doing the task, she should be up for listening for the
+  # next task. I don't want to be toggling to talk all the time." And: "No
+  # session closing on silence. I will be the one to tell her the task is done."
+  #
+  # So a session opens on the wake phrase OR the chord, survives any number of
+  # turns, and closes only when he says so. There is deliberately NO idle
+  # timeout here to configure, because he ruled one out.
+  session:
+    # false = every utterance needs its own trigger (the old behaviour).
+    # true  = one wake, then a conversation until he closes it.
+    enabled: true
+
+    # Refuse to open a session when speaker verification is unavailable or he
+    # has no voiceprint.
+    #
+    # FALSE BY DEFAULT, AND THE REASON IS HIS SITUATION RATHER THAN LAXITY.
+    # He is alone in his flat. Refusing to listen because a model failed would
+    # take his assistant away over an infrastructure fault, mid-task, with no
+    # way for him to talk his way out of it. The audit records that a session
+    # ran unverified, so the fact is not hidden.
+    #
+    # SET THIS TRUE IF HE EVER USES IT IN A SHARED SPACE. There the trade
+    # reverses: an unverified open microphone in a room of people is worse than
+    # an assistant that says it cannot listen right now.
+    require_verification: false
 
   # ── wake phrase ─────────────────────────────────────────────────────────────
   #

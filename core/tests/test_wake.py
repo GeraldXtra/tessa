@@ -52,12 +52,33 @@ print("wake phrase, voiceprint and the off switch")
 print("\nthe off switch, and the collision it used to have")
 r = Router()
 
+# THE RULING CHANGED, AND THESE ASSERTIONS CHANGED WITH IT — deliberately, not
+# to make a red test go green.
+#
+# Previously "stop listening" DISABLED the wake detector, so the chord was the
+# only way back. He has since been explicit: "she says something and goes quiet,
+# and waits till I call her again." Waiting to be called again requires the wake
+# phrase to stay armed, so these phrases now close the CONVERSATION and leave
+# the ear open. Only an explicit "completely" / "for good" turns the phrase off,
+# and that case is asserted separately below.
 for utt in ("go to sleep", "go to sleep now", "stop listening", "sleep now",
             "stop the wake word", "zoey go to sleep", "stop listening to me"):
     out = r.route(utt)
     check(f"{utt!r} -> SLEEP, no tool",
-          out.intent is Intent.SLEEP and out.sleeps_wake and not out.calls,
+          out.intent is Intent.SLEEP and not out.calls,
           f"intent={out.intent.value} calls={[c.name for c in out.calls]}")
+    check(f"...{utt!r} closes the conversation", out.ends_session)
+    check(f"...{utt!r} leaves the wake phrase ARMED", not out.sleeps_wake)
+
+for utt in ("stop listening completely", "stop listening for good",
+            "turn the wake word off"):
+    out = r.route(utt)
+    check(f"{utt!r} really does turn the phrase off",
+          out.sleeps_wake and out.ends_session,
+          f"ends={out.ends_session} wake_off={out.sleeps_wake}")
+    check(f"...and {utt!r} names the chord, the only way back",
+          "chord" in out.speech.lower() or "push-to-talk" in out.speech.lower(),
+          out.speech)
 
 for utt in ("sleep the machine", "sleep the computer", "suspend",
             "put the computer to sleep"):
@@ -71,8 +92,8 @@ stop = r.route("stop")
 check("'stop' still halts speech and does NOT close the ear",
       stop.halts_speech and not stop.sleeps_wake)
 sleep = r.route("stop listening")
-check("'stop listening' closes the ear and does NOT silence her",
-      sleep.sleeps_wake and not sleep.halts_speech)
+check("'stop listening' ends the conversation and does NOT silence her",
+      sleep.ends_session and not sleep.halts_speech)
 # EVERY phrasing must name the way back, not just the one that happens to be
 # picked. `_pick` is random, so asserting on one sample would pass or fail by
 # luck — and an off switch whose "how do I turn it on again" line only appears
@@ -82,8 +103,25 @@ from core.brain.router import Intent as _I, Router as _R  # noqa: E402
 _seen = set()
 for _ in range(60):
     _seen.add(_R().route("stop listening").speech)
-check("she offers the way back in EVERY sleep phrasing, not just some",
-      all(("chord" in s.lower() or "push-to-talk" in s.lower()) for s in _seen),
+
+
+def _names_a_way_back(line: str) -> bool:
+    """
+    EVERY closing line must tell him how to get her back.
+
+    Which route it names depends on which stop it was. A session close leaves
+    the wake phrase armed, so it names HER NAME ("call me", "say the word"); a
+    full stop turns the phrase off, so the chord is the only honest answer.
+    A line that names neither leaves him with a silent machine and no route.
+    """
+    low = line.lower()
+    return any(w in low for w in ("chord", "push-to-talk", "call me",
+                                  "say my name", "say the word",
+                                  "when you call", "i am back"))
+
+
+check("she offers a way back in EVERY sleep phrasing, not just some",
+      all(_names_a_way_back(s) for s in _seen),
       f"{len(_seen)} phrasings: {sorted(_seen)}")
 
 # ── the detector's suppression rules ─────────────────────────────────────────

@@ -501,6 +501,28 @@ class Executor:
         if self.session is not None:
             self.session.check_tool(spec.name, spec.tier)
 
+        # 1b. THE VOICEPRINT GATE — a BORDERLINE voice may open a folder and may
+        #     not approve a tweet.
+        #
+        #     `voice_verdict` is set by the voice loop when a segment was scored
+        #     and PASSED. A verdict that could not be formed at all (unenrolled,
+        #     no model, too short) is never set here, so this gate is silent in
+        #     exactly the fail-open cases and active only when there is a real
+        #     number to act on.
+        #
+        #     Green is untouched: the whole design errs toward accepting HIM,
+        #     and everything that could actually hurt him is red and needs the
+        #     approval card regardless of who spoke.
+        verdict = getattr(self, "voice_verdict", None)
+        if verdict is not None and spec.tier in ("amber", "red"):
+            confident = getattr(self, "voice_confident", 0.62)
+            if not verdict.allows(spec.tier, confident):
+                self._log("REFUSED-VOICEPRINT", spec.name,
+                          f"score {verdict.score:.3f} below the confident "
+                          f"threshold for {spec.tier}", spec.tier)
+                return (f"I am not certain enough that is you, Emperor. "
+                        f"Use the card for that one.")
+
         # 2. THE RED GATE. A red tool NEVER executes from a voice turn, however
         #    many times he says yes. It raises a permission request and stops.
         #    See core/brain/approvals.py for why voice is not an approval

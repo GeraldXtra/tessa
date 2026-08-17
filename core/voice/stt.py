@@ -169,6 +169,34 @@ SILENCE_RMS_FLOOR = 150.0
 #: nothing. 0.02 of full scale is ~655 in int16 — well above the ~74 RMS room.
 SILENCE_PEAK_FLOOR = 0.02
 
+#: Beyond this many seconds, the peak escape hatch above no longer applies.
+#:
+#: 8 s is comfortably longer than any command he actually gives — his real
+#: recorded segments run 3.6-6.2 s, and the one 22 s segment was 2.5 s of speech
+#: followed by seventeen seconds of empty room. So a segment this long whose
+#: OVERALL level is still below the room floor is the room, not him.
+LONG_SEGMENT_S = 8.0
+
+
+def is_probably_silence(audio: np.ndarray, sample_rate: int = 16_000) -> bool:
+    """
+    The same cheap gate `transcribe` applies, callable WITHOUT loading a model.
+
+    Exposed so the voice loop can reject a dead segment before paying for
+    anything at all — neither transcription nor a speaker embedding. In an open
+    conversation session most segments are the empty room hitting the 20 s hard
+    cap, and each one of those must cost microseconds rather than seconds.
+    """
+    if audio.size == 0:
+        return True
+    a = audio.astype(np.float64)
+    if np.issubdtype(audio.dtype, np.integer):
+        a = a / 32768.0
+    rms = float(np.sqrt(np.mean((a * 32768.0) ** 2)))
+    peak = float(np.max(np.abs(a)))
+    long_segment = (len(a) / sample_rate) >= LONG_SEGMENT_S
+    return rms < SILENCE_RMS_FLOOR and (peak < SILENCE_PEAK_FLOOR or long_segment)
+
 #: Peak-normalise quiet captures to this before transcription. 0.35 rather than
 #: 1.0 leaves headroom so a louder syllable later in the utterance does not clip.
 NORMALISE_TARGET_PEAK = 0.35
@@ -235,7 +263,21 @@ class WhisperSTT:
         rms = float(np.sqrt(np.mean((audio.astype(np.float64) * 32768.0) ** 2))) if audio.size else 0.0
         peak = float(np.max(np.abs(audio))) if audio.size else 0.0
 
-        if rms < SILENCE_RMS_FLOOR and peak < SILENCE_PEAK_FLOOR:
+        # A LONE TRANSIENT IN A LONG SEGMENT IS NOT SPEECH.
+        #
+        # MEASURED ON A LIVE DAEMON with a conversation session open and nobody
+        # in the room: a 15.59 s segment at rms=45 with peak=949 passed this
+        # gate, because the peak escape hatch below only requires ONE sample
+        # above 655 — a keyboard click, a door, a chair. Whisper then spent
+        # 33,513 ms transcribing room tone and returned an empty string. That
+        # blocked the event loop long enough to time out the Orb's WebSocket
+        # keepalive, and an idle session would have repeated it every cycle.
+        #
+        # The peak escape exists for a QUIET OR AGC-FLATTENED COMMAND, and such
+        # a command is short. Over a long segment a single transient is evidence
+        # of a noise, not of speech, so the escape does not apply there.
+        long_segment = (len(audio) / sample_rate) >= LONG_SEGMENT_S
+        if rms < SILENCE_RMS_FLOOR and (peak < SILENCE_PEAK_FLOOR or long_segment):
             return Transcript(
                 text="", language="en", language_probability=0.0,
                 audio_s=len(audio) / sample_rate, wall_s=0.0,

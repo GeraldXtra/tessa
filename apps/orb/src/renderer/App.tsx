@@ -838,10 +838,16 @@ export function App() {
   const offsetYPx = -2 * (targetCy - STATUS_H - canvasH / 2);
 
   /**
-   * Published to CSS so the aura and the contact ellipse track the sphere
-   * without a second copy of this arithmetic. The aura is a radial centred on
-   * the sphere; if the sphere moves and the glow does not, it becomes a light
-   * with nothing in it.
+   * Published to CSS so the aura, the floor and the wordmark track the sphere
+   * without a second copy of this arithmetic.
+   *
+   * (This used to say "the contact ellipse". That is gone — deleted, not
+   * dimmed — and the floor replaced it. One ground under the sphere, not two.)
+   *
+   * The aura is a radial centred on the sphere; if the sphere moves and the
+   * glow does not, it becomes a light with nothing in it. The floor is anchored
+   * to `--sphere-cy + --sphere-r`, so a refit moves the horizon with the object
+   * standing on it rather than leaving a stripe behind.
    */
   const stageVars = {
     '--sphere-cx': `${(targetCx - railW).toFixed(1)}px`,

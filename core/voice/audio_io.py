@@ -270,6 +270,31 @@ class ArmedMicrophone:
             self._stream.close()
             self._stream = None
 
+    def flush_ring(self) -> int:
+        """
+        Throw away the pre-roll. Returns how many samples were discarded.
+
+        REQUIRED BEFORE RE-ARMING IN A CONVERSATION SESSION, and the reason is
+        not tidiness. The ring is filled continuously whenever a segment is not
+        being captured — including the whole time SHE is speaking. Her audio
+        leaves the speaker, the microphone hears it, and it lands in the ring.
+
+        Re-arming without flushing would prepend HER OWN LAST SECOND OF SPEECH
+        to his next segment. Whisper would transcribe her closing words as his
+        opening ones, the router would act on them, and in the worst case she
+        would answer herself. There is no acoustic echo cancellation here, so
+        the ring is cleared rather than filtered.
+
+        Push-to-talk does NOT flush: there the pre-roll is the whole point — it
+        recovers the ~135 ms of first syllable lost to driver latency, and he
+        pressed the key deliberately so nothing of hers is in flight.
+        """
+        n = int(self._filled)
+        self._ring[:] = 0
+        self._write = 0
+        self._filled = 0
+        return n
+
     def _snapshot_ring(self) -> np.ndarray:
         """The ring in chronological order — this is the pre-roll."""
         size = len(self._ring)
@@ -284,7 +309,7 @@ class ArmedMicrophone:
         self,
         *,
         on_close: Callable[[str], None],
-        silence_ms: int = 1200,
+        silence_ms: int = 2500,
         floor_rms: float = 150.0,
         relative_ratio: float = 0.08,
         hard_cap_s: float = 20.0,
@@ -303,12 +328,23 @@ class ArmedMicrophone:
         A blocking call could not be wired without stalling the socket handler,
         which is why it never got connected. A watcher thread can.
 
-        SILENCE WINDOW = 1200 ms, and the number is not arbitrary. Natural
-        between-clause pauses in connected speech run 200-500 ms, and a
-        mid-sentence hesitation ("open the... downloads folder") sits around
-        600-900 ms. 1200 ms clears the longest of those with margin. Shorter and
-        it truncates him mid-thought, which is a worse failure than pressing
-        twice — he loses the second half of a sentence and does not know why.
+        SILENCE WINDOW = 2500 ms, RAISED FROM 1200 BECAUSE 1200 CUT HIM OFF.
+
+        Natural between-clause pauses run 200-500 ms and a mid-sentence
+        hesitation sits around 600-900 ms, which is what 1200 was sized for. But
+        a DELIBERATE pause — him thinking about what to ask for next, mid
+        instruction — runs longer than that, and his complaint was exactly this:
+        "it seems she has a few seconds then stops listening."
+
+        Replayed block by block over his own recordings, seg-160002 closed early
+        at 1200 ms and survives at 2500 ms, while the 22 s room recording still
+        closes at 6.70 s. Truncating him is a worse failure than making him wait,
+        because he loses the second half of a sentence and cannot tell why.
+
+        NOT the floor, and this was measured rather than assumed. For his normal
+        speaking voice the RELATIVE term sets the bar at 397-573 RMS, so the
+        absolute floor is not what decides — lowering it to 60 cuts off exactly
+        the same clips as 300.
 
         FLOOR is hybrid: `max(floor_rms, loudest_so_far * relative_ratio)`.
         Silence is "much quieter than what I just heard", so the segment still

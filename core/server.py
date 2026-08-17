@@ -265,6 +265,27 @@ class ZoeyDaemon:
         self.mic_stream_open = False
         self.mic_opened_at: float | None = None
 
+        # A THIRD FACT, and it is not either of the two above.
+        #
+        #   mic_stream_open — the microphone is LIVE
+        #   ptt_active      — a segment is being CAPTURED right now
+        #   session.open    — he is in a CONVERSATION: when this segment ends,
+        #                     the next one opens by itself
+        #
+        # The session is what makes "I don't want to be toggling to talk all the
+        # time" true. It is process state and cannot survive a restart — see
+        # core/voice/session.py.
+        # NAMED `convo`, NOT `session`, AND THAT IS NOT COSMETIC.
+        # `self.session` is already the injection fence (SessionContext, line
+        # ~212). Assigning a ConversationSession over it silently replaced the
+        # security control that stops a web page reaching a red-tier tool — the
+        # fence would have been an object with no `check_tool` on it. Caught
+        # before it ran, but it is exactly the kind of collision that survives
+        # review, so the name states which session it is.
+        from core.voice.session import ConversationSession
+
+        self.convo = ConversationSession()
+
         # The voice loop. None until --voice is passed: loading Whisper costs
         # seconds and ~250 MB, and a daemon started for the Console should not
         # pay for a microphone nobody is going to press.
@@ -809,6 +830,21 @@ class ZoeyDaemon:
             await self.broadcast("evt.agent.state", {"companionId": DEFAULT_COMPANION_ID, "state": "idle"})
             return
 
+        # An empty segment in an open session is the room being quiet, not a
+        # turn. Counting it would make a session that sat idle overnight report
+        # hundreds of "turns" in its closing audit line.
+        if turn.heard or turn.said:
+            self.convo.note_turn()
+        # ── HE SAID HE IS DONE ───────────────────────────────────────────────
+        #
+        # Closed BEFORE the transcript is broadcast, so the `idle` that follows
+        # her closing line cannot re-arm behind it. The ordering matters: with
+        # the session still open, the re-arm hook would fire on that drain and
+        # she would go quiet and then immediately start listening again, which
+        # is the opposite of what he asked for and would look like a bug.
+        if turn.ends_session:
+            self.close_session("he said so")
+
         # `evt.transcript.message` — the WHOLE-TURN path, not `.delta`.
         # Delta is for token-by-token streaming from a model; these answers are
         # produced complete by a local handler, so emitting a single message is
@@ -867,6 +903,108 @@ class ZoeyDaemon:
         # started and will emit `idle` from `finished_callback` when the audio
         # actually drains. Re-emitting here duplicated the first and pre-empted
         # the second with a state that was not yet true.
+
+    async def rearm_for_session(self) -> None:
+        """
+        Open the next segment without a keypress. The whole point of a session.
+
+        Guarded rather than trusted: `_emit_state` fires on every transition and
+        `idle` can arrive more than once per turn (an empty turn, a STOP, the
+        drain after speaking). Re-arming twice would arm a microphone that is
+        already armed and lose the pre-roll, so this checks the flags again on
+        the event loop where they cannot race.
+        """
+        if not self.convo.open or self.ptt_active or self.voice is None:
+            return
+        loop_now = asyncio.get_running_loop()
+
+        def _auto_stop(reason: str) -> None:
+            log(f"  [turn] VAD closed the segment ({reason}) [session turn "
+                f"{self.convo.turns + 1}]")
+            self.ptt_active = False
+            asyncio.run_coroutine_threadsafe(self._run_voice_turn(), loop_now)
+
+        # FLUSH BEFORE ARMING. The ring has been filling the whole time she was
+        # speaking and now holds her own voice. Without this the pre-roll
+        # prepends her closing words to his next segment and she transcribes
+        # herself. See ArmedMicrophone.flush_ring.
+        dropped = await asyncio.to_thread(self.voice.mic.flush_ring)
+
+        self.ptt_active = True
+        await asyncio.to_thread(lambda: self.voice.start(on_auto_stop=_auto_stop))
+        log(f"  [session] listening again — {self.convo.describe()} "
+            f"(flushed {dropped / 16000:.2f}s of her own audio from the ring)")
+
+    def close_session(self, reason: str) -> None:
+        """
+        End the conversation and audit it.
+
+        BOTH ENDS ARE LOGGED. A session that ran four hours is a real fact about
+        his machine — `voice.stream.open` is red tier for the same reason — and
+        an open event with no close event would leave the log unable to answer
+        "how long was the microphone listening", which is the only question that
+        matters here.
+        """
+        if not self.convo.open:
+            return
+        detail = self.convo.end()
+        detail["reason"] = reason
+        self.ptt_active = False
+        if self.voice is not None:
+            self.voice.session_open = False
+            # ITEM 3h: re-opening after a close must GREET, not acknowledge.
+            # The close is him telling her he is going away, which is better
+            # evidence than the 20-minute silence the return gap infers from.
+            router = getattr(self.voice, "router", None)
+            if router is not None and hasattr(router, "mark_conversation_closed"):
+                router.mark_conversation_closed()
+        self.audit.append(
+            actor="human", tool="voice.session.end", tier="amber",
+            summary=(f"conversation session closed after "
+                     f"{detail['durationS']:.0f}s and {detail['turns']} turn(s) "
+                     f"({reason})"),
+            detail=detail, provenance="human",
+        )
+        log(f"  [session] CLOSED after {detail['durationS']:.0f}s, "
+            f"{detail['turns']} turn(s) ({reason})")
+
+    def open_session(self, by: str) -> None:
+        """
+        Start a conversation, once. Re-entering an open one is a no-op.
+
+        ITEM 3c: him saying the wake phrase while a session is already open
+        lands here and does nothing — no second session, no error. The greeting
+        is separately suppressed by the router's return-gap rule, so he gets an
+        acknowledgement rather than "Good evening" for the fourth time.
+        """
+        cfg = (self.settings.get("voice", {}) or {}).get("session", {}) or {}
+        if not cfg.get("enabled", True):
+            return
+        # THE STRICT MODE, off by default. See settings.yaml for why.
+        if cfg.get("require_verification"):
+            sp = getattr(self.voice, "speaker", None) if self.voice else None
+            if sp is None or not getattr(sp, "enrolled", False):
+                log("  [session] refused — require_verification is on and there "
+                    "is no usable voiceprint")
+                self.audit.append(
+                    actor="system", tool="voice.session.refused", tier="amber",
+                    summary=("conversation session refused: verification "
+                             "required but unavailable"),
+                    detail={"openedBy": by}, provenance="system",
+                )
+                return
+        if not self.convo.start(by):
+            return
+        if self.voice is not None:
+            self.voice.session_open = True
+        self.audit.append(
+            actor="human", tool="voice.session.start", tier="amber",
+            summary=(f"conversation session opened by {by} — the microphone "
+                     f"will re-arm after every turn until he closes it"),
+            detail={"openedBy": by}, provenance="human",
+        )
+        log(f"  [session] OPEN (by {by}) — she will keep listening until you "
+            f"say you are done")
 
     # ── microphone lifecycle (spec §7, CONTRACT §5.3) ────────────────────────
 
@@ -1021,6 +1159,11 @@ class ZoeyDaemon:
         was = self.ptt_active
         if action == "start":
             self.ptt_active = True
+            # ITEM 2f: A SESSION STARTED BY KEYPRESS IS THE SAME SESSION.
+            # One object, one lifecycle, one set of audit events — the entry
+            # path is recorded in `openedBy` and changes nothing else. The
+            # alternative, two kinds of session, is how two code paths drift.
+            self.open_session("chord")
             if self.voice is not None:
                 # NO explicit state broadcast here. `voice.start()` sets it on
                 # the bus, and the bus is the single owner of the broadcast —
@@ -1446,6 +1589,30 @@ async def main() -> None:
         from core.voice.stt import WhisperSTT
         from core.voice.tts.piper_tts import PiperTTS
 
+        # ── THE VOICEPRINT ───────────────────────────────────────────────────
+        #
+        # Constructed BEFORE Whisper so the boot log says plainly whether she is
+        # verifying or not. An open session listens with no keypress, and the
+        # only thing standing between that and "a microphone open to the room"
+        # is this — so its state is announced rather than assumed.
+        _speaker = None
+        try:
+            from core.voice.speaker import SpeakerVerifier
+
+            _sv = SpeakerVerifier()
+            if _sv.load():
+                _speaker = _sv
+                log(f"voice: {_sv.describe()}")
+                if not _sv.enrolled:
+                    log("voice: NO VOICEPRINT — every voice is accepted. Run "
+                        "`python -m core.voice.speaker --enrol` before using "
+                        "a conversation session in a room with other people.")
+            else:
+                log(f"voice: speaker verification UNAVAILABLE ({_sv.load_error}) "
+                    f"- every voice will be accepted")
+        except Exception as exc:  # noqa: BLE001
+            log(f"voice: speaker verification unavailable ({exc})")
+
         log(f"voice: loading whisper '{args.stt_model}' int8 ...")
         t_v = time.monotonic()
         mic = ArmedMicrophone(pre_roll_s=1.0)
@@ -1464,11 +1631,43 @@ async def main() -> None:
             payload: dict[str, Any] = {
                 "companionId": DEFAULT_COMPANION_ID, "state": state,
             }
-            if detail:
-                payload["detail"] = detail
+
+            # ── "IN A CONVERSATION" IS NOT AN AgentState ─────────────────────
+            #
+            # ITEM 6's answer. `AgentState` is a CLOSED enum (CONTRACT §7.4), so
+            # adding `conversing` would be a BREAKING change: a version bump and
+            # both surfaces shipping together, for something that is not a state
+            # at all. She is `listening`, `thinking`, `speaking` or `working`
+            # DURING a conversation — the session is orthogonal to all four and
+            # persists across every one of them.
+            #
+            # So it rides in `detail`, which §4.1 already declares, which makes
+            # it additive with no version bump. It is attached to EVERY state
+            # event rather than only to transitions that happen to carry a tool,
+            # because an indicator that only updates sometimes will drift — and
+            # this one has to stay accurate for hours.
+            det = dict(detail or {})
+            det["session"] = {
+                "open": daemon.convo.open,
+                "turns": daemon.convo.turns,
+                "openedBy": daemon.convo.opened_by,
+            }
+            payload["detail"] = det
             asyncio.run_coroutine_threadsafe(
                 daemon.broadcast("evt.agent.state", payload), loop_ref
             )
+
+            # ── THE RE-ARM, AND `idle` IS THE ONLY SAFE MOMENT ──────────────
+            #
+            # `idle` is emitted by AudioBus from the output stream's
+            # `finished_callback` — the instant her audio actually DRAINS. Any
+            # earlier and the segment is open while she is still talking: Piper
+            # leaves the speaker, the microphone picks it up, Whisper
+            # transcribes it, and she answers herself in a loop. There is no
+            # acoustic echo cancellation here, which is exactly why this waits.
+            if (state == "idle" and daemon.convo.open
+                    and not daemon.ptt_active and daemon.voice is not None):
+                asyncio.run_coroutine_threadsafe(daemon.rearm_for_session(), loop_ref)
 
         bus = AudioBus(on_state=lambda s, d=None: _emit_state(s.value, d))
         daemon.voice = VoiceLoop(
@@ -1484,7 +1683,7 @@ async def main() -> None:
                 loop_ref),
             dump_segments=args.dump_segments,
             session=daemon.session, audit=daemon.audit, brain=daemon.brain,
-            conversation=daemon.conversation,
+            conversation=daemon.conversation, speaker=_speaker,
         )
         # CONTRACT §4.1 `evt.permission.request`. The red gate raises these and
         # nothing can answer them yet — the approval card is P5 and Session 2's.
@@ -1566,6 +1765,8 @@ async def main() -> None:
                             daemon._run_voice_turn(), _loop_w)
 
                     daemon.ptt_active = True
+                    # The wake phrase opens a conversation, not one turn.
+                    daemon.open_session("wake")
                     await asyncio.to_thread(
                         lambda: daemon.voice.start(on_auto_stop=_auto_stop))
 

@@ -207,9 +207,12 @@ check("after the gap she greets again", "Good " in after or "Emperor." in after,
 check("...and it is not the acknowledgement", after != inside, after)
 
 seen = {Router().route("stop listening").speech for _ in range(40)}
-check("every sleep phrasing still names the way back",
-      all("chord" in s.lower() or "push-to-talk" in s.lower() for s in seen),
-      str(sorted(seen)))
+# A session close leaves the wake phrase armed, so the way back is her NAME.
+# Only an explicit "stop listening completely" makes the chord the only route.
+_BACK = ("chord", "push-to-talk", "call me", "say my name", "say the word",
+         "when you call", "i am back")
+check("every sleep phrasing still names a way back",
+      all(any(w in s.lower() for w in _BACK) for s in seen), str(sorted(seen)))
 
 # ── 7. evt.agent.state.detail ────────────────────────────────────────────────
 print("\n7. evt.agent.state.detail — redacted before broadcast")

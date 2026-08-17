@@ -132,6 +132,10 @@ class Turn:
     said: str
     intent: Intent
     timing: TurnTiming = field(default_factory=TurnTiming)
+    #: He said "I'm done for now" — the daemon must close the session and NOT
+    #: re-arm. Carried on the Turn rather than read off the router, because by
+    #: the time the daemon sees the result the router has moved on.
+    ends_session: bool = False
     #: (tool_name, executed_ok, error). Empty for conversational turns.
     #: Without this a successful call, a failed call and a call that never
     #: dispatched all looked identical in the log — which is why the tool path
@@ -165,6 +169,7 @@ class VoiceLoop:
         brain=None,          # core.brain.llm.LLMAdapter — the fallback for questions
         conversation=None,   # core.brain.conversation.Conversation — the thread
         wake=None,           # core.voice.wake.WakeDetector — optional, may be None
+        speaker=None,        # core.voice.speaker.SpeakerVerifier — optional
     ) -> None:
         self.mic = mic
         self.stt = stt
@@ -195,6 +200,17 @@ class VoiceLoop:
         #: there is no detector — which is the state Gerald is in until his own
         #: model comes back from Colab.
         self.wake = wake
+        #: The voiceprint. Optional, and every use is guarded — push-to-talk must
+        #: keep working unchanged when there is no verifier, which is the state
+        #: he is in until he runs `--enrol`.
+        self.speaker = speaker
+        #: True while a conversation session is open. Set by the daemon.
+        #:
+        #: Verification behaves the SAME either way — a voice that is not his is
+        #: discarded silently in both — but the daemon needs this to decide
+        #: whether a discard should be logged as noise in the room or as a
+        #: genuine mishearing of a deliberate keypress.
+        self.session_open = False
         self._empty_turns = 0
         self.tool_outcomes: list = []
         self._on_stage = on_stage
@@ -370,6 +386,11 @@ class VoiceLoop:
             self.mic.cancel_watch()
         self.tool_outcomes = []
         self.stages = []
+        # THE VERDICT IS PER-TURN, like the fence. Leaving last turn's score in
+        # place would let one confident utterance authorise an amber action in a
+        # LATER segment that was never scored — the same class of leak as the
+        # injection flag surviving a turn, which took a live session to find.
+        self.executor.voice_verdict = None
         t0 = time.perf_counter()
         cap = self.mic.disarm()
         self._stage("disarm.returned", t0)
@@ -386,6 +407,57 @@ class VoiceLoop:
                 self._stage(f"segment.dumped {self.last_segment_path}", t0)
             except Exception as exc:  # noqa: BLE001
                 self._stage(f"segment.dump FAILED {exc}", t0)
+
+        # ── IS THIS HIM? ASKED BEFORE WHISPER, NOT AFTER ─────────────────────
+        #
+        # MEASURED ON A LIVE DAEMON, session open, ordinary room:
+        #     verification            215 ms
+        #     transcription        19,875 ms
+        # Verifying second meant a stranger's sentence — or a television — cost
+        # twenty seconds of Whisper at full tilt before being thrown away. Over
+        # 90 s with one such event the daemon averaged 12.44% of the machine
+        # against 0.07% idle, and essentially all of it was that one transcript
+        # nobody wanted.
+        #
+        # Asking first turns that into 215 ms. It is also strictly better for
+        # privacy: words that are not his are never transcribed at all, so they
+        # never exist as text anywhere in this process.
+        #
+        # THE CHEAP GATE COMES FIRST. Most segments in an open session are the
+        # empty room hitting the 20 s hard cap, and those must cost neither an
+        # embedding nor a model — `is_probably_silence` settles them in
+        # microseconds.
+        from core.voice.stt import is_probably_silence
+
+        if is_probably_silence(cap.samples, cap.sample_rate):
+            self._stage(f"segment.empty dur={cap.duration_s:.2f}s "
+                        f"rms={cap.rms:.0f} - neither verified nor transcribed", t0)
+            self._empty_turns = 0 if self.session_open else self._empty_turns + 1
+            if self.session_open or self._empty_turns < EMPTY_TURNS_BEFORE_SPEAKING:
+                self._state(AgentState.IDLE)
+                return Turn(heard="", said="", intent=Intent.UNROUTED,
+                            timing=TurnTiming(audio_s=cap.duration_s))
+
+        if self.speaker is not None:
+            verdict = self.speaker.verify(cap.samples, cap.sample_rate)
+            if verdict.unknown:
+                self._stage(f"verify.skipped {verdict.reason} "
+                            f"({verdict.elapsed_ms:.0f} ms)", t0)
+            elif not verdict.ok:
+                # NOT HIM. Nothing is transcribed, nothing is said, nothing is
+                # remembered. See the block below the router call for why
+                # silence rather than a spoken refusal.
+                self._stage(f"verify.REJECTED score={verdict.score:.3f} "
+                            f"({verdict.elapsed_ms:.0f} ms) - discarded silently, "
+                            f"never transcribed", t0)
+                self._state(AgentState.IDLE)
+                return Turn(heard="", said="", intent=Intent.UNROUTED,
+                            timing=TurnTiming(audio_s=cap.duration_s))
+            else:
+                self._stage(f"verify.ok score={verdict.score:.3f} "
+                            f"{verdict.reason} ({verdict.elapsed_ms:.0f} ms)", t0)
+                self.executor.voice_verdict = verdict
+                self.executor.voice_confident = self.speaker.confident
 
         self._stage(f"transcribe.entered dur={cap.duration_s:.2f}s peak={cap.peak} rms={cap.rms:.0f}", t0)
         tr = self.stt.transcribe(audio, cap.sample_rate)
@@ -425,6 +497,25 @@ class VoiceLoop:
                 f"too_quiet={getattr(tr, 'too_quiet', False)} "
                 f"consecutive={self._empty_turns} (silent)", t0)
 
+            # ── IN A SESSION, AN EMPTY SEGMENT IS NORMAL, NOT A FAULT ────────
+            #
+            # The diagnostic below exists for push-to-talk: he pressed a key,
+            # spoke, and got nothing, three times running — that is a real
+            # microphone problem worth mentioning once.
+            #
+            # In an open session it is the opposite. `_silence_loop` only
+            # returns "silence" once it has HEARD something, so a quiet room
+            # runs to the 20 s hard cap, produces an empty turn, and re-arms.
+            # With the diagnostic live she would announce "I did not catch
+            # anything, Emperor" every third cycle — roughly once a minute,
+            # forever, at an empty room. He asked her to wait quietly until he
+            # calls; talking to herself is the exact opposite.
+            if self.session_open:
+                self._empty_turns = 0
+                self._state(AgentState.IDLE)
+                return Turn(heard="", said="", intent=Intent.UNROUTED,
+                            timing=TurnTiming(stt_s=t_stt - t0, audio_s=cap.duration_s))
+
             if self._empty_turns < EMPTY_TURNS_BEFORE_SPEAKING:
                 self._state(AgentState.IDLE)
                 return Turn(heard="", said="", intent=Intent.UNROUTED,
@@ -443,6 +534,24 @@ class VoiceLoop:
                         timing=TurnTiming(stt_s=t_stt - t0, audio_s=cap.duration_s))
 
         self._empty_turns = 0
+
+        # ── WHY THE REJECTION ABOVE IS SILENT ────────────────────────────────
+        #
+        # THIS IS WHAT MAKES AN OPEN SESSION ACCEPTABLE RATHER THAN RECKLESS.
+        # A session listens continuously with no keypress. In a room with other
+        # people talking, everything that is not him must be DISCARDED SILENTLY.
+        #
+        # Not answered, not refused aloud, not acknowledged. A spoken refusal
+        # every time someone else in the room said something would be worse than
+        # not listening at all — she would interrupt a conversation she is not
+        # part of, repeatedly, and he would turn the feature off within a minute.
+        #
+        # FAIL-OPEN CASES PASS THROUGH UNTOUCHED — not enrolled, no model, or an
+        # utterance too short to score. `verify` returns `unknown` for all three,
+        # and `unknown` means NO CHECK WAS POSSIBLE, which must never be
+        # confused with a failed one. He is alone with this machine; locking him
+        # out over a missing voiceprint would take his assistant away entirely.
+
         # ── "FORGET THAT" — LOCAL, NO MODEL CALL ─────────────────────────────
         #
         # Checked before routing because it resolves to no tool, so it would
@@ -597,22 +706,28 @@ class VoiceLoop:
         if not routed.speech:
             routed.speech = "Done, Emperor."
 
-        # ── "STOP LISTENING" — LOCAL, NO MODEL CALL ──────────────────────────
+        # ── "I'M DONE FOR NOW" / "STOP LISTENING" — LOCAL, NO MODEL CALL ─────
         #
         # Handled here rather than in the tool loop because it resolves to no
         # tool: it is a change to what the daemon is DOING, not something it
         # does for him. She still speaks — unlike STOP, which silences her —
         # because an off switch that goes quiet as it fires is indistinguishable
         # from one that did not work.
+        ends_session = bool(routed.ends_session)
         if routed.sleeps_wake:
             if self.wake is not None:
                 self.wake.sleep()
                 self._stage("wake.slept", t0)
             else:
-                # He asked her to stop listening and there was nothing
-                # listening. Say the true thing rather than the reassuring one.
-                routed.speech = ("The wake phrase is already off, Emperor. "
-                                 "Push-to-talk is how I hear you.")
+                # He asked her to stop listening for the PHRASE and there was no
+                # detector. If a conversation is open, closing that is still a
+                # real and useful answer, so say the true thing about both.
+                routed.speech = (
+                    "Going quiet, Emperor. The wake phrase was already off — "
+                    "push-to-talk is how I hear you."
+                    if ends_session else
+                    "The wake phrase is already off, Emperor. "
+                    "Push-to-talk is how I hear you.")
                 self._stage("wake.sleep requested but no detector", t0)
 
         # STOP is not an answer, it is an instruction: comply and stay silent.
@@ -662,7 +777,8 @@ class VoiceLoop:
             except Exception:  # noqa: BLE001
                 pass          # telemetry must never take a turn down
         return Turn(heard=heard, said=routed.speech, intent=routed.intent,
-                    timing=timing, tools=list(self.tool_outcomes))
+                    timing=timing, tools=list(self.tool_outcomes),
+                    ends_session=ends_session)
 
     def idle(self) -> None:
         self._state(AgentState.IDLE)

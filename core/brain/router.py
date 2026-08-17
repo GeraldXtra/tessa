@@ -69,6 +69,17 @@ class Routed:
     #: would mean every "stop" mid-sentence also went deaf, and he would have no
     #: idea why the wake word had died.
     sleeps_wake: bool = False
+    #: "I'm done for now" — close the CONVERSATION, keep the wake phrase armed.
+    #:
+    #: DISTINCT FROM `sleeps_wake`, and his own words are why: "she says
+    #: something and goes quiet, and waits till I call her again." Waiting to be
+    #: called again means the wake detector must stay live. Closing a session is
+    #: the end of a conversation, not the end of listening for his name.
+    #:
+    #: Only an explicit "stop listening COMPLETELY" / "turn the wake word off"
+    #: sets `sleeps_wake` as well, because that one really does make the chord
+    #: the only way back.
+    ends_session: bool = False
 
     @property
     def handled_locally(self) -> bool:
@@ -174,9 +185,31 @@ _SPECS = (
                # He would say "stop listening" and she would go quiet and keep
                # listening, which is the exact opposite of what he asked for.
                veto=("listening", "sleep", "wake word")),
+    # CLOSING A CONVERSATION. Matched on INTENT, never on an exact string,
+    # because Whisper mangles short phrases — his own transcripts turned "stop
+    # listening" into "Stop, listen" and "Stop List Me". Several phrasings for
+    # each idea, all meaning the same thing.
+    #
+    # "THANK YOU" IS THE TRAP AND IT IS HANDLED BY REQUIRING HER NAME.
+    # Bare "thank you" is NOT here: he says it mid-conversation without meaning
+    # to stop, and closing on it would end the session every time he was polite.
+    # "thank you Zoey" IS here, because addressing her by name while thanking
+    # her is a sign-off — nobody says "thank you Zoey" in the middle of handing
+    # over a task, they say "thanks". The name is the distinction, and it is
+    # available because `strip_wake_name` only removes a LEADING address, so a
+    # trailing "Zoey" survives to be matched.
     IntentSpec(Intent.SLEEP, ("stop listening", "go to sleep", "stop the wake word",
                               "sleep now", "stop listening to me", "go to sleep now",
-                              "stop listening for me")),
+                              "stop listening for me", "wake word off",
+                              "turn off the wake word", "wake word",
+                              # end-of-conversation phrasings
+                              "i am done", "im done", "done for now",
+                              "that is all", "thats all", "that will be all",
+                              "we are finished", "were finished", "finished for now",
+                              "nothing else", "that is everything",
+                              # thanks ONLY when she is named
+                              "thank you zoey", "thanks zoey", "thank you zoi",
+                              "thanks zoi", "thank you zoe", "thanks zoe")),
 )
 
 #: Below this, she does not guess. Deliberately not lower: a router that fires
@@ -208,6 +241,39 @@ _GREETING_ONLY = re.compile(
     r"good\s+(?:morning|afternoon|evening|day))"
     r"(?:\s+(?:there|again|zoey|zoi|zoe|joey|zooey))*"
     r"\s*[.,!?]*\s*$", re.I)
+
+#: Thanks with NO name attached — polite, mid-conversation, not a goodbye.
+#: Anchored to the whole utterance: "thanks, now open my downloads" has a
+#: command in it and must not land here.
+_THANKS_ONLY = re.compile(
+    r"^\s*(?:thanks|thank\s+you|thank\s+you\s+very\s+much|thanks\s+a\s+lot|"
+    r"cheers|much\s+appreciated|appreciate\s+it)\s*[.,!]*\s*$", re.I)
+
+#: Short, and none of them invite a reply.
+_THANKS = [
+    "Any time, Emperor.",
+    "Of course, Emperor.",
+    "Pleasure, sir.",
+    "Always, Emperor.",
+]
+
+#: What she says when the conversation closes — his explicit ruling that she
+#: says SOMETHING rather than just falling silent.
+#:
+#: Every one of these has to do two jobs: make clear she is GOING QUIET rather
+#: than merely finishing a sentence, and make clear she is still reachable. A
+#: line that only did the first would leave him unsure whether she had shut down;
+#: a line that only did the second would not read as an ending at all. So each
+#: names both the stopping and the way back, and each names HER NAME as the way
+#: back rather than the chord, because closing a session leaves the wake phrase
+#: armed.
+_SESSION_CLOSE = [
+    "Goodnight, Emperor. Call me when you need me.",
+    "Right you are, Emperor. Say my name when you want me.",
+    "Going quiet, sir. I am still here when you call.",
+    "Done for now, Emperor. Just say the word.",
+    "Standing down, Emperor. Call me and I am back.",
+]
 
 #: What she says when he addresses her again inside the gap — item 2d.
 #: SHORT, because it is an acknowledgement and not a conversation, and none of
@@ -355,6 +421,18 @@ class Router:
             self._seen_after_three = True
         self.last_turn_at = now.timestamp()
 
+    def mark_conversation_closed(self) -> None:
+        """
+        A session just ended, so the NEXT thing he says is a return.
+
+        ITEM 3h. Without this, closing a conversation and re-opening it thirty
+        seconds later would fall inside the 20-minute return gap and get an
+        acknowledgement — "Still here." — when a greeting is plainly right. The
+        gap exists to guess whether he went away; a session close is him SAYING
+        he went away, which beats any guess.
+        """
+        self.last_turn_at = None
+
     def is_return(self, now: datetime | None = None) -> bool:
         """
         Has he been away long enough that this is a RETURN rather than a pause?
@@ -452,6 +530,21 @@ class Router:
             if self.addressed_by_name or _GREETING_ONLY.match(text or ""):
                 return self.address_only()
             return Routed(Intent.UNROUTED, _pick(_SILENCE))
+
+        # ── A BARE THANK-YOU IS NOT A COMMAND AND NOT A GOODBYE ─────────────
+        #
+        # Checked before intent scoring so it cannot fall through to UNROUTED,
+        # where she answered "That is not mine yet, Emperor. Files, windows,
+        # your machine..." to someone being polite. In a conversation session he
+        # will say this several times an hour, and reciting her capability list
+        # each time would be the most irritating thing in the loop.
+        #
+        # It deliberately does NOT close the session — that needs her name, see
+        # the SLEEP spec. This just accepts the thanks and stays listening.
+        if _THANKS_ONLY.match(text or ""):
+            self._was_return = self.is_return()
+            self._note_activity()
+            return Routed(Intent.PRESENCE, _pick(_THANKS), score=1.0)
         # ORDER MATTERS AND IT BIT ME. `_note_activity` sets `last_turn_at`,
         # which is the ONLY thing `is_return` reads — so calling it before the
         # routing decision made every greeting look like a continuation, and a
@@ -473,9 +566,9 @@ class Router:
         if score < MATCH_THRESHOLD:
             return Routed(Intent.UNROUTED, _pick(_NEAR_MISS), score=score)
 
-        return self._answer(intent, score)
+        return self._answer(intent, score, norm)
 
-    def _answer(self, intent: Intent, score: float) -> Routed:
+    def _answer(self, intent: Intent, score: float, norm: str = "") -> Routed:
         now = datetime.now()
 
         if intent is Intent.TIME:
@@ -515,19 +608,27 @@ class Router:
             return Routed(intent, "", halts_speech=True, score=score)
 
         if intent is Intent.SLEEP:
-            # SHE SAYS THE WAY BACK, EVERY TIME.
+            # TWO STRENGTHS OF "STOP", AND HE MEANS THE WEAKER ONE ALMOST ALWAYS.
             #
-            # An off switch with no stated on switch is a trap: he says "stop
-            # listening", she goes quiet, and the feature is simply gone with no
-            # discoverable route back. It cannot be a spoken phrase — if a phrase
-            # could wake her she would still be listening for it, so she would
-            # never really have stopped. The chord is always live and is the
-            # honest answer, so she names it rather than leaving him to find it.
-            return Routed(intent, _pick([
-                "Not listening, Emperor. Press the chord when you want me.",
-                "Ear closed, sir. The chord still works.",
-                "Sleeping. Use push-to-talk to bring me back, Emperor.",
-            ]), sleeps_wake=True, score=score)
+            # WEAK (the default): close the conversation, stay reachable. His
+            # words — "she says something and goes quiet, and waits till I call
+            # her again" — require the wake phrase to remain armed, so what she
+            # says names HER NAME as the way back rather than the chord.
+            #
+            # STRONG (explicit only): stop listening for the phrase as well.
+            # Then a phrase cannot bring her back — if it could, she never
+            # stopped — so the chord is the only route and she says so.
+            full_off = bool(re.search(
+                r"\b(?:completely|entirely|for good|altogether|"
+                r"turn (?:the )?wake word off|off the wake word)\b", norm))
+            if full_off:
+                return Routed(intent, _pick([
+                    "Not listening, Emperor. Press the chord when you want me.",
+                    "Ear closed, sir. The chord still works.",
+                    "Sleeping. Use push-to-talk to bring me back, Emperor.",
+                ]), sleeps_wake=True, ends_session=True, score=score)
+            return Routed(intent, _pick(_SESSION_CLOSE),
+                          ends_session=True, score=score)
 
         if intent is Intent.STATUS:
             if self._health is None:
