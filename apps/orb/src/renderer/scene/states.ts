@@ -32,15 +32,38 @@
  *
  *   count      8,000 -> 20,000 particles (see PARTICLE_COUNT for the frame
  *              measurement that permitted it)
- *   size       x0.89, because coverage goes as N x size² and the count is up
- *   brightness x1.90, because the shell now carries a wrapped-lambert term that
- *              costs the body most of its light on the unlit side
+ *   size       x0.89 then x0.87, because coverage goes as N x size² and the
+ *              count is up
+ *   brightness x1.90 then x1.05, because the shell now carries a wrapped-lambert
+ *              term that costs the body most of its light on the unlit side
  *
  * The RELATIVE ordering is untouched — every value moved by the same factor —
  * so `listening` is still the brightest, `idle` still the dimmest, and no state
  * changed its relationship to any other. That is the property item 2f depends
  * on and the reason this was done as a uniform scaling rather than by retuning
  * six numbers by eye.
+ *
+ * ─── THEN THE RANGE WAS COMPRESSED, AND THAT ONE IS A REAL COST ───
+ *
+ * 1.10 - 2.00 became 1.10 - 1.50: the same order, mapped onto a span 44% as
+ * wide. The reason is measured and it was not a taste call. The crescent is
+ * fitted to the reference at `idle`, and at idle's 1.10 the hottest pixel on
+ * the limb is already at R=255. At 2.00 the whole band went past the
+ * framebuffer's ceiling: the peak crescent pixel measured rgb(255,255,255) in
+ * listening, thinking, working and blocked, and in the violet and cyan themes
+ * too.
+ *
+ * White costs two things at once. It is white in every palette, so the
+ * brightest part of the sphere stops carrying the theme; and six states that
+ * all saturate to the same white are six states that no longer differ where
+ * they differ most. Compressing brightness weakens ONE of the six cues that
+ * separate the states — radius, turbulence, breath period, spin, colour
+ * temperature and brightness — where clipping would have destroyed that cue
+ * outright and taken the palette with it.
+ *
+ * The other half of the same fix is in particles.frag: the rim term scales with
+ * sqrt(brightness) rather than with brightness, so the edge still responds to
+ * state without the state driving it into the ceiling.
  *
  * The six agent states, as sphere parameters.
  *
@@ -102,8 +125,8 @@ export const SPHERE_STATES = {
     breathPeriodMs: 5200,
     amplitudeGain: 0.0,
     spin: 0.04,
-    pointScale: 0.0098,
-    brightness: 1.05,
+    pointScale: 0.0085,
+    brightness: 1.10,
     coolMix: 0.60,
     palette: 'flame',
     frozen: false,
@@ -118,8 +141,8 @@ export const SPHERE_STATES = {
     breathPeriodMs: 2600,
     amplitudeGain: 0.16,
     spin: 0.06,
-    pointScale: 0.0111,
-    brightness: 1.90,
+    pointScale: 0.0097,
+    brightness: 1.50,
     coolMix: 0.81,
     palette: 'flame',
     frozen: false,
@@ -153,8 +176,8 @@ export const SPHERE_STATES = {
     breathPeriodMs: 1800,
     amplitudeGain: 0.0,
     spin: 0.34,
-    pointScale: 0.0093,
-    brightness: 1.56,
+    pointScale: 0.0081,
+    brightness: 1.34,
     coolMix: 0.54,
     palette: 'flame',
     frozen: false,
@@ -167,8 +190,8 @@ export const SPHERE_STATES = {
     breathPeriodMs: 2200,
     amplitudeGain: 0.42,
     spin: 0.08,
-    pointScale: 0.0107,
-    brightness: 1.81,
+    pointScale: 0.0093,
+    brightness: 1.46,
     coolMix: 0.72,
     palette: 'flame',
     frozen: false,
@@ -183,8 +206,8 @@ export const SPHERE_STATES = {
     breathPeriodMs: 1400,
     amplitudeGain: 0.0,
     spin: 0.13,
-    pointScale: 0.0102,
-    brightness: 1.62,
+    pointScale: 0.0089,
+    brightness: 1.37,
     coolMix: 0.66,
     palette: 'flame',
     frozen: false,
@@ -197,8 +220,8 @@ export const SPHERE_STATES = {
     breathPeriodMs: 1,
     amplitudeGain: 0.0,
     spin: 0.0,
-    pointScale: 0.0111,
-    brightness: 1.37,
+    pointScale: 0.0097,
+    brightness: 1.25,
     coolMix: 1.0,
     palette: 'amber',
     frozen: true,

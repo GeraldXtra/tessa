@@ -1573,12 +1573,28 @@ ol {
    * read as professional.
    *
    * `--text-muted` is a SHARED token used across this app since Phase 1 and
-   * tokens.json is closed, so the fix is local: a derived label colour at
-   * ~6.6:1. Still plainly recessive against a 17.16:1 value — the hierarchy is
-   * intact — but legible, which 3.96 was not. Theme-independent, like the
+   * tokens.json is closed, so the fix is local: a derived label colour.
+   *
+   * ─── AND THEN THE FIX ITSELF WAS WRONG, WHICH IS THE SECOND CORRECTION ───
+   *
+   * This was written as `--text` at 35% and reported at ~6.6:1. It is not.
+   * 35% of the text colour over the void composites to a mid grey measuring
+   * 2.73:1 — WORSE than the 3.97:1 it was introduced to fix, and comfortably
+   * the least legible thing on the surface. The arithmetic was inverted: 35%
+   * of the text colour is 65% of the void, not the other way round.
+   *
+   * 62% measures 6.58:1 against the Orb's stage, which is pure black — the Orb
+   * overrides --bg-void with --theme-void at runtime, so the real background is
+   * darker than the token suggests. Still plainly recessive beside a 17.16:1
+   * value, so the hierarchy is intact, and now above AA for normal text rather
+   * than a third of the way to it.
+   *
+   * The lesson is the one this project keeps relearning: a contrast figure
+   * asserted in a comment is not a measurement. This one survived two rounds
+   * and a report because nobody put it through the formula. Theme-independent, like the
    * value colour it sits beside.
    */
-  --col-label: color-mix(in srgb, var(--text) 35%, var(--theme-void));
+  --col-label: color-mix(in srgb, var(--text) 62%, var(--theme-void));
 
   /**
    * THE FLOOR. Item 6.2 — a horizon plane, and the real one rather than the
@@ -2011,7 +2027,10 @@ ol {
 .cal__day {
   font-size: var(--fs-sm);
   font-variant-numeric: tabular-nums;
-  color: var(--text-muted);
+  /* --col-label, not --text-muted. The dates are information the owner reads,
+     and --text-muted measures 3.90:1 on this stage — below AA for text at
+     11px. The ornament is allowed to be unreadable; a date is not. */
+  color: var(--col-label);
   text-align: center;
   line-height: 1.55em;
   min-height: 1.55em;

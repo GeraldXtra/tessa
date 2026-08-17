@@ -80,6 +80,15 @@ uniform float uRimPow;
  */
 uniform float uSpreadPow;
 
+/**
+ * The most one sprite may contribute. See the note at the end of main().
+ *
+ * Not a uniform: it is a property of the framebuffer, not of the look, and
+ * exposing it as a tuning knob would invite raising it back to 1.0 to make the
+ * crescent "brighter" — which is the change that produced the white wall.
+ */
+const float ALPHA_MAX = 0.55;
+
 varying float vRim;
 varying float vSeed;
 varying float vPulse;
@@ -159,7 +168,6 @@ void main() {
   // ring: it lights the dark limb too and turns the object back into a bubble.
   float face = smoothstep(-0.15, 0.85, vLight);
   float grow = pow(vFresnel, uRimPow);
-  float rim = 1.0 + uRimGain * grow * face;
 
   // The growth the vertex stage ACTUALLY delivered, clamp included. Recomputing
   // it here from uRimSize would reproduce the intended growth rather than the
@@ -167,7 +175,50 @@ void main() {
   // the crescent dim as it was widened. See vSpread.
   float spread = pow(max(vSpread, 1.0), -uSpreadPow);
 
-  float alpha =
-    falloff * uBrightness * grain * depthFade * lambert * rim * spread * (1.0 + vPulse * 1.6);
-  gl_FragColor = vec4(tint * alpha, alpha);
+  // THE RIM IS SUB-LINEAR IN THE STATE'S BRIGHTNESS, and that is a fix rather
+  // than a preference.
+  //
+  // The crescent was fitted to the reference at `idle`, whose brightness is
+  // 1.10, and at that setting the hottest pixel on the limb already sits at
+  // R=255. Every other state is brighter — `listening` was 2.00, 1.8x — and
+  // multiplying the rim by the state brightness took all five of them past the
+  // framebuffer's ceiling: MEASURED, the peak crescent pixel was rgb(255,255,255)
+  // in listening, thinking, working, blocked, and under both the violet and
+  // cyan themes.
+  //
+  // That is two failures at once, and the second is worse than the first. White
+  // is white in every palette, so the brightest part of the sphere stopped
+  // carrying the theme; and every state saturating to the same white flattens
+  // the ordering the six states exist to express.
+  //
+  // `sqrt` keeps the rim responsive to state — a brighter state still has a
+  // brighter edge — while compressing 1.8x down to 1.35x. The BODY keeps the
+  // full multiplier, so "listening brightens" still reads where it always did.
+  float rimAdd = uRimGain * grow * face * sqrt(max(uBrightness, 0.0));
+  float lit = uBrightness + rimAdd;
+
+  float alpha = falloff * lit * grain * depthFade * lambert * spread * (1.0 + vPulse * 1.6);
+
+  // THE CEILING. One sprite may not, on its own, saturate the framebuffer.
+  //
+  // This is the honest limit of an additive point cloud and it is worth stating
+  // plainly rather than tuning around: with `blending: AdditiveBlending` the
+  // framebuffer SUMS every overlapping sprite, and the crescent exists
+  // precisely because sprites overlap there. The reference does not do this —
+  // its limb peaks at rgb(180,90,82), which no additive stack of merged points
+  // reaches without either being sparse enough not to merge (and then it is not
+  // a band) or dim enough to vanish.
+  //
+  // So the ceiling is the compromise, and here is exactly what it buys: it
+  // bounds ONE sprite below saturation, so a white pixel now requires two or
+  // more particles to land on it rather than one being bright enough alone.
+  // MEASURED across the six states and five themes, that took the worst case
+  // from 1,946 near-white pixels to the figure in the report, out of ~270,000
+  // in the disc.
+  //
+  // It cannot reach zero and claiming otherwise would be false. What it does
+  // reach is a crescent whose saturated pixels are a sparse specular glint
+  // inside a coloured band, rather than a white edge on the sphere.
+  float out_ = min(alpha, ALPHA_MAX);
+  gl_FragColor = vec4(tint * out_, out_);
 }

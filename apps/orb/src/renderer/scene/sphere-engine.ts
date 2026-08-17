@@ -679,8 +679,8 @@ export const DEPTH_FAR_DEFAULT = 0.42;
  * report and the varying `vFresnel` in particles.vert.glsl. `--force-sphere=`
  * overrides all four rim/body numbers so a sweep needs one build, not twelve.
  */
-export const RIM_GAIN_DEFAULT = 0.4;
-export const RIM_SIZE_DEFAULT = 2.4;
+export const RIM_GAIN_DEFAULT = 0.5;
+export const RIM_SIZE_DEFAULT = 3.5;
 
 /**
  * How much brightness the side facing away from the light keeps.
@@ -690,7 +690,7 @@ export const RIM_SIZE_DEFAULT = 2.4;
  * not a sphere: the terminator becomes a hard edge and half the shell is simply
  * gone. This floor is the compromise, and it is stated rather than hidden.
  */
-export const DARK_SIDE_DEFAULT = 0.2;
+export const DARK_SIDE_DEFAULT = 0.18;
 
 /** Exponent on the wrapped lambert. See the uniform's note in particles.frag. */
 export const LAMBERT_POW_DEFAULT = 1.8;
@@ -726,8 +726,8 @@ export const JITTER_DEFAULT = 0.0;
  * and the reference's band is wide and NOT bright — its limb is only 1.65x the
  * luminance of its own body.
  */
-export const RIM_POW_DEFAULT = 1.3;
-export const SPREAD_POW_DEFAULT = 0.0;
+export const RIM_POW_DEFAULT = 0.8;
+export const SPREAD_POW_DEFAULT = 0.6;
 
 /**
  * The light, in VIEW space. Right, below, and slightly toward the camera.
