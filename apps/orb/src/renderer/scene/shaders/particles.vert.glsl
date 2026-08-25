@@ -1,4 +1,4 @@
-// Zoey Orb — particle sphere, vertex stage.
+// Tessa Orb — particle sphere, vertex stage.
 //
 // One draw call, GL_POINTS, no index buffer. Every per-state difference is a
 // uniform, so switching agent state never rebuilds geometry — CONTRACT §4's

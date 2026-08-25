@@ -31,7 +31,7 @@ from urllib.request import Request, urlopen
 
 from .provenance import ExternalContent, SessionContext
 
-USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) ZoeyOS/0.1 (+local assistant)"
+USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) TessaOS/0.1 (+local assistant)"
 FETCH_TIMEOUT_S = 20
 MAX_FETCH_BYTES = 4 * 1024 * 1024
 

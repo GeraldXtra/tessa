@@ -86,7 +86,7 @@ const run = () =>
       out += d;
 
       // Once the shell is clearly alive, exercise resize — the 22631 risk.
-      if (!resized && out.includes('ZOEY_PTY_OK')) {
+      if (!resized && out.includes('TESSA_PTY_OK')) {
         resized = true;
         try {
           term.resize(120, 40);
@@ -103,8 +103,8 @@ const run = () =>
     });
 
     // Marker chosen so it cannot collide with the echoed command line itself.
-    term.write('echo ZOEY_PTY%_%OK\r');
-    setTimeout(() => term.write('echo ZOEY_PTY_OK\r'), 400);
+    term.write('echo TESSA_PTY%_%OK\r');
+    setTimeout(() => term.write('echo TESSA_PTY_OK\r'), 400);
   });
 
 try {
@@ -119,7 +119,7 @@ try {
     bad('first byte received', 'no data ever arrived');
   }
 
-  if (res.out.includes('ZOEY_PTY_OK')) ok('echo round-tripped through the pty');
+  if (res.out.includes('TESSA_PTY_OK')) ok('echo round-tripped through the pty');
   else bad('echo round-tripped', `output did not contain the marker (${res.out.length} bytes)`);
 
   if (res.exitCode === 0) ok('clean exit', `code=${res.exitCode}`);

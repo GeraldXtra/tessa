@@ -1,9 +1,9 @@
 """
-core/brain/persona.py — load zoey.md and hand it to whichever engine is selected.
+core/brain/persona.py — load tessa.md and hand it to whichever engine is selected.
 
 WHY THIS FILE EXISTS NOW AND NOT BEFORE
 
-`core/config/personalities/zoey.md` has been written, reviewed and quoted for
+`core/config/personalities/tessa.md` has been written, reviewed and quoted for
 several prompts and NOTHING HAS EVER READ IT. That is the same class of bug as
 `wait_for_silence` and `executor.py` — a considered artefact on disk that no
 code path reaches, which looks finished and is inert. A system prompt needs a
@@ -13,14 +13,14 @@ There is a model now, so it gets a consumer.
 
 WHAT IS SENT, AND WHAT IS NOT
 
-zoey.md is written for a reader — headings, block quotes, worked examples. Most
+tessa.md is written for a reader — headings, block quotes, worked examples. Most
 of that survives being handed to a model verbatim and the examples are the most
 valuable part, because "show, don't tell" works better on instruction-following
 than a rule list does.
 
 Two things are ADDED rather than assumed:
 
-  1. THE PROVENANCE RULE. zoey.md is about character; it says nothing about
+  1. THE PROVENANCE RULE. tessa.md is about character; it says nothing about
      untrusted content, because when it was written she could not read a web
      page. She can now, and every summary she writes will contain attacker-
      controlled text. The fence in `provenance.py` is the actual control — this
@@ -44,9 +44,9 @@ from __future__ import annotations
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
-PERSONA_PATH = ROOT / "core" / "config" / "personalities" / "zoey.md"
+PERSONA_PATH = ROOT / "core" / "config" / "personalities" / "tessa.md"
 
-#: Appended to zoey.md. Both paragraphs cover ground the character file
+#: Appended to tessa.md. Both paragraphs cover ground the character file
 #: predates; neither restates anything it already says.
 _ADDENDUM = """
 
@@ -88,7 +88,7 @@ daemon do it. Never invent the result of an action.
 #: short personality.
 MIN_PERSONA_CHARS = 200
 
-_FALLBACK = ("You are Zoey, Gerald's assistant. Address him as Emperor. "
+_FALLBACK = ("You are Tessa, Gerald's assistant. Address him as Emperor. "
              "Be brief and direct. The first sentence must be short. No emoji.")
 
 _CACHE: dict[str, object] = {"stamp": None, "text": "", "error": None}
@@ -96,7 +96,7 @@ _CACHE: dict[str, object] = {"stamp": None, "text": "", "error": None}
 
 def system_prompt() -> str:
     """
-    zoey.md plus the runtime addendum, or a minimal honest fallback.
+    tessa.md plus the runtime addendum, or a minimal honest fallback.
 
     HOT-SWAPPABLE, and it was not. This used to be `@lru_cache(maxsize=1)`,
     which meant the first read won for the lifetime of the process: spec §8 says
@@ -131,7 +131,7 @@ def system_prompt() -> str:
             # passes, however much he has cut.
             if len(body) < MIN_PERSONA_CHARS:
                 _CACHE["error"] = (
-                    f"zoey.md is {len(body)} chars, under the {MIN_PERSONA_CHARS} "
+                    f"tessa.md is {len(body)} chars, under the {MIN_PERSONA_CHARS} "
                     f"floor - looks like a truncated save. Keeping the last good "
                     f"version.")
                 _CACHE["stamp"] = stamp        # do not re-read the same bad file
@@ -150,7 +150,7 @@ def system_prompt() -> str:
 
 
 def loaded() -> tuple[bool, str]:
-    """(was zoey.md actually read, path) — reported at daemon boot."""
+    """(was tessa.md actually read, path) — reported at daemon boot."""
     return PERSONA_PATH.exists(), str(PERSONA_PATH)
 
 

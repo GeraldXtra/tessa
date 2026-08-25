@@ -102,11 +102,11 @@ def _with_fake(status: int, text: str, key: str = "SECRET-KEY-DO-NOT-LEAK"):
 
     fake = _FakeClient(status, text)
     real_client, real_timeout = httpx.Client, httpx.Timeout
-    os.environ["ZOEY_TEST_KEY"] = key
+    os.environ["TESSA_TEST_KEY"] = key
     httpx.Client = fake            # type: ignore[assignment]
     httpx.Timeout = lambda *a, **k: None  # type: ignore[assignment]
     try:
-        eng = GeminiLLM({"api_key_env": "ZOEY_TEST_KEY", "models": {"main": "gemini-3.6-flash"}})
+        eng = GeminiLLM({"api_key_env": "TESSA_TEST_KEY", "models": {"main": "gemini-3.6-flash"}})
         try:
             list(eng.stream("sys prompt", [Message(role="user", content="hello")]))
         except LLMUnavailable as exc:

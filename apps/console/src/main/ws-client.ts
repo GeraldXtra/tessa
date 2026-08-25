@@ -44,7 +44,7 @@ import {
   type Envelope,
   type ResHello,
   type Surface,
-} from '@zoey/protocol'
+} from '@tessa/protocol'
 
 import { readRuntimeFile, type RuntimeInfo } from './token.ts'
 
@@ -59,13 +59,21 @@ import { readRuntimeFile, type RuntimeInfo } from './token.ts'
  *   permission.* — resolution of a pending spawn request
  *   daemon.*     — health, and shutdown so the UI can show a reconnect state
  *
- * Deliberately NOT subscribed: transcript, job, companion. The Console has
- * nowhere to render them in Phase 1, and decoding JSON only to drop it costs
- * frames on a 2-core machine.
+ *   transcript.* — evt.transcript.message, the ONE thread she and he share
+ *   agent.*      — evt.agent.state, so the chat pane can show her thinking
+ *
+ * transcript and agent were deliberately NOT subscribed until the chat pane
+ * existed, because decoding JSON only to drop it costs frames on two cores.
+ * They are subscribed now for a specific reason: a SPOKEN turn broadcasts on
+ * exactly the same event, so a Console listening here sees her voice answers
+ * too and the conversation is genuinely one thread rather than two that happen
+ * to share memory.
+ *
+ * Still not subscribed: job, companion. Nothing renders them.
  */
-const TOPICS = ['pty.*', 'permission.*', 'daemon.*'] as const
+const TOPICS = ['pty.*', 'permission.*', 'daemon.*', 'transcript.*', 'agent.*'] as const
 
-const ORIGIN: AllowedOrigin = 'zoey://console'
+const ORIGIN: AllowedOrigin = 'tessa://console'
 const SURFACE: Surface = 'console'
 
 /** How often to re-read runtime.json while there is no daemon. Opens no socket. */
@@ -111,6 +119,10 @@ export interface DaemonClientOptions {
   onStatus?: (status: ConnStatus) => void
   /** Daemon ordered a session killed. The Console MUST comply and report back. */
   onRevoke?: (sessionId: string, reason: string) => void
+  /** One message of the shared thread — typed OR spoken. */
+  onTranscript?: (m: { messageId: string; role: string; text: string; via: string }) => void
+  /** idle | listening | thinking | working | speaking. */
+  onAgentState?: (state: string) => void
   onHealth?: (payload: Record<string, unknown>) => void
 }
 
@@ -309,6 +321,26 @@ export class DaemonClient {
       return
     }
 
+    if (env.type === 'evt.transcript.message') {
+      const p = env.payload as { message?: { role?: unknown; text?: unknown; messageId?: unknown; via?: unknown } }
+      const m = p.message
+      if (m && typeof m.text === 'string') {
+        this.opts.onTranscript?.({
+          messageId: String(m.messageId ?? ''),
+          role: String(m.role ?? 'assistant'),
+          text: m.text,
+          via: typeof m.via === 'string' ? m.via : 'voice',
+        })
+      }
+      return
+    }
+
+    if (env.type === 'evt.agent.state') {
+      const p = env.payload as { state?: unknown }
+      if (typeof p.state === 'string') this.opts.onAgentState?.(p.state)
+      return
+    }
+
     if (env.type === 'evt.daemon.health') {
       this.opts.onHealth?.(env.payload as Record<string, unknown>)
       return
@@ -347,7 +379,7 @@ export class DaemonClient {
     if (code === 403) {
       // We send the allowlisted Origin, so this is our bug, not policy.
       this.rejectedCredential = credentialDigest(info.port, info.token)
-      this.emit({ phase: 'authRejected', detail: 'daemon rejected Origin: zoey://console' })
+      this.emit({ phase: 'authRejected', detail: 'daemon rejected Origin: tessa://console' })
       this.opts.log('!! upgrade refused on Origin — check ALLOWED_ORIGINS in core/server.py')
     } else if (code === 429) {
       this.rejectedCredential = credentialDigest(info.port, info.token)

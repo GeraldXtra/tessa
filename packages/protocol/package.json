@@ -1,8 +1,8 @@
 {
-  "name": "@zoey/protocol",
+  "name": "@tessa/protocol",
   "version": "1.0.0",
   "private": true,
-  "description": "The Zoey surface/daemon wire contract, in code. SHARED — see CONTRACT.md §7 before editing.",
+  "description": "The Tessa surface/daemon wire contract, in code. SHARED — see CONTRACT.md §7 before editing.",
   "type": "module",
   "main": "./src/index.ts",
   "types": "./src/index.ts",

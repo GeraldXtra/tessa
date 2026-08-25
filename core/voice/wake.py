@@ -1,18 +1,18 @@
 """
-core/voice/wake.py — "Hey Zoey", and the rules for when she is allowed to hear it.
+core/voice/wake.py — "Hey Tessa", and the rules for when she is allowed to hear it.
 
 ────────────────────────────────────────────────────────────────────────────────
 THE MODEL THIS SHIPS AGAINST IS NOT HER NAME, AND THAT IS DELIBERATE
 
 openWakeWord ships six pretrained models: `alexa`, `hey_jarvis`, `hey_mycroft`,
 `hey_rhasspy`, and two command models (`timer`, `weather`). **There is no
-"Hey Zoey" and none can be made on this machine** — training needs the `full`
+"Hey Tessa" and none can be made on this machine** — training needs the `full`
 extra (torch + tensorflow-cpu 2.8.1 + datasets + deep-phonemizer) plus GB-scale
 negative corpora, on two cores with no GPU over a metered link.
 
 So this module is built and measured against `hey_jarvis` as a PROXY, because
 the architecture and the per-frame cost are identical whatever the phrase is.
-Swapping in a Colab-trained `hey_zoey.onnx` is ONE LINE IN settings.yaml
+Swapping in a Colab-trained `hey_tessa.onnx` is ONE LINE IN settings.yaml
 (`voice.wake.model`), never a code change. See `docs-reconciliation.md` §4 and
 the Colab instructions in the report.
 
@@ -76,7 +76,7 @@ segment earns it honestly: a physical key was pressed, and nothing but the owner
 can press it.
 
 **A wake word cannot earn it on its own.** Anyone in the room, a television, or
-a recording can say "Hey Zoey". So a wake-triggered segment is provenance
+a recording can say "Hey Tessa". So a wake-triggered segment is provenance
 `human` ONLY once speaker verification has passed on the segment; until then it
 is untrusted. That is exactly why verification scores the SEGMENT rather than
 the sub-second wake phrase, and it is why a stranger can wake her but cannot
@@ -280,7 +280,7 @@ class WakeDetector:
             # THE SEGMENT OWNS THE MICROPHONE WHILE IT IS OPEN.
             #
             # Item 1e's second case: the wake word firing while a segment is
-            # already open. If he says "Hey Zoey, remind me to tell Zoey
+            # already open. If he says "Hey Tessa, remind me to tell Tessa
             # about..." the phrase occurs INSIDE his own command, and without
             # this the detector would fire mid-sentence, re-arm, and cut his
             # sentence in half. A segment that is already open is already

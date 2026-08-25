@@ -3,7 +3,7 @@
 **Written by the Core session. `docs/` is Gerald's; nothing in it has been touched.**
 This file is a diff-in-prose he can apply, reject, or ignore.
 
-Scope: `docs/STRUCTURE.md` (v2.2), `docs/ZOEY_OS-spec.md` (v3.2), and the
+Scope: `docs/STRUCTURE.md` (v2.2), `docs/TESSA_CORE-spec.md` (v3.2), and the
 CAPABILITIES P-tier column. Verified against the files actually on disk on
 2026-08-15, not against memory of having built them.
 
@@ -36,7 +36,7 @@ could not demonstrate today is marked NOT PROVEN even where I believe it works.
 
 ---
 
-## 1. `docs/ZOEY_OS-spec.md` §9 — the phase table
+## 1. `docs/TESSA_CORE-spec.md` §9 — the phase table
 
 ### Proposed replacement rows
 
@@ -59,7 +59,7 @@ could not demonstrate today is marked NOT PROVEN even where I believe it works.
 ## 2. The persistence gap — the finding that matters most
 
 `docs/STRUCTURE.md` lists `core/db/{connection,models,migrations}` as **P1**,
-and `docs/ZOEY_OS-spec.md` §6 specifies the schema. The spec's machine-constraint
+and `docs/TESSA_CORE-spec.md` §6 specifies the schema. The spec's machine-constraint
 table names **"SQLite WAL + job checkpointing. Test by pulling the plug mid-job."**
 as the answer to unstable mains.
 
@@ -120,7 +120,7 @@ core\brain\executor.py        the tier gate — the security-critical one
 core\brain\intents.py         the tools she can be asked for by voice
 core\brain\llm\{base,gemini,anthropic_llm,local}.py
 core\brain\memory.py
-core\brain\persona.py         zoey.md loader
+core\brain\persona.py         tessa.md loader
 core\brain\phrasings.py
 core\brain\provenance.py      THE INJECTION FENCE (docs call this security\sanitize.py)
 core\brain\repair.py          transcript repair incl. strip_wake_name()
@@ -184,7 +184,7 @@ Surveyed in full this run. Recording the outcome so the trip is not repeated:
 
 - openWakeWord runs on **onnxruntime, no torch** for inference (torch is the
   `full` extra, which is for *training*).
-- **No "Hello Zoey" or "Hey Zoey" model exists.** The complete shipped set is
+- **No "Hello Tessa" or "Hey Tessa" model exists.** The complete shipped set is
   `alexa`, `hey_jarvis`, `hey_mycroft`, `hey_rhasspy`, plus `timer` and
   `weather` command models.
 - Training one locally needs the `full` extra (torch + `tensorflow-cpu==2.8.1` +
@@ -194,11 +194,11 @@ Surveyed in full this run. Recording the outcome so the trip is not repeated:
   brought back.
 
 **Proposed spec §11 row:** *"Wake word — model must be trained in Colab; no
-pretrained 'Hey Zoey' exists. Local training is not viable on this hardware."*
+pretrained 'Hey Tessa' exists. Local training is not viable on this hardware."*
 
 ---
 
-## 5. `docs/ZOEY_OS-CAPABILITIES.md` — the P-tier column
+## 5. `docs/TESSA_CORE-CAPABILITIES.md` — the P-tier column
 
 I have **not** rewritten this one, and I want to say why rather than let it look
 like an oversight: the P-tier column is a per-capability claim about what she can

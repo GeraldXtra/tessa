@@ -1,5 +1,5 @@
 /*
- * Zoey Orb — the whole visual layer.
+ * Tessa Orb — the whole visual layer.
  *
  * Rule one, enforced by scripts/check-contract.mjs: not a single colour literal
  * in this file. Every value below is var(--something) resolved from the
@@ -10,7 +10,7 @@
  * pure void with no card behind it.
  */
 
-@import '@zoey/tokens/css';
+@import '@tessa/tokens/css';
 
 /* ─────────────────────────────────────────────── app-local layout metrics ──
  * Not colours, and not in tokens.json — these are this surface's own geometry.
@@ -165,10 +165,17 @@ ol {
   height: 100%;
 }
 
+/* THE RAIL IS ON THE RIGHT, and so is everything that opens from it.
+   His ruling, and the reason is a collision he actually hit: every rail opened
+   LEFT, so PULSE's drawer rendered over the calendar, which is the one
+   permanent panel and is docked bottom-left. Moving the rail to the far right
+   puts the drawer, the approval card and the rail in one column and leaves the
+   whole left side to the calendar. `1fr var(--rail-w)`, and <Rail/> is the LAST
+   child of .app__body so grid auto-placement puts it in the second track. */
 .app__body {
   position: relative;
   display: grid;
-  grid-template-columns: var(--rail-w) 1fr;
+  grid-template-columns: 1fr var(--rail-w);
   min-height: 0;
 }
 
@@ -888,9 +895,9 @@ ol {
   display: flex;
   flex-direction: column;
   align-items: stretch;
-  border-right: var(--hairline) solid var(--panel-border);
-  /* Above the drawer. The drawer starts at left:var(--rail-w) and slides in
-     from translateX(-100%), so for those 180ms it passes across the rail's
+  border-left: var(--hairline) solid var(--panel-border);
+  /* Above the drawer. The drawer ends at right:var(--rail-w) and slides in
+     from translateX(100%), so for those 180ms it passes across the rail's
      column. Without this the labels flicker under a moving panel every time a
      rail is opened. */
   position: relative;
@@ -916,12 +923,14 @@ ol {
 }
 
 /* §R.7: "a 2px --accent bar on the rail's INNER edge, 24px tall, vertically
-   centred on the label". Inner edge = the side facing the app, i.e. the right
-   edge of a left-hand rail. Fixed 24px and centred, not stretched to the item. */
+   centred on the label". Inner edge = the side facing the app. The rail moved
+   to the right edge, so that is now its LEFT side — this used to say right:0
+   and would have drawn the marker against the window frame, outside the app,
+   where it reads as a stray line rather than as "this rail is open". */
 .rail__item[data-active='true']::before {
   content: '';
   position: absolute;
-  right: 0;
+  left: 0;
   top: 50%;
   transform: translateY(-50%);
   width: 2px;
@@ -948,7 +957,7 @@ ol {
 .rail__item[data-status='red']::before {
   content: '';
   position: absolute;
-  right: 0;
+  left: 0;
   top: 50%;
   transform: translateY(-50%);
   width: 2px;
@@ -956,10 +965,35 @@ ol {
   background: var(--status-error);
 }
 
-/* §R.7: "Vertical text, rotated 180°, reading bottom-to-top." */
+/* The rail refuses to open while an approval is pending, and says so. Vertical
+   like the labels, in the warn colour, pushed to the bottom of the column so it
+   reads as a condition on the rail rather than as a sixth rail. */
+.rail__item:disabled {
+  opacity: 0.28;
+  cursor: not-allowed;
+}
+
+.rail__blocked {
+  margin-top: auto;
+  padding: var(--sp-4) 0;
+  align-self: center;
+  writing-mode: vertical-rl;
+  text-orientation: mixed;
+  font-size: var(--fs-label);
+  text-transform: var(--label-transform);
+  letter-spacing: var(--label-tracking);
+  color: var(--status-warn);
+}
+
+/* §R.7 asked for "vertical text, rotated 180 degrees, reading bottom-to-top",
+   and that was written for a LEFT-hand rail. THE ROTATION FLIPS WITH THE RAIL.
+   `writing-mode: vertical-rl` alone reads TOP-TO-BOTTOM: the reader tilts their
+   head to the RIGHT, which is toward the window edge the rail now sits on. The
+   extra rotate(180deg) made it bottom-to-top, tilting the head LEFT — correct
+   against a left edge and backwards against a right one. It is deleted rather
+   than kept at 0deg so nothing re-adds it by copying the old rule. */
 .rail__label {
   writing-mode: vertical-rl;
-  transform: rotate(180deg);
   text-orientation: mixed;
   font-size: var(--fs-label);
   text-transform: var(--label-transform);
@@ -972,6 +1006,48 @@ ol {
   position: relative;
   overflow: hidden;
   min-width: 0;
+  /* ─── THE STAGE FLOOR. A DESIGN DECISION, NOT A MATCH. ───────────────────
+     He ruled the background in, describing the reference's dark blue-purple
+     wash. Measured, that wash is NOT rendered. Four whole-layout frames and
+     four close crops agree:
+
+       * it is not centred on the sphere — the median just outside the
+         silhouette runs 8.57 / 8.79 / 8.57 / 7.79 across r/R 1.30→2.15 in
+         image2 and then falls only at the frame edge. A radial centred on the
+         sphere falls monotonically outward; this does not fall at all.
+       * it is EDGE-WEIGHTED — top and bottom rows and the right column read
+         1.5-2.5 L above the middle-left in every frame.
+       * its hue is 250-264, blue-violet, in frames whose theme is MAGENTA.
+         A theme-coupled ambient would read near 307.
+       * its LEVEL differs between frames: 8.57/8.79 for image2/image5 against
+         6.79/7.14 for image9/image11. A rendered gradient would be identical.
+
+     That is an LCD's black level plus backlight bleed, photographed. Copying
+     it exactly would be copying the camera.
+
+     WHY UNIFORM AND NOT THE SPHERE-CENTRED RADIAL BELOW. The radial exists and
+     works, and it is the wrong shape for this: being centred on the sphere it
+     puts its lift exactly in the gaps between the sphere's own dots. Measured
+     at --force-aura=0.15, the far background stayed at 0.000 while the mid-face
+     gap rose to 2.64 and dot-to-gap modulation fell 1.000 → 0.871 — already
+     below the reference's own worst frame (0.961). A flat floor lifts the void
+     and the gaps by the same amount, which is what the photograph shows.
+
+     THE INTENSITY, and the arithmetic. --bg-ambient is the accent at 20% over
+     --theme-void, so 10% of it is the accent at 2%. Under magenta, whose accent
+     is --theme-magenta-body, that measured 2.14 against a predicted 2.0 — call
+     it two levels out of 255. Against a mid-face dot core of
+     35.7 that gives a raw dot-to-floor ratio of 18.8 and a modulation of 0.899
+     — inside the reference photograph's own 13.5-18.3 and 0.862-0.896. It is
+     the floor at which this build's face reads exactly as contrasty as the
+     reference's does, and it is chosen for that reason rather than to match a
+     luminance the camera invented.
+
+     IT IS THEME-DEPENDENT and that is stated rather than hidden: the accent's
+     own luminance sets it, so gold lands near 4.2 and red near 1.8 against
+     magenta's 2.0. Normalising it would need a per-theme constant, which is a
+     bigger change than the finding justifies. */
+  background: color-mix(in srgb, var(--bg-ambient) 10%, transparent);
 }
 
 /* The ambient glow behind the sphere. CONTRACT §9.1: no card background on the
@@ -985,9 +1061,12 @@ ol {
    exactly as it did before this existed rather than showing a floor value it
    has no data for.
 
-   The mix is 20% where it was 14%: `--aura-alpha`'s floor of 0.70 puts the
-   RESTING stage back at the old 14%, and everything above that is headroom the
-   instrument needs. Idle is unchanged; only loaded is different. */
+   THE DEFAULTS ARE NOW ZERO, not one. `--aura-alpha`'s floor moved to 0.00
+   after the halo was measured against the reference (see aura.ts), so the
+   fallbacks here have to move with it — a renderer that has not yet received a
+   heartbeat would otherwise paint the aura at FULL strength for the first few
+   seconds of every launch, which is the one moment he is most likely to be
+   looking at it. */
 .stage::before {
   content: '';
   position: absolute;
@@ -1008,7 +1087,7 @@ ol {
   );
   transform-origin: var(--sphere-cx, 50%) var(--sphere-cy, 48%);
   transform: scale(var(--aura-scale, 1));
-  opacity: var(--aura-alpha, 1);
+  opacity: var(--aura-alpha, 0);
   transition:
     transform 2400ms linear,
     opacity 2400ms linear;
@@ -1034,26 +1113,28 @@ ol {
 
 /* ───────────────────────────────────────────────────────────────── drawer ── */
 
-/* §R.7: "320px wide, full height, RIGHT OF THE RAIL" — so it sits against the
-   rail at the left of the body, not docked to the far right. Its left edge is
-   square against the rail; its right edge faces the sphere and carries both the
-   1px border ("inner edge only") and the 12px radius ("outer corners"). */
+/* §R.7: "320px wide, full height, beside the rail". With the rail on the RIGHT
+   the drawer sits to its LEFT: its right edge is square against the rail, and
+   its left edge faces the sphere and carries both the 1px border ("inner edge
+   only") and the 12px radius ("outer corners"). Every one of the four
+   directional properties below is mirrored from what it was, and the sphere's
+   drawer offset in App.tsx is mirrored with them — a drawer that opens right
+   while the sphere still dodges right is the collision, not the fix. */
 .drawer {
   position: absolute;
   top: 0;
-  /* Offset by the rail, not flush to the body's left edge. §R.7 says "right of
-     the rail", and at left:0 the drawer sat ON TOP of it — the other four rail
-     labels were unreachable for as long as any drawer was open, which defeats
-     the point of a rail. */
-  left: var(--rail-w);
+  /* Offset by the rail, not flush to the body's right edge. At right:0 the
+     drawer sat ON TOP of the rail and the other four labels were unreachable
+     for as long as any drawer was open, which defeats the point of a rail. */
+  right: var(--rail-w);
   bottom: 0;
   width: var(--transcript-w);
   display: flex;
   flex-direction: column;
   background: var(--panel);
-  border-right: var(--hairline) solid var(--panel-border);
-  border-radius: 0 var(--panel-radius) var(--panel-radius) 0;
-  transform: translateX(-100%);
+  border-left: var(--hairline) solid var(--panel-border);
+  border-radius: var(--panel-radius) 0 0 var(--panel-radius);
+  transform: translateX(100%);
 
   /* §R.7: slides in 180ms cubic-bezier(.2,.8,.2,1). SLIDES, NEVER FADES —
      transform only, no opacity. */
@@ -1596,18 +1677,6 @@ ol {
    */
   --col-label: color-mix(in srgb, var(--text) 62%, var(--theme-void));
 
-  /**
-   * THE FLOOR. Item 6.2 — a horizon plane, and the real one rather than the
-   * contact ellipse he rejected.
-   *
-   * Both derived from tokens, so the ground follows the palette: a floor lit by
-   * a violet sphere and glowing amber would be two light sources with one
-   * object. `--floor-line` is deliberately weaker than `--ornament`, which is
-   * itself below AA on purpose — the plane must be sensed rather than read, and
-   * a floor you can measure against is a chart.
-   */
-  --floor-line: color-mix(in srgb, var(--text-muted) 9%, transparent);
-  --floor-glow: color-mix(in srgb, var(--bg-ambient) 15%, transparent);
 }
 
 /* ── the right column ────────────────────────────────────────────────────────
@@ -1881,7 +1950,8 @@ ol {
 
 /* ── the drawer becomes opaque ───────────────────────────────────────────────
    Its readability today is luck: nothing bright sits behind it only because the
-   sphere is offset right when it opens. This composition removes the luck.
+   sphere dodges away from it when it opens — LEFT now, since the drawer moved
+   to the right edge. This composition removes the luck.
    Measured on the approval card — backdrop-filter is inert on this HD 620, so a
    0.72-alpha panel passes a sharp particle field straight through. The blur
    declaration stays for machines where it works. */
@@ -1929,7 +1999,7 @@ ol {
 
 /* ────────────────────────────────────────────────────── the composition ──
  *
- * Item 4. Two floating panels, a floor, the wordmark, and the state chip.
+ * Item 4. Two floating panels, the wordmark, and the state chip.
  *
  * ─── the fill and the border are MEASURED, not styled ───
  * Sampled off ref-2.png, the only direct capture among the five references:
@@ -2027,10 +2097,27 @@ ol {
 .cal__day {
   font-size: var(--fs-sm);
   font-variant-numeric: tabular-nums;
-  /* --col-label, not --text-muted. The dates are information the owner reads,
-     and --text-muted measures 3.90:1 on this stage — below AA for text at
-     11px. The ornament is allowed to be unreadable; a date is not. */
-  color: var(--col-label);
+  /* ── THE DATE NUMBERS ARE --text, AND THE REFERENCE SAYS SO ──────────────
+     His words: "the calendar and items at the top left — did you see the theme
+     and the font colour they used?" He can barely see these.
+
+     This has now moved twice. It was --text-muted, which measures 3.90:1 on
+     this stage and is below AA at 11px; it went to --col-label at 5.93:1, which
+     passes and is still not what the reference does.
+
+     Measured on reference/v2/image7, the sharpest frame that shows the whole
+     card. Its date ink reads rgb(171,169,169) on a fill of rgb(10,9,13) —
+     8.50:1. That LOOKS like a dimmer white than --text, and it is not: the
+     whole frame is under-exposed by the same factor. Its card fill photographs
+     at 10 where this build's identical --panel renders at 13 (a ratio of 0.77),
+     and 171/232 is 0.74. Two independent landmarks agreeing at three quarters
+     is what says the ink is --text at full strength, photographed dark.
+
+     So --text, 15.72:1. The weekday row above stays at --col-label, which is
+     what restores the hierarchy the reference has and this build had lost:
+     there, the numbers are plainly brighter than the S M T W T F S; here the
+     two were within a hair of each other and the grid read as one grey mass. */
+  color: var(--text);
   text-align: center;
   line-height: 1.55em;
   min-height: 1.55em;
@@ -2125,10 +2212,62 @@ ol {
   background: var(--accent-bright);
 }
 
-/* `blocked` is the one state that is not the accent. CONTRACT §4.1 fixes it
-   amber under all five themes — "waiting on your approval" must not change
-   colour when the palette does, or the one state that needs answering becomes
-   whatever hue is fashionable that day. */
+/* ── THE CHIP'S COLOURS ARE SEMANTIC, NOT THE ACCENT ──────────────────────────
+   His question was "did you see the theme and the font colour they used?" The
+   reference answers it: its chip reads LISTENING in GREEN and SPEAKING in AMBER
+   while its whole interface is magenta. State colour does not follow the
+   palette there, and it should not here.
+
+   The chip answers ONE question — is anything wanted from me? — in four steps:
+
+     idle        grey    nothing is happening
+     listening   green   she is receiving you                (measured: the
+                         reference's LISTENING chip is green)
+     thinking
+     speaking    accent  she is busy; which kind of busy is carried by the
+     working             word and by the sphere's own six signatures
+     blocked     amber   she needs you                       (CONTRACT §4.1)
+
+   ─── IDLE WAS THE ACCENT AND THAT WAS BACKWARDS ───
+   Idle is the state the surface is in almost all the time, and the accent is
+   the loudest colour on screen. Painting "nothing is happening" in it made the
+   resting state the most eye-catching thing on an always-on display. Grey
+   inverts that: at 2am the brightest chip is the one that wants something.
+
+   It also stops being merely cosmetic under GOLD. With idle on the accent,
+   four of the six states would render in gold and the fifth in amber —
+   CIEDE2000 20.3 apart, both warm yellows. The one state that must be
+   unmistakable would have been the hardest to tell from the other four.
+
+   ─── AND SPEAKING IS NOT AMBER, THOUGH THE REFERENCE'S IS ───
+   Deliberate, and it is a measurement losing to the contract rather than being
+   ignored. CONTRACT §4.1 fixes `blocked` amber under every theme. The
+   reference's build has no `blocked` state to protect, so it was free to spend
+   amber on `speaking`; this one is not. Two states sharing amber would cost the
+   distinction §4.1 exists to make — "busy" apart from "stuck waiting for you".
+
+   ─── why --state-idle and not --status-idle ───
+   The Orb's stage is pure black. --status-idle measures 4.0:1 there, short of
+   AA for 13px type, and it is an alias of --text-muted SHARED with the Console
+   (CONTRACT §9) — lifting it would repaint every muted label in that surface to
+   fix a problem only this one has. --state-idle is the same grey at 4.53:1,
+   CIEDE2000 3.6 away. See tokens.json. */
+.statechip[data-state='idle'] .statechip__word {
+  color: var(--state-idle);
+}
+
+.statechip[data-state='idle'] .statechip__dot {
+  background: var(--state-idle);
+}
+
+.statechip[data-state='listening'] .statechip__word {
+  color: var(--status-active);
+}
+
+.statechip[data-state='listening'] .statechip__dot {
+  background: var(--status-active);
+}
+
 .statechip[data-state='blocked'] .statechip__word {
   color: var(--status-warn);
 }
@@ -2150,58 +2289,7 @@ ol {
   max-width: 100%;
 }
 
-/* ─── the floor ─── */
 
-.floor {
-  position: absolute;
-  left: 0;
-  right: 0;
-  /* Anchored under the SPHERE, not to the frame's bottom. A horizon that stays
-     put while the sphere is refitted stops being the ground the sphere stands
-     on and becomes a stripe. */
-  top: calc(var(--sphere-cy, 48%) + var(--sphere-r, 40%));
-  bottom: 0;
-  z-index: 0;
-  pointer-events: none;
-
-  /* THE ALIASING, which was named as the risk before this was built.
-     `repeating-linear-gradient` with a 34px period and no hard stop — every
-     band is a ramp, so each edge is filtered across five pixels instead of
-     landing on one. A 1px rule at the same spacing would crawl on an HD 620
-     the moment anything moved; a ramp has nothing to crawl with. Nothing here
-     animates either, so there is no motion to alias in the first place. */
-  background-image:
-    repeating-linear-gradient(
-      to bottom,
-      transparent 0,
-      transparent 22px,
-      var(--floor-line) 27px,
-      transparent 34px
-    ),
-    /* The ground glow. Its peak sits BELOW the top of the element, not at it.
-       Peaked at the top edge it drew a hard bright line exactly where the
-       sphere meets the floor — which is a contact shadow with the contrast
-       inverted, i.e. the thing he rejected wearing the opposite colour. */
-      linear-gradient(to bottom, transparent, var(--floor-glow) 26%, transparent 68%);
-  /* Fades in AND out. Out at the bottom is atmospheric perspective, and it is
-     also why the bands never get close enough to moiré — the plane is gone
-     before the spacing tightens. In at the top is what stops the whole floor
-     having a horizontal edge of its own: a plane that begins abruptly is a
-     stripe, and the eye reads the stripe instead of the ground. */
-  mask-image: linear-gradient(
-    to bottom,
-    transparent,
-    rgb(0 0 0 / 100%) 22%,
-    rgb(0 0 0 / 100%) 55%,
-    transparent 88%
-  );
-}
-
-/* NO CONVERGING PERSPECTIVE LINES. Vertical rules receding to a vanishing point
-   are what "grid plane" usually means, and they are precisely the case that
-   crawls: their spacing passes through every sub-pixel value between the frame
-   edge and the horizon, so on a non-antialiased 1366-wide frame they shimmer.
-   Horizontal bands only, whose spacing is constant by construction. */
 
 /* ───────────────────────────────────── built-and-dark rails, items 5 + 6 ── */
 
@@ -2492,4 +2580,411 @@ ol {
 
 .topo__node--self .topo__note {
   color: var(--col-label);
+}
+
+/* ══════════════════════════════════════════════════ THE REFERENCE REBUILD ══
+ *
+ * His verdict on the previous composition: it did not look like the picture,
+ * the calendar was blocking the sphere, the right side was occupying space
+ * without earning it, and the bottom had none of its controls.
+ *
+ * ─── MEASURED FROM THE REFERENCE, NOT CHOSEN ───
+ * Sixteen images at reference/image1..16.png. NONE is a direct capture — every
+ * one is a photograph of a screen, so no single image can be trusted for
+ * colour and the method is AGREEMENT ACROSS INDEPENDENT SHOTS instead:
+ *
+ *   main sphere      hue 307.5-312.5 deg   16 of 16 agree, spread 10 deg
+ *   left companion   hue ~293-307 deg      magenta, dim
+ *   right companion  hue 152.7 deg         green, dim
+ *   panel fill       rgb(9,9,11)           very nearly the void
+ *   background       rgb(5,3,8)            near-black
+ *   state chip       hue 39.1 deg          AMBER while the UI is magenta
+ *
+ * That last line settles a question the brief raised: state colours in the
+ * reference are SEMANTIC, not accent-derived. Removing the amber THEME does not
+ * touch the amber STATE, the same way alarm red does not theme.
+ *
+ * The panel fill measured at rgb(9,9,11) is within four levels of the void, so
+ * `--panel` is used unchanged — the tokens were already in that neighbourhood
+ * and no new colour value is introduced anywhere below.
+ */
+
+/* ─── the two columns ─── */
+
+.col {
+  position: absolute;
+  top: var(--sp-4);
+  bottom: var(--sp-4);
+  width: var(--panel-left-w);
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+  z-index: 3;
+  pointer-events: none;
+}
+
+.col--left {
+  left: var(--sp-4);
+}
+
+.col--right {
+  right: var(--sp-4);
+  width: var(--panel-right-w);
+}
+
+/* Each card is its own object on the void, as the reference has them — not one
+   tall panel with rules across it. */
+.col__card {
+  padding: var(--sp-3) var(--sp-4);
+  background: var(--panel);
+  border: var(--hairline) solid var(--panel-border);
+  border-radius: var(--panel-radius);
+  /* A shadow of the VOID, so the card sinks into the background rather than
+     casting onto a page. It is also what keeps a dim companion sphere passing
+     behind from showing through as a bright smear. */
+  box-shadow: 0 0 var(--sp-6) var(--sp-4) var(--bg-void);
+}
+
+.col__card--grow {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+}
+
+.card {
+  padding: var(--sp-3) var(--sp-4);
+  background: var(--panel);
+  border: var(--hairline) solid var(--panel-border);
+  border-radius: var(--panel-radius);
+  box-shadow: 0 0 var(--sp-6) var(--sp-4) var(--bg-void);
+}
+
+.card__row {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: var(--sp-3);
+}
+
+.card__rule {
+  height: var(--hairline);
+  background: var(--panel-border);
+  margin: var(--sp-2) 0;
+}
+
+.card__k,
+.panel-sec__title,
+.today__title {
+  font-size: var(--fs-label);
+  color: var(--col-label);
+  text-transform: var(--label-transform);
+  letter-spacing: var(--label-tracking);
+}
+
+.card__v {
+  font-size: var(--fs-base);
+  color: var(--text);
+}
+
+/* NO DATA is a first-class state, styled to be legible and plainly not a value.
+   It is never a dash, never a zero, and never an empty box. */
+.card__nodata,
+.panel-sec__nodata {
+  font-size: var(--fs-sm);
+  color: var(--col-label);
+  letter-spacing: var(--label-tracking);
+}
+
+.card__why,
+.panel-sec__why {
+  margin: var(--sp-2) 0 0;
+  font-size: var(--fs-label);
+  color: var(--ornament);
+  line-height: var(--lh-base);
+}
+
+.panel-sec {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+}
+
+.panel-sec__title {
+  margin: 0 0 var(--sp-1);
+}
+
+/* ─── today ─── */
+
+.today {
+  margin-top: var(--sp-3);
+}
+
+.today__title {
+  display: block;
+  margin: 0 0 var(--sp-2);
+}
+
+.today__none,
+.today__off {
+  margin: 0;
+  font-size: var(--fs-sm);
+  color: var(--text);
+}
+
+/* "not connected" is a fault the owner can act on; "no events today" is an
+   answer. Only the first takes a warning colour — drawing them alike is exactly
+   the conflation the three-state payload exists to prevent. */
+.today__off {
+  color: var(--status-warn);
+}
+
+.today__list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+}
+
+.today__ev {
+  display: grid;
+  grid-template-columns: 4.2em 1fr;
+  gap: var(--sp-2);
+  align-items: baseline;
+}
+
+.today__when {
+  font-size: var(--fs-label);
+  color: var(--col-label);
+}
+
+/* External content (CONTRACT §6.2). Rendered, clipped, and nothing else. */
+.today__what {
+  font-size: var(--fs-sm);
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.today__stale {
+  margin: var(--sp-2) 0 0;
+  font-size: var(--fs-label);
+  color: var(--status-warn);
+}
+
+/* ─── chat ─── */
+
+.chat {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  width: 100%;
+  min-height: 0;
+}
+
+.chat__tabs {
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-3);
+}
+
+.chat__tab {
+  background: none;
+  border: none;
+  padding: 0 0 var(--sp-1);
+  font: inherit;
+  font-size: var(--fs-label);
+  color: var(--accent-bright);
+  text-transform: var(--label-transform);
+  letter-spacing: var(--label-tracking);
+  border-bottom: 2px solid var(--accent-bright);
+  cursor: default;
+}
+
+.chat__tabnote {
+  font-size: var(--fs-label);
+  color: var(--ornament);
+}
+
+.chat__body {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.chat__count {
+  margin: 0;
+  font-size: var(--fs-sm);
+  color: var(--text);
+}
+
+.chat__field {
+  width: 100%;
+  padding: var(--sp-2) var(--sp-3);
+  background: var(--bg-void);
+  border: var(--hairline) solid var(--panel-border);
+  border-radius: var(--radius-sm);
+  font: inherit;
+  font-size: var(--fs-sm);
+  color: var(--text);
+}
+
+/* Disabled and SAYING SO. The placeholder carries the reason, because a
+   disabled control with no explanation is indistinguishable from a broken one. */
+.chat__field:disabled {
+  color: var(--col-label);
+  cursor: not-allowed;
+}
+
+.chat__field::placeholder {
+  color: var(--col-label);
+}
+
+/* ─── the clock, top right ─── */
+
+.clock {
+  position: absolute;
+  top: var(--sp-4);
+  right: var(--sp-4);
+  font-size: var(--fs-md);
+  color: var(--text);
+  letter-spacing: 0.08em;
+  z-index: 2;
+  pointer-events: none;
+}
+
+.clock__sep {
+  color: var(--col-label);
+}
+
+/* THE CLOCK YIELDS THE RIGHT-HAND COLUMN, and this is fallout from moving the
+   rail there rather than a pre-existing fault.
+   The clock sits at the stage's top-right. That used to be empty space; it is
+   now where the drawer and the approval card open, and the capture shows
+   "13:31" printed straight through the PULSE panel's own header. Hiding it is
+   the same rule the rail already follows — one thing on the right at a time —
+   and the clock is the one of the three that asserts nothing: the status bar
+   carries the connection, the heartbeat and the spend regardless.
+   `opacity`, not `display`, so nothing reflows when a drawer slides. */
+.stage[data-bare='false'] .clock {
+  opacity: 0;
+  transition: opacity var(--motion-fast) var(--motion-easing);
+}
+
+/* ─── the bottom controls ─── */
+
+.switcher {
+  position: absolute;
+  left: var(--sphere-cx, 50%);
+  bottom: var(--sp-5);
+  transform: translateX(-50%);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--sp-3);
+  z-index: 3;
+}
+
+.switcher__row {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-5);
+}
+
+.switcher__arrow {
+  width: 26px;
+  height: 26px;
+  display: grid;
+  place-items: center;
+  background: none;
+  border: var(--hairline) solid var(--panel-border);
+  border-radius: 50%;
+  font: inherit;
+  font-size: var(--fs-md);
+  line-height: 1;
+  color: var(--col-label);
+  cursor: pointer;
+}
+
+/* Disabled, VISIBLY. He must be able to see that it cannot act before he taps
+   it, not only after — and the title attribute carries the reason why. */
+.switcher__arrow:disabled {
+  color: var(--ornament);
+  border-color: var(--ornament);
+  cursor: not-allowed;
+}
+
+.switcher__id {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--sp-2);
+}
+
+.switcher__name {
+  font-size: var(--fs-md);
+  font-weight: 600;
+  color: var(--accent-bright);
+  letter-spacing: 0.38em;
+  /* The tracking pushes the last letter's sidebearing outside the box, so the
+     word reads off-centre by half a letter-space without this. Measured: with
+     it, TESSA's ink centre lands 0.4 px from the commanded sphere centre. */
+  text-indent: 0.38em;
+}
+
+.switcher__rungs {
+  display: flex;
+  gap: 5px;
+}
+
+.switcher__rung {
+  width: 10px;
+  height: 2px;
+  border-radius: 1px;
+  background: var(--ornament);
+}
+
+.switcher__rung[data-lit] {
+  background: var(--accent-bright);
+}
+
+.switcher__pill {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: var(--sp-2) var(--sp-4);
+  background: var(--panel);
+  border: var(--hairline) solid var(--panel-border);
+  border-radius: var(--radius-pill);
+  font: inherit;
+  font-size: var(--fs-label);
+  color: var(--col-label);
+  text-transform: var(--label-transform);
+  letter-spacing: var(--label-tracking);
+  cursor: pointer;
+}
+
+.switcher__pill:hover {
+  color: var(--text);
+}
+
+.switcher__pill-chev {
+  color: var(--accent-bright);
+}
+
+/* ─── the calendar dock: the one permanent panel ─── */
+
+.cal-dock {
+  position: absolute;
+  left: var(--sp-4);
+  bottom: var(--sp-4);
+  width: var(--panel-left-w);
+  padding: var(--sp-3) var(--sp-4);
+  background: var(--panel);
+  border: var(--hairline) solid var(--panel-border);
+  border-radius: var(--panel-radius);
+  box-shadow: 0 0 var(--sp-6) var(--sp-4) var(--bg-void);
+  z-index: 3;
+  pointer-events: none;
 }

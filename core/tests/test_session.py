@@ -133,7 +133,7 @@ check("a chord-started session is the SAME object",
 # ── 3. THE CLOSING PHRASES ───────────────────────────────────────────────────
 print("\n3. it closes on his word, on intent rather than an exact string")
 CLOSERS = ["I'm done for now", "I'm done", "that's all", "that's all for now",
-           "we're finished", "thank you Zoey", "thanks Zoey", "go to sleep",
+           "we're finished", "thank you Tessa", "thanks Tessa", "go to sleep",
            "stop listening", "nothing else", "that will be all",
            "we are finished", "done for now"]
 for utt in CLOSERS:
@@ -161,7 +161,7 @@ for utt in ("thank you", "thanks", "thanks a lot", "thank you very much",
     check(f"...and {utt!r} is answered graciously, not with a capability list",
           "not mine" not in out.speech.lower() and bool(out.speech),
           out.speech[:50])
-for utt in ("thank you Zoey", "thanks Zoey", "thank you Zoi"):
+for utt in ("thank you Tessa", "thanks Tessa", "thank you Zoi"):
     check(f"{utt!r} DOES close", Router().route(utt).ends_session)
 
 # ── "go to sleep" must not touch the machine ─────────────────────────────────
@@ -186,7 +186,7 @@ check("'stop listening completely' turns the phrase off too",
 # ── 4. THINGS THAT MUST NOT CLOSE IT ─────────────────────────────────────────
 print("\n4. a session is not closed by anything else")
 for utt in ("open my downloads", "what is the time", "how is it going",
-            "stop", "be quiet", "open chrome", "hey zoey"):
+            "stop", "be quiet", "open chrome", "hey tessa"):
     out = Router().route(utt)
     check(f"{utt!r} keeps the session open", not out.ends_session,
           f"intent={out.intent.value}")
@@ -277,10 +277,10 @@ check("...and flushes the ring first, so she cannot hear herself",
 
 # ITEM 3h — reopening after a close greets again.
 r2 = Router()
-first_line = r2.route("Hey Zoey").speech
-ack = r2.route("Hey Zoey").speech
+first_line = r2.route("Hey Tessa").speech
+ack = r2.route("Hey Tessa").speech
 r2.mark_conversation_closed()
-after_close = r2.route("Hey Zoey").speech
+after_close = r2.route("Hey Tessa").speech
 check("mid-session the wake phrase ACKNOWLEDGES rather than re-greeting",
       ack != first_line and "Good " not in ack, ack)
 check("after a close it GREETS again — the close is the gap",

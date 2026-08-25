@@ -41,7 +41,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
-#: CONTRACT §4.1's `evt.permission.request` carries `expiresAt`. ZOEY_OS-spec §5
+#: CONTRACT §4.1's `evt.permission.request` carries `expiresAt`. TESSA_CORE-spec §5
 #: rule 5 puts the approval window at 30 minutes, after which the job becomes
 #: `needsReview` rather than `failed` — nothing broke, nobody answered.
 APPROVAL_WINDOW_S = 30 * 60.0

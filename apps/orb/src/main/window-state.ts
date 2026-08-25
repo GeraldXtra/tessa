@@ -1,5 +1,5 @@
 /**
- * Window geometry persistence — %LOCALAPPDATA%\Zoey\orb-window.json.
+ * Window geometry persistence — %LOCALAPPDATA%\Tessa\orb-window.json.
  *
  * Sits beside runtime.json but is unrelated to it: no secret, no ACL
  * requirement, and losing it costs nothing but a maximized window. Every read
@@ -34,7 +34,7 @@ function statePath(): string {
     (process.platform === 'win32'
       ? join(homedir(), 'AppData', 'Local')
       : join(homedir(), '.local', 'share'));
-  return join(base, 'Zoey', 'orb-window.json');
+  return join(base, 'Tessa', 'orb-window.json');
 }
 
 export { statePath as windowStatePath };

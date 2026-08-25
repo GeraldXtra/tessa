@@ -10,17 +10,21 @@
  * through a narrow contextBridge surface.
  */
 
-import { readFileSync } from 'node:fs'
+import { readFileSync, writeFileSync} from 'node:fs'
 import { join } from 'node:path'
-import { app, BrowserWindow, ipcMain, shell } from 'electron'
+import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, shell } from 'electron'
 // The window's background is set before any CSS loads, so it cannot come from
-// tokens.css — it has to be read from the token SOURCE. @zoey/tokens is a
+// tokens.css — it has to be read from the token SOURCE. @tessa/tokens is a
 // devDependency, so electron-vite bundles this JSON into main rather than
 // leaving a runtime require. No hex literal ever appears in this file.
-import tokens from '@zoey/tokens'
+import tokens from '@tessa/tokens'
 import { devResize, devType, reportPty, shutdownPtyHost, startPty, killPty } from './pty-host.ts'
 import { DaemonClient } from './ws-client.ts'
 import { DaemonSupervisor } from './daemon.ts'
+import { describeShell, pickShell, resolveShells, type ShellId } from './shells.ts'
+import { readTheme } from './theme.ts'
+import { listDir } from './filetree.ts'
+import { ensureSettingsFile, loadSettings } from './settings.ts'
 
 const isDev = !app.isPackaged
 
@@ -47,6 +51,104 @@ app.commandLine.appendSwitch('disable-features', 'CalculateNativeWinOcclusion')
 /** Cold-start measurement — reported at first paint, not guessed. */
 const t0 = process.hrtime.bigint()
 const msSince = (from: bigint): number => Number(process.hrtime.bigint() - from) / 1e6
+
+/**
+ * ── THE MENU, AND WHY COPY AND PASTE APPEARED DEAD ──────────────────────────
+ *
+ * `autoHideMenuBar: true` HIDES the menu bar. It does not remove the menu, and
+ * it does not remove its ACCELERATORS. With no menu set, Electron installs a
+ * default one whose Edit roles bind Ctrl+A, Ctrl+C, Ctrl+X and Ctrl+V at the
+ * BROWSER level — and browser-level accelerators are handled before the
+ * keystroke ever reaches the renderer.
+ *
+ * In a WebGL terminal that is fatal to all four. xterm's selection is not a DOM
+ * selection, so Chromium's `copy` role copies nothing and `selectAll` selects
+ * nothing, while both swallow the key. That is the whole of Gerald's complaint:
+ * "I copied something and I can't paste it on my custom console." The keys were
+ * being eaten upstairs.
+ *
+ * A CUSTOM MENU RATHER THAN `setApplicationMenu(null)`, deliberately. Null is
+ * one line and it also throws away the View role — Ctrl+R reload, Ctrl+Shift+I
+ * DevTools, and Ctrl+= / Ctrl+- zoom. Losing DevTools would make the next
+ * person's job harder, and losing the zoom keys silently while fixing copy
+ * would be trading a regression for a fix. So the menu is rebuilt with the
+ * Edit roles REMOVED and everything worth keeping retained.
+ *
+ * Zoom is deliberately NOT kept as a menu role: Chromium's zoom scales the whole
+ * page, which in a terminal blurs the glyph atlas and desynchronises the fit
+ * addon's column maths. Font size is done properly in the renderer instead, on
+ * the same keys.
+ */
+function installMenu(isDevBuild: boolean): void {
+  /**
+   * Electron types the menu-click window as `BaseWindow`, which has no
+   * `webContents` — only `BrowserWindow` does. Resolving the focused
+   * BrowserWindow is both type-correct and behaviour-correct: the menu acts on
+   * the window the user is looking at.
+   */
+  const toTerminal = (cmd: string) => (): void => {
+    BrowserWindow.getFocusedWindow()?.webContents.send('tessa:menu', cmd)
+  }
+
+  const template: Electron.MenuItemConstructorOptions[] = [
+    {
+      label: 'Terminal',
+      submenu: [
+        // NOTE THE ABSENCE OF `accelerator:` ON EVERY ITEM. That is the fix,
+        // not an oversight. Setting `accelerator` would re-register these chords
+        // at the browser level and reintroduce exactly the interception this
+        // menu exists to remove. The chord is written into the LABEL so it is
+        // discoverable, while the key itself travels to the renderer untouched
+        // and is handled by xterm's custom key handler — which, unlike Chromium,
+        // knows whether there is a terminal selection.
+        //
+        // Clicking the item is a second route to the same action, via
+        // `tessa:menu`, for when he cannot remember the chord.
+        { label: 'Copy\tCtrl+Shift+C', click: toTerminal('copy') },
+        { label: 'Paste\tCtrl+Shift+V', click: toTerminal('paste') },
+        { label: 'Select All\tCtrl+A', click: toTerminal('selectAll') },
+        // `clearSelection` was reachable from the menu channel and had a
+        // keyboard case, but nothing bound it and no menu item sent it — an
+        // action wired at both ends and unreachable in the middle. A menu item
+        // is the honest fix: one line, and it is discoverable.
+        { label: 'Clear Selection', click: toTerminal('clearSelection') },
+        { type: 'separator' },
+        // PANES. Chords in the label only, no `accelerator:` — setting one
+        // would re-register the chord at browser level and reintroduce the
+        // exact interception the custom menu exists to remove.
+        { label: 'Split Right	Ctrl+Shift+D', click: toTerminal('splitRight') },
+        { label: 'Split Down	Ctrl+Shift+E', click: toTerminal('splitDown') },
+        { label: 'Close Pane	Ctrl+Shift+W', click: toTerminal('closePane') },
+        { type: 'separator' },
+        { label: 'New PowerShell', click: toTerminal('shell:powershell') },
+        { label: 'New Command Prompt', click: toTerminal('shell:cmd') },
+        { label: 'New Git Bash', click: toTerminal('shell:gitbash') },
+        { type: 'separator' },
+        { role: 'quit' },
+      ],
+    },
+    {
+      label: 'View',
+      submenu: [
+        // KEPT: reload and DevTools. DEVTOOLS IN DEV ONLY — a packaged build
+        // should not ship an inspector on a keystroke.
+        ...(isDevBuild
+          ? ([
+              { role: 'reload' },
+              { role: 'forceReload' },
+              { role: 'toggleDevTools' },
+              { type: 'separator' },
+            ] as Electron.MenuItemConstructorOptions[])
+          : []),
+        // NOT `role: 'zoomIn'` — see the note above. These reach the terminal.
+        { label: 'Bigger Text\tCtrl+=', click: toTerminal('fontIncrease') },
+        { label: 'Smaller Text\tCtrl+-', click: toTerminal('fontDecrease') },
+        { label: 'Reset Text Size\tCtrl+0', click: toTerminal('fontReset') },
+      ],
+    },
+  ]
+  Menu.setApplicationMenu(Menu.buildFromTemplate(template))
+}
 
 function createWindow(): BrowserWindow {
   const win = new BrowserWindow({
@@ -101,9 +203,9 @@ function createWindow(): BrowserWindow {
       win.focus()
       app.focus({ steal: true })
     }
-    console.log(`[zoey-console] cold start -> first paint: ${msSince(t0).toFixed(0)} ms`)
+    console.log(`[tessa-console] cold start -> first paint: ${msSince(t0).toFixed(0)} ms`)
     const mem = process.memoryUsage()
-    console.log(`[zoey-console] main rss: ${(mem.rss / 1024 / 1024).toFixed(1)} MB`)
+    console.log(`[tessa-console] main rss: ${(mem.rss / 1024 / 1024).toFixed(1)} MB`)
   })
 
   // Never let the app navigate itself somewhere else, and never open a window
@@ -136,7 +238,7 @@ function createWindow(): BrowserWindow {
 }
 
 function logMain(message: string): void {
-  console.log(`[zoey-console] ${message}`)
+  console.log(`[tessa-console] ${message}`)
 }
 
 /* ═════════════════════════════════════════ DEV HARNESS — Step 5 exit criterion */
@@ -152,6 +254,49 @@ type DevStep =
   | { type: 'wait'; ms: number }
   | { type: 'resize'; cols: number; rows: number }
   | { type: 'log'; msg: string }
+  /** A chord, dispatched as a REAL KeyboardEvent into xterm. */
+  | { type: 'key'; chord: string }
+  /** Read something back into the log: `clipboard` or `selection`. */
+  | { type: 'dump'; what: string }
+  /** Seed the OS clipboard, for the paste-from-outside proof. */
+  | { type: 'clip'; text: string }
+  /**
+   * Drive the MENU route, exactly as a click does.
+   *
+   * Item 1B needs this to exist. `key` proves the KEYBOARD path, and would
+   * still pass if the menu kept its own unguarded copy of the same action —
+   * which is precisely the bug this step is here to rule out.
+   */
+  | { type: 'menu'; cmd: string }
+  /**
+   * Block until the focused terminal's buffer matches, or give up loudly.
+   *
+   * Replaces `wait` before anything that depends on a shell being ready. A
+   * timeout REPORTS WHAT IT SAW rather than continuing quietly, because a
+   * script that types into a dead shell produces an empty capture and looks
+   * like a product bug.
+   */
+  | { type: 'waitFor'; pattern: string; timeoutMs?: number }
+  /** Resize the window, so a layout can be proven at a size he actually uses. */
+  | { type: 'winsize'; w: number; h: number }
+  /**
+   * Capture the window to a PNG.
+   *
+   * "He cannot see it" is a claim about PIXELS, and DOM boxes cannot settle it.
+   * Two rounds of this watermark were reported as correct from geometry alone
+   * while he was looking at nothing.
+   */
+  | { type: 'shot'; path: string }
+  /**
+   * Close the app when the script finishes.
+   *
+   * A scripted run MUST clean up after itself. Without this every proof launch
+   * leaves an Electron tree behind, and once its launching shell is gone the
+   * ancestry guard correctly refuses to kill it — so the orphans accumulate and
+   * nobody can safely remove them. The harness ending itself is the only
+   * version of this that does not depend on a later kill being provable.
+   */
+  | { type: 'quit' }
 
 /**
  * Drive the Console's OWN terminal from a JSON script. DEV ONLY.
@@ -164,6 +309,8 @@ type DevStep =
  * the origin of the bytes differs, and the tee proves what the PTY actually
  * emitted rather than what it was expected to.
  */
+let devScriptStarted = false
+
 async function runDevScript(sessionId: string): Promise<void> {
   const scriptPath = devFlag('--devscript')
   if (!scriptPath) return
@@ -178,8 +325,14 @@ async function runDevScript(sessionId: string): Promise<void> {
   for (const [i, step] of steps.entries()) {
     switch (step.type) {
       case 'input':
+        // ROUTED THROUGH THE FOCUSED PANE, not through a fixed session id.
+        // With panes, "type this" has to mean "type it where the cursor is",
+        // or every proof would silently address pane one.
         logMain(`DEVSCRIPT[${i}] input ${JSON.stringify(step.text)}`)
-        devType(sessionId, step.text)
+        BrowserWindow.getAllWindows()[0]?.webContents.send(
+          'tessa:menu',
+          `devtype:${Buffer.from(step.text, 'utf8').toString('base64')}`,
+        )
         break
       case 'resize':
         logMain(`DEVSCRIPT[${i}] resize -> ${step.cols}x${step.rows}`)
@@ -190,6 +343,75 @@ async function runDevScript(sessionId: string): Promise<void> {
         break
       case 'log':
         logMain(`DEVSCRIPT[${i}] ${step.msg}`)
+        break
+      case 'key':
+        // DEV HARNESS ONLY. Forwards a chord to the renderer, which dispatches
+        // a REAL KeyboardEvent into xterm's own textarea — so `chordOf`, the
+        // keymap lookup and the action all run exactly as they do for a human.
+        // Calling the action directly would prove nothing about the binding.
+        logMain(`DEVSCRIPT[${i}] key ${step.chord}`)
+        BrowserWindow.getAllWindows()[0]?.webContents.send('tessa:menu', `devkey:${step.chord}`)
+        break
+      case 'dump':
+        logMain(`DEVSCRIPT[${i}] dump ${step.what}`)
+        BrowserWindow.getAllWindows()[0]?.webContents.send('tessa:menu', `devdump:${step.what}`)
+        break
+      case 'quit':
+        logMain('DEVSCRIPT quit — closing the app so no orphan is left behind')
+        // Reap the PTY first; on Windows killing the host does not reap
+        // cmd.exe/conhost.exe, which is the whole reason shutdownPtyHost exists.
+        await shutdownPtyHost()
+        app.quit()
+        return
+      case 'clip':
+        // Seed the OS clipboard, so "paste from outside the Console" is a real
+        // clipboard round trip rather than a string the renderer already had.
+        logMain(`DEVSCRIPT[${i}] clip ${JSON.stringify(step.text)}`)
+        clipboard.writeText(step.text)
+        break
+      case 'shot': {
+        const win2 = BrowserWindow.getAllWindows()[0]
+        if (win2) {
+          const img = await win2.webContents.capturePage()
+          writeFileSync(step.path, img.toPNG())
+          logMain(`DEVSCRIPT[${i}] shot -> ${step.path} (${img.getSize().width}x${img.getSize().height})`)
+        }
+        break
+      }
+      case 'waitFor': {
+        const w3 = BrowserWindow.getAllWindows()[0]
+        const deadline = Date.now() + (step.timeoutMs ?? 60_000)
+        const re = new RegExp(step.pattern)
+        let seen = ''
+        let hit = false
+        while (Date.now() < deadline) {
+          try {
+            seen = String(
+              await w3?.webContents.executeJavaScript('window.__tessaBuffer ? window.__tessaBuffer() : ""'),
+            )
+          } catch {
+            seen = ''
+          }
+          if (re.test(seen)) { hit = true; break }
+          await new Promise((r) => setTimeout(r, 400))
+        }
+        const tail = seen.split('\n').filter(Boolean).slice(-3).join(' | ').slice(0, 160)
+        logMain(`DEVSCRIPT[${i}] waitFor /${step.pattern}/ -> ${hit ? 'MATCHED' : 'TIMED OUT'}  last: ${tail}`)
+        break
+      }
+      case 'winsize': {
+        const w = BrowserWindow.getAllWindows()[0]
+        logMain(`DEVSCRIPT[${i}] winsize ${step.w}x${step.h}`)
+        // setSize is a no-op on a maximized window, which is how this one opens.
+        if (w?.isMaximized()) w.unmaximize()
+        w?.setSize(step.w, step.h)
+        break
+      }
+      case 'menu':
+        // The SAME channel and the SAME payload `toTerminal()` sends on a real
+        // menu click — not a shortcut past it.
+        logMain(`DEVSCRIPT[${i}] menu ${step.cmd}`)
+        BrowserWindow.getAllWindows()[0]?.webContents.send('tessa:menu', step.cmd)
         break
     }
   }
@@ -208,6 +430,14 @@ const daemonClient = new DaemonClient({
   surfaceVersion: '0.1.0',
   log: logMain,
   onStatus: (s) => logMain(`daemon link: ${s.phase}${s.detail ? ` — ${s.detail}` : ''}`),
+  // ONE THREAD, BOTH SURFACES. Anything broadcast on evt.transcript.message
+  // reaches the chat pane — whether he typed it here or spoke it to the Orb.
+  onTranscript: (msg) => {
+    BrowserWindow.getAllWindows()[0]?.webContents.send('tessa:transcript', msg)
+  },
+  onAgentState: (state) => {
+    BrowserWindow.getAllWindows()[0]?.webContents.send('tessa:agent-state', state)
+  },
   onRevoke: (sessionId, reason) => {
     // CONTRACT §4.2: the Console MUST comply and report back.
     // Stamped absolutely so an external Win32_Process poller can be correlated
@@ -218,19 +448,28 @@ const daemonClient = new DaemonClient({
 })
 
 app.whenReady().then(async () => {
+  // ── FIRST, BEFORE ANY WINDOW EXISTS ──────────────────────────────────────
+  //
+  // Replacing the default menu must happen before a window can receive a
+  // keystroke, or the first Ctrl+A of the session is still eaten by Chromium's
+  // Edit role. `setApplicationMenu` is global rather than per-window, so this is
+  // the right place and the right time.
+  installMenu(isDev)
+  logMain(`menu: custom menu installed (Edit roles removed; devTools=${isDev})`)
+
   // Step 1 liveness probe for the contextBridge.
-  ipcMain.handle('zoey:ping', () => 'pong')
+  ipcMain.handle('tessa:ping', () => 'pong')
 
   // `--no-daemon` skips dev auto-start. Without it, "daemon down" is untestable:
   // the supervisor would simply start one and the grant gate would never see the
   // condition it exists to handle.
   //
   // ORDER MATTERS: the window is created only AFTER the daemon is up and the
-  // `zoey:pty-start` handler is registered.
+  // `tessa:pty-start` handler is registered.
   //
   // It used to be created first, and that was a latent race that only showed
   // itself once the supervisor actually had to START a daemon rather than
-  // attach to a running one: the renderer mounted, called `zoey:pty-start`, and
+  // attach to a running one: the renderer mounted, called `tessa:pty-start`, and
   // got `No handler registered` because registration was still behind
   // `await supervisor.ensure()`. Attaching to a live daemon returns in
   // milliseconds, which is why every previous run hid it.
@@ -257,6 +496,115 @@ app.whenReady().then(async () => {
   // and this file has already shipped that bug once (Step 2, TS2448).
   let win: BrowserWindow | null = null
 
+  // ── SETTINGS AND SHELLS, RESOLVED ONCE AT STARTUP ────────────────────────
+  //
+  // Written out on first run so there is a real file to edit rather than a
+  // blank he has to invent the schema for.
+  /**
+   * The directory the next terminal opens in — ITEM 5e.
+   *
+   * Set from the cwd a terminal was last spawned with, so opening Git Bash
+   * while sitting in a project folder lands in that project folder rather than
+   * bouncing back to home. Tracking the shell's LIVE cwd (as it changes with
+   * `cd`) needs OSC 7, which no default Windows shell emits without a prompt
+   * hook — that is Phase 2's job and is deliberately not faked here.
+   */
+  let lastCwd: string | null = null
+
+  const seeded = ensureSettingsFile()
+  let loaded = loadSettings()
+  logMain(
+    `settings: ${loaded.path}${seeded.wrote ? ' (created with defaults)' : ''}` +
+      `${loaded.existed && !seeded.wrote ? ' (read)' : ''}`,
+  )
+  // A MALFORMED ENTRY IS NEVER FATAL AND NEVER SILENT. Each complaint is named,
+  // and the default it fell back to is named with it — a settings file that is
+  // quietly ignored is worse than one that errors, because he edits it again
+  // and again and nothing changes.
+  for (const p of loaded.problems) logMain(`settings PROBLEM: ${p}`)
+  for (const m of loaded.migrated) logMain(`settings MIGRATED: ${m}`)
+
+  const shells = resolveShells()
+  for (const s of shells) logMain(`shell: ${describeShell(s)}`)
+  const unavailable = shells.filter((s) => !s.available)
+  if (unavailable.length) {
+    logMain(`shell: NOT AVAILABLE — ${unavailable.map((s) => s.label).join(', ')}`)
+  }
+
+  // The Console follows the Orb's companion colour. Read on demand rather than
+  // cached, so switching companion in the Orb recolours this window on its next
+  // focus without a restart.
+  // READ-ONLY, METADATA-ONLY, ONE LEVEL. See filetree.ts for why lazy is a
+  // safety property here and not an optimisation. The renderer names a
+  // directory; main does the reading, because the preload is sandboxed and
+  // cannot touch the filesystem at all — which is the property we want.
+  ipcMain.handle('tessa:fs-list', (_e, dir: unknown) => {
+    if (typeof dir !== 'string' || !dir) {
+      return { path: '', entries: [], total: 0, truncated: false, error: 'no directory given' }
+    }
+    const r = listDir(dir)
+    logMain(`fs.list ${dir} -> ${r.entries.length}/${r.total}${r.error ? ` ERROR ${r.error}` : ''}`)
+    return r
+  })
+
+  /**
+   * A TYPED TURN, over the Console's EXISTING authenticated socket.
+   *
+   * No second connection: this rides the same DaemonClient that already
+   * carries the PTY grants, so it inherits the per-launch token and the
+   * Origin check rather than re-doing them.
+   *
+   * The renderer sends TEXT and nothing else — no tool name, no args. Which
+   * tool runs is the daemon's decision, exactly as it is for voice, so a
+   * compromised renderer cannot name an action.
+   */
+  ipcMain.handle('tessa:agent-send', async (_e, text: unknown) => {
+    const t = typeof text === 'string' ? text.trim() : ''
+    if (!t) return { ok: false, error: 'empty' }
+    if (!daemonClient.isConnected) {
+      return { ok: false, error: 'notConnected' }
+    }
+    try {
+      const reply = await daemonClient.request('cmd.agent.message', { text: t })
+      if (reply.type.startsWith('err.')) {
+        const p = reply.payload as { message?: unknown }
+        return { ok: false, error: String(p.message ?? reply.type) }
+      }
+      return { ok: true, ...(reply.payload as Record<string, unknown>) }
+    } catch (err) {
+      return { ok: false, error: (err as Error).message }
+    }
+  })
+
+  ipcMain.handle('tessa:theme', () => {
+    const t = readTheme()
+    if (t.problem) logMain(`theme: ${t.problem}`)
+    return t
+  })
+
+  ipcMain.handle('tessa:shells', () => ({
+    shells: shells.map((s) => ({ id: s.id, label: s.label, available: s.available, how: s.how })),
+    defaultShell: loaded.settings.defaultShell,
+  }))
+
+  const settingsPayload = (): Record<string, unknown> => ({
+    keymap: loaded.settings.keymap,
+    rightClickPastes: loaded.settings.rightClickPastes,
+    copyOnSelect: loaded.settings.copyOnSelect,
+    scrollback: loaded.settings.scrollback,
+    fontSize: loaded.settings.fontSize,
+    path: loaded.path,
+    problems: loaded.problems,
+  })
+  ipcMain.handle('tessa:settings', () => settingsPayload())
+  ipcMain.handle('tessa:settings-reload', () => {
+    loaded = loadSettings()
+    logMain(`settings: reloaded from ${loaded.path}`)
+    for (const p of loaded.problems) logMain(`settings PROBLEM: ${p}`)
+    for (const m of loaded.migrated) logMain(`settings MIGRATED: ${m}`)
+    return settingsPayload()
+  })
+
   // ── THE GRANT GATE — CONTRACT §6.5 ───────────────────────────────────────
   //
   // "No PTY session may be created without a grant."
@@ -272,15 +620,51 @@ app.whenReady().then(async () => {
   // answered with `evt.pty.revoke` (core/server.py::_h_pty_report). So a
   // Console that skipped this gate would be caught by the daemon rather than
   // silently tolerated.
-  ipcMain.handle('zoey:pty-start', async (_e, dims: { cols: number; rows: number }) => {
-    const cwd = app.getPath('home')
-    const profileId = 'cmd'
+  ipcMain.handle('tessa:pty-start', async (_e, dims: { cols: number; rows: number }, shellId?: string) => {
+    // ── WHICH SHELL ────────────────────────────────────────────────────────
+    //
+    // The renderer passes an ID from a closed set, never a command line. An
+    // unknown or absent id resolves to the configured default rather than
+    // reaching a spawn, so this remains a menu selection.
+    // `--shell <id>` is a DEV HARNESS FLAG: it lets a scripted run prove each
+    // shell end to end without a human clicking the picker. A renderer request
+    // still wins, so it only sets the default for the first terminal.
+    // `defaultShell` FROM THE SETTINGS FILE IS THE LAST RUNG, and it was
+    // missing. Without it `pickShell` fell through to the module constant
+    // DEFAULT_SHELL, so setting "defaultShell": "gitbash" in the settings file
+    // validated, crossed the IPC hop, reached the picker UI — and PowerShell
+    // still opened. The field was read and not used, the same shape as
+    // `scrollback`.
+    const choice = pickShell(
+      (shellId as ShellId | undefined) ??
+        (devFlag('--shell') as ShellId | undefined) ??
+        (loaded.settings.defaultShell as ShellId | undefined),
+      shells,
+    )
+    if (choice.message) logMain(`shell: ${choice.message}`)
+
+    // THE WORKING DIRECTORY IS INHERITED, NOT RESET. Opening Git Bash from a
+    // project folder must land in that project folder — anything else is
+    // surprising. `--cwd` overrides for the harness; otherwise the last
+    // directory a terminal reported, falling back to home on the first one.
+    const cwd = lastCwd ?? app.getPath('home')
+
+    // The grant is asked for BY SHELL. `profileId` is what the daemon audits
+    // and what its policy keys on, so a Git Bash spawn must not present itself
+    // as a cmd spawn — the log would then be unable to answer which shell ran
+    // something, which is the whole point of recording it.
+    const profileId = choice.spec.id
+
+    if (!choice.spec.exe) {
+      logMain(`pty-start refused: ${choice.message}`)
+      return { ok: false as const, error: choice.message }
+    }
 
     if (!daemonClient.isConnected) {
       // No daemon means no grant means NO PTY. Failing closed is the point.
       const detail = daemonClient.current.detail ?? daemonClient.current.phase
       logMain(`pty-start refused: daemon not connected (${detail})`)
-      return { ok: false as const, error: `Zoey Core is not connected (${detail}) — no PTY without a grant` }
+      return { ok: false as const, error: `Tessa Core is not connected (${detail}) — no PTY without a grant` }
     }
 
     // 1. ASK. Wall-clock timed so the grant round trip is a measured figure.
@@ -309,7 +693,7 @@ app.whenReady().then(async () => {
         return { ok: false as const, error: `awaiting your approval: ${message}` }
       }
       logMain(`pty-start DENIED by the daemon (${code}): ${message}`)
-      return { ok: false as const, error: `denied by Zoey Core (${code}): ${message}` }
+      return { ok: false as const, error: `denied by Tessa Core (${code}): ${message}` }
     }
 
     const grantId = String(reply.payload['grantId'] ?? '')
@@ -317,7 +701,7 @@ app.whenReady().then(async () => {
     const expiresAt = String(reply.payload['expiresAt'] ?? '')
     if (!grantId || !sessionId) {
       logMain('pty-start refused: grant reply missing grantId/sessionId')
-      return { ok: false as const, error: 'malformed grant from Zoey Core' }
+      return { ok: false as const, error: 'malformed grant from Tessa Core' }
     }
     logMain(`GRANT ok in ${grantMs} ms — grantId=${grantId} sessionId=${sessionId} expiresAt=${expiresAt}`)
 
@@ -332,8 +716,12 @@ app.whenReady().then(async () => {
     try {
       if (!win) throw new Error('no window yet — PTY requested before the renderer existed')
       const result = await startPty(win, {
-        shell: process.env['COMSPEC'] ?? 'cmd.exe',
-        args: proofMode ? ['/k', 'ping -n 600 127.0.0.1'] : [],
+        // `--revoke-proof` forces cmd AND its argv together. It exists to create
+        // a real GRANDCHILD (`cmd` -> `ping`) for the revoke test, and pairing a
+        // cmd-shaped argv with whatever shell happens to be default would spawn
+        // PowerShell with `/k`, which is not a command it understands.
+        shell: proofMode ? (process.env['COMSPEC'] ?? 'cmd.exe') : choice.spec.exe,
+        args: proofMode ? ['/k', 'ping -n 600 127.0.0.1'] : choice.spec.args,
         cwd: devFlag('--cwd') ?? cwd,
         cols: dims?.cols ?? 80,
         rows: dims?.rows ?? 24,
@@ -346,9 +734,34 @@ app.whenReady().then(async () => {
       //    without an observed pid, so this can no longer redeem a grant for a
       //    PTY nobody saw start.
       await reportPty(daemonClient, sessionId, 'started', result.pid)
-      logMain(`STEP5 sessionId=${sessionId} grantId=${grantId} shellPid=${result.pid}`)
-      void runDevScript(sessionId)
-      return { ok: true as const, ...result, sessionId, grantId, grantMs, expiresAt }
+      lastCwd = devFlag('--cwd') ?? cwd
+      logMain(
+        `STEP5 sessionId=${sessionId} grantId=${grantId} shellPid=${result.pid} ` +
+          `shell=${choice.spec.id} exe=${choice.spec.exe} cwd=${lastCwd}`,
+      )
+      // ONCE. `tessa:pty-start` now fires per PANE, so without this guard a
+      // four-pane run would start the script four times over.
+      if (!devScriptStarted) {
+        devScriptStarted = true
+        void runDevScript(sessionId)
+      }
+      return {
+        ok: true as const,
+        ...result,
+        sessionId,
+        grantId,
+        grantMs,
+        expiresAt,
+        // The terminal shows which shell it actually got, and says so out loud
+        // when that is not the one that was asked for.
+        shellId: choice.spec.id,
+        shellLabel: choice.spec.label,
+        substituted: choice.substituted,
+        shellMessage: choice.message,
+        // Where it OPENED, for the tab title. Not the live cwd — that needs
+        // OSC 7, which no default Windows shell emits.
+        cwd: lastCwd,
+      }
     } catch (err) {
       // The PTY never came up. Release the grant rather than stranding it —
       // this is precisely why `startFailed` was added to the enum.
@@ -366,6 +779,25 @@ app.whenReady().then(async () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow()
   })
 })
+  // ── A REJECTION HERE USED TO PRODUCE NOTHING AT ALL ───────────────────────
+  //
+  // Everything before `createWindow()` is awaited inside this block: the daemon
+  // supervisor, the settings load, the shell resolution. If any of them threw,
+  // the promise rejected unobserved — no window was ever created, nothing was
+  // logged, and the app sat in the tray doing nothing with no way to find out
+  // why. That is the worst version of this repo's silent-failure class, because
+  // it takes away the very surface the diagnosis would have appeared on.
+  .catch((err: unknown) => {
+    const e = err as Error
+    logMain(`STARTUP FAILED before the window existed: ${e?.stack ?? String(err)}`)
+    dialog.showErrorBox(
+      'Tessa Console could not start',
+      `${e?.message ?? String(err)}
+
+See the console output for the full trace.`,
+    )
+    app.quit()
+  })
 
 /**
  * Reap the PTY before quitting.

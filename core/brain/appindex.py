@@ -471,7 +471,7 @@ class AppIndex:
             finally:
                 self._building = False
 
-        t = threading.Thread(target=run, name="zoey-appindex", daemon=True)
+        t = threading.Thread(target=run, name="tessa-appindex", daemon=True)
         t.start()
         return t
 

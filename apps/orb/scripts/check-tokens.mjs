@@ -5,7 +5,7 @@
  * Fails fast if the generated design tokens are missing.
  *
  * `packages/tokens/dist/` is gitignored — it only exists after `npm run generate`.
- * The Orb imports `@zoey/tokens/css`, so a fresh clone would otherwise fail deep
+ * The Orb imports `@tessa/tokens/css`, so a fresh clone would otherwise fail deep
  * inside a Vite resolve error that says nothing about the real cause.
  *
  * This script deliberately only READS. `packages/` is owner-shared (CLAUDE.md);

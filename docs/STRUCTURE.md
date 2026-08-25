@@ -1,9 +1,9 @@
-# ZOEY_OS — Canonical Repository Structure
+# TESSA_CORE — Canonical Repository Structure
 ### v2.2 · Phase 0 complete · generated-output ruling corrected
 
-> Companion to `docs/ZOEY_OS-spec.md` (v3.2). Replaces spec §3.
+> Companion to `docs/TESSA_CORE-spec.md` (v3.2). Replaces spec §3.
 > **CONTRACT.md outranks both.**
-> Repo root: `C:\dev\zoey`
+> Repo root: `C:\dev\tessa`
 
 ---
 
@@ -60,7 +60,7 @@ Neither edits `CONTRACT.md`, `packages/`, or the other's app.
 ## The tree
 
 ```
-C:\dev\zoey\
+C:\dev\tessa\
 │
 ├── CONTRACT.md                       ✅ P0 🔒  AWAITING APPROVAL
 ├── CLAUDE.md                         ✅ P0     101 lines, standing instructions
@@ -95,7 +95,7 @@ C:\dev\zoey\
 │   │   ├── src\
 │   │   │   ├── index.ts              ✅ P0     re-exports the generated enums
 │   │   │   └── enums.generated.ts    ✅ 📦     committed — index.ts imports it
-│   │   ├── gen\python\zoey_protocol\
+│   │   ├── gen\python\tessa_protocol\
 │   │   │   └── enums.py              ✅ 📦     committed — core/ imports it
 │   │   └── test\smoke.ts             ✅ P0     28 passing, zero deps
 │   │
@@ -124,7 +124,7 @@ C:\dev\zoey\
 │   │   ├── permissions.yaml          ✅ P0     green / amber / red
 │   │   ├── settings.yaml             ⬜ P1     quiet hours, budgets, devices
 │   │   ├── companions.yaml           ⬜ P7
-│   │   └── personalities\zoey.md     ⬜ P1
+│   │   └── personalities\tessa.md     ⬜ P1
 │   ├── state.py                      ⬜ P1     spec §5 machine, single owner
 │   ├── bus.py                        ⬜ P2     audio arbitration (spec §5.2)
 │   ├── service.py                    ⬜ P3     Windows service entry point
@@ -221,14 +221,14 @@ C:\dev\zoey\
 │           └── styles\               ⬜ P4     imports packages/tokens
 │
 ├── data\                             ✅ 🚫     created
-│   ├── zoey.db                       ⬜ P1     encrypted at rest
+│   ├── tessa.db                       ⬜ P1     encrypted at rest
 │   ├── vectors\                      ⬜ P6
 │   ├── models\                       ⬜ P2     whisper + piper + porcupine
 │   ├── logs\                         ⬜ P1
 │   └── audio\                        ⬜ P2     debug only, auto-purged
 │
 ├── docs\
-│   ├── ZOEY_OS-spec.md               ✅ P0     v3.2 — Gerald owns, sessions never edit
+│   ├── TESSA_CORE-spec.md               ✅ P0     v3.2 — Gerald owns, sessions never edit
 │   ├── STRUCTURE.md                  ✅ P0     this file — Gerald owns
 │   └── decisions\                    ⬜
 │       ├── 001-electron-over-tauri.md
@@ -241,7 +241,7 @@ C:\dev\zoey\
 └── .github\workflows\ci.yml          ⬜ P1     lint · typecheck · test · freshness
 ```
 
-`%LOCALAPPDATA%\Zoey\runtime.json` lives outside the repo and holds the per-launch token and bound port.
+`%LOCALAPPDATA%\Tessa\runtime.json` lives outside the repo and holds the per-launch token and bound port.
 
 ---
 

@@ -66,7 +66,7 @@ def main() -> int:
     check("registry imported (tiers validated against permissions.yaml)", len(REGISTRY) > 30)
 
     # ── 2. fs.delete: holds, recycles, never hard-deletes
-    tmp = Path(os.environ["TEMP"]) / "zoey-tool-tests"
+    tmp = Path(os.environ["TEMP"]) / "tessa-tool-tests"
     tmp.mkdir(exist_ok=True)
     victim = tmp / "holds-first.txt"
     victim.write_text("x", encoding="utf-8")

@@ -72,7 +72,7 @@ async def main() -> int:
 
     port, token = info["port"], info["token"]
     url = f"ws://127.0.0.1:{port}/v1"
-    print(f"\nZoey Core auth boundary — {url}\n")
+    print(f"\nTessa Core auth boundary — {url}\n")
 
     # ── 1. the drive-by browser attack ───────────────────────────────────────
     for bad_origin in ("http://evil.com", "https://example.com", "http://localhost:3000",
@@ -95,7 +95,7 @@ async def main() -> int:
 
     # ── 3. wrong path ────────────────────────────────────────────────────────
     try:
-        ws = await connect(f"ws://127.0.0.1:{port}/", "zoey://console")
+        ws = await connect(f"ws://127.0.0.1:{port}/", "tessa://console")
         await ws.close()
         check("wrong path rejected", False, "connection was ACCEPTED")
     except Exception as e:
@@ -106,14 +106,14 @@ async def main() -> int:
     # the auth-failure lockout, a hostile page could disable the owner's own
     # console with five requests. The legitimate client must still get in.
     try:
-        async with await connect(url, "zoey://console") as ws:
+        async with await connect(url, "tessa://console") as ws:
             check("probing does not lock out the owner", True)
     except Exception as e:
         check("probing does not lock out the owner", False,
               f"legitimate client blocked after probes: {e}")
 
     # ── 4. bad token ─────────────────────────────────────────────────────────
-    async with await connect(url, "zoey://console") as ws:
+    async with await connect(url, "tessa://console") as ws:
         await ws.send(env("cmd.hello", {"token": "0" * 64, "surface": "console",
                                         "surfaceVersion": "0.1.0",
                                         "protocolVersion": PROTOCOL_VERSION}))
@@ -126,7 +126,7 @@ async def main() -> int:
             check("bad token closes 4401", False, "timed out")
 
     # ── 5. protocol version mismatch ─────────────────────────────────────────
-    async with await connect(url, "zoey://console") as ws:
+    async with await connect(url, "tessa://console") as ws:
         await ws.send(env("cmd.hello", {"token": token, "surface": "console",
                                         "surfaceVersion": "0.1.0", "protocolVersion": 99}))
         try:
@@ -139,7 +139,7 @@ async def main() -> int:
 
     # ── 6. handshake deadline ────────────────────────────────────────────────
     t0 = time.monotonic()
-    async with await connect(url, "zoey://console") as ws:
+    async with await connect(url, "tessa://console") as ws:
         try:
             await asyncio.wait_for(ws.recv(), timeout=6)
             check("silent client closes 4408", False, "got a response")
@@ -151,7 +151,7 @@ async def main() -> int:
             check("silent client closes 4408", False, "never closed")
 
     # ── 7. the happy path ────────────────────────────────────────────────────
-    async with await connect(url, "zoey://console") as ws:
+    async with await connect(url, "tessa://console") as ws:
         hello_id = ulid()
         await ws.send(json.dumps({"v": 1, "id": hello_id, "ts": now_iso(), "type": "cmd.hello",
                                   "corr": None,

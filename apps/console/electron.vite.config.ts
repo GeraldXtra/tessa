@@ -31,10 +31,10 @@ import react from '@vitejs/plugin-react'
  *       utf-8-validate) as unresolvable imports.
  *
  *   BUNDLED (must stay `devDependencies`, and listed in `exclude` below)
- *     @zoey/protocol — its entry is "main": "./src/index.ts". RAW TypeScript,
+ *     @tessa/protocol — its entry is "main": "./src/index.ts". RAW TypeScript,
  *       noEmit, and it imports './enums.generated.ts' *with* the extension.
  *       Externalized, main would require() a .ts file and crash immediately.
- *     @zoey/tokens — same reasoning; consumed as source.
+ *     @tessa/tokens — same reasoning; consumed as source.
  *
  * `exclude` here is belt-and-braces: both are already devDependencies, so they
  * are bundled by default. Naming them documents the intent so nobody "tidies"
@@ -52,7 +52,7 @@ export default defineConfig({
   main: {
     build: {
       externalizeDeps: {
-        exclude: ['@zoey/protocol', '@zoey/tokens'],
+        exclude: ['@tessa/protocol', '@tessa/tokens'],
       },
       rollupOptions: {
         // The native addon must never be inlined.
@@ -73,7 +73,7 @@ export default defineConfig({
   preload: {
     build: {
       externalizeDeps: {
-        exclude: ['@zoey/protocol'],
+        exclude: ['@tessa/protocol'],
       },
     },
   },

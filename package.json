@@ -1,8 +1,8 @@
 {
-  "name": "zoey",
+  "name": "tessa",
   "version": "0.1.0",
   "private": true,
-  "description": "ZOEY_OS monorepo — one Python daemon, two surfaces (Console + Orb).",
+  "description": "TESSA_CORE monorepo — one Python daemon, two surfaces (Console + Orb).",
   "workspaces": [
     "packages/*",
     "apps/console",
@@ -22,8 +22,8 @@
     "core:test:auth": "python core/test_auth.py",
     "test": "npm run generate && npm run contract:check && npm run protocol:test && npm run core:test",
     "bootstrap": "npm run generate && npm run test",
-    "console:dev": "npm run -w @zoey/console dev",
-    "console:build": "npm run -w @zoey/console build",
+    "console:dev": "npm run -w @tessa/console dev",
+    "console:build": "npm run -w @tessa/console build",
     "core:dev": "python core/server.py --dev"
   },
   "devDependencies": {

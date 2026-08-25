@@ -247,34 +247,91 @@ function log(msg: string): void {
 }
 
 /**
- * Graceful teardown: ask the host to kill its PTY, give it a moment, then kill
- * the host itself. Idempotent and safe to call when nothing is running.
+ * Graceful teardown of EVERY PTY, not just the last one.
+ *
+ * THE BUG THIS REPLACES, MEASURED
+ *
+ * `activeChild` is a single module-level variable, overwritten on every spawn.
+ * With one terminal that was the whole world. With eight panes across four tabs
+ * there are EIGHT hosts, and this function tore down exactly one of them — the
+ * most recent. The other seven died only as a side effect of the Electron
+ * process exiting, and that is a race conhost.exe can win: measured, one
+ * `conhost.exe --headless --width 188` survived a full close with its parent
+ * already gone.
+ *
+ * ConPTY parents its console host to the process that CREATED the pseudoconsole
+ * — the PTY host, not the shell — so reaping conhost means killing the HOST's
+ * tree, which is what `taskkillTree(hostPid)` does. That was already the rung-2
+ * logic in `killPtyObserved` for the revoke path; the quit path never used it.
+ *
+ * Order matters: ask every host to kill its shell first and let them all work in
+ * parallel, THEN sweep the trees. Sequential teardown of eight PTYs would spend
+ * eight grace periods and Windows does not wait politely for a quitting app.
  */
 export async function shutdownPtyHost(): Promise<void> {
-  const child = activeChild
-  if (!child) return
+  const records = [...sessionHosts.entries()]
+  const extra = activeChild && !records.some(([, r]) => r.host === activeChild)
+    ? [['<unregistered>', { host: activeChild, hostPid: activeChild.pid, shellPid: undefined }] as const]
+    : []
+  const all = [...records, ...extra]
+  if (all.length === 0) {
+    activeChild = null
+    return
+  }
+  log(`tearing down ${all.length} PTY host(s)`)
+
+  // 1. Ask them all to die, at once.
+  for (const [, rec] of all) {
+    try {
+      rec.host.postMessage({ t: 'shutdown' })
+    } catch {
+      /* already gone */
+    }
+  }
+
+  // 2. One shared grace period, not one each.
+  await Promise.all(
+    all.map(
+      ([, rec]) =>
+        new Promise<void>((resolve) => {
+          const timer = setTimeout(resolve, SHUTDOWN_GRACE_MS)
+          rec.host.once('exit', () => {
+            clearTimeout(timer)
+            resolve()
+          })
+        }),
+    ),
+  )
+
+  // 3. Sweep each host TREE. This is the line that reaps conhost — killing the
+  //    host process alone leaves it, because conhost is its child and Windows
+  //    does not cascade.
+  const swept: number[] = []
+  await Promise.all(
+    all.map(async ([, rec]) => {
+      const hostPid = rec.hostPid
+      if (hostPid === undefined) return
+      try {
+        const claimed = await taskkillTree(hostPid)
+        swept.push(...claimed)
+      } catch {
+        /* the tree was already gone, which is the good case */
+      }
+    }),
+  )
+
+  // 4. Belt and braces: kill any host object still holding on.
+  for (const [, rec] of all) {
+    try {
+      rec.host.kill()
+    } catch {
+      /* already exited */
+    }
+  }
+
+  sessionHosts.clear()
   activeChild = null
-
-  try {
-    child.postMessage({ t: 'shutdown' })
-  } catch {
-    // Host already gone; fall through to the kill below.
-  }
-
-  await new Promise<void>((resolve) => {
-    const timer = setTimeout(resolve, SHUTDOWN_GRACE_MS)
-    child.once('exit', () => {
-      clearTimeout(timer)
-      resolve()
-    })
-  })
-
-  try {
-    child.kill()
-  } catch {
-    /* already exited */
-  }
-  log('host torn down')
+  log(`host teardown complete — ${all.length} host(s), taskkill claimed ${swept.length} pid(s)`)
 }
 
 /**
@@ -289,7 +346,7 @@ function forkAndProbe(): Promise<{ child: UtilityProcess; probe: Extract<HostToM
     const entry = join(__dirname, 'pty-host.js')
 
     const child = utilityProcess.fork(entry, [], {
-      serviceName: 'zoey-pty-host',
+      serviceName: 'tessa-pty-host',
       // stdio inherit so a native-module load failure prints somewhere visible
       // instead of vanishing.
       stdio: 'inherit',
@@ -428,7 +485,13 @@ export async function startPty(
   const pid = spawned.pid
 
   // Hand the renderer its end. From here main is out of the data path.
-  win.webContents.postMessage(PTY_PORT_CHANNEL, null, [port2])
+  //
+  // THE PAYLOAD NAMES THE SESSION, and with panes it must. This used to send
+  // `null`: with one terminal the renderer could take whichever port arrived,
+  // because there was only ever one. With eight panes eight ports arrive and
+  // every pane's listener sees all of them, so an unlabelled port is a race —
+  // and the prize for losing it is typing into someone else's shell.
+  win.webContents.postMessage(PTY_PORT_CHANNEL, { sessionId: opts.sessionId ?? '' }, [port2])
 
   // NOTHING is enumerated here on purpose.
   //

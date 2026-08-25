@@ -6,7 +6,7 @@ FROM HIS REAL TRANSCRIPTS, NOT FROM IMAGINATION:
     "documents"                            -> "Taluts"
     "open google dot com"                  -> "OpenGoogle.com"
     "tweet that I'm building an AI assistant" -> "Tweets, Data Mbudinon AI Assist"
-    "Zoey"                                 -> "Zoi"
+    "Tessa"                                 -> "Zoi"
 
 Priming (core/voice/stt.py) attacks these at the source and is the better fix
 where it works. This module handles what survives it, and it handles CLASSES
@@ -26,13 +26,34 @@ import re
 
 # ── HER OWN NAME, IN ANY SPELLING ────────────────────────────────────────────
 #
-# "Zoi" for "Zoey" is her own name being missed, and a command must never fail
-# because of it. Whisper's plausible renderings of /ˈzoʊi/ are a small, closed
-# set: the vowel is stable, the spelling is not.
+# Her name being missed must never fail a command. This list is MEASURED, not
+# guessed: twenty utterances containing "Tessa" were synthesised, degraded to his
+# measured capture level (AGC settles a fifteen-second hold from 979 down to 264
+# RMS), and transcribed by the same faster-whisper base int8 with NO
+# initial_prompt, so the prime could not supply the answer. What came back:
 #
-# Matched ONLY as a leading address — "Zoey, open my downloads" — never mid
-# sentence, so "tell me about Zoe Saldana" keeps her name.
-_NAME_FORMS = r"zoey|zoi|zoe|joey|zoë|zooey|zowie|soy|zoya"
+#     Tesser   5      Tessa    3      Chester  4
+#     Tessor   1      Tessir   1      Tester   1      Pessar 1
+#
+# THE LIMIT OF THAT MEASUREMENT, STATED. It is the DECODER's renderings, not
+# his: `data/voiceprint/owner.json` stores an embedding and no audio, so the
+# enrolment clips no longer exist, `speech-15s.wav` was shown to be synthetic
+# (0.828 against Piper's Jenny, <=0.527 against every genuine recording of him),
+# and he has never said "Tessa" to her, so no recording of him saying it can
+# exist. The old zoey list — zoi, zoe, joey, soy — were decoder confusions too,
+# so this is the same class of evidence.
+#
+# "professor" was returned once and is DELIBERATELY EXCLUDED: it is a common
+# English word and stripping it from the front of an utterance would eat a real
+# sentence. Everything kept here is either her name or a nonsense token.
+#
+# TESSA IS HARDER FOR WHISPER THAN ZOEY WAS — only 3 of 20 came back exact,
+# against a name whose vowel the old comment called "stable". The priming in
+# stt.py is doing more work now, and this list is the safety net under it.
+#
+# Matched ONLY as a leading address — "Tessa, open my downloads" — never mid
+# sentence, so "tell me about Chester" mid-utterance keeps its word.
+_NAME_FORMS = r"tessa|tesser|tessor|tessir|tessah|tester|chester|pessar"
 _LEAD_NAME = re.compile(rf"^\s*(?:hey\s+|hi\s+|ok(?:ay)?\s+|hello\s+)?(?:{_NAME_FORMS})\b[\s,.!:;-]*",
                         re.I)
 
@@ -51,7 +72,7 @@ def strip_wake_name(text: str) -> tuple[str, bool]:
 # capitalised or alphanumeric content, insert the boundary the microphone lost.
 #
 # Verb-anchored rather than general camel-case splitting, because a general rule
-# mangles the things it should leave alone — "LedgerWatch", "ZOEY_OS",
+# mangles the things it should leave alone — "LedgerWatch", "TESSA_CORE",
 # "WhatsApp", "iPhone" are all real words he says and all camel-cased.
 _VERBS = ("open", "close", "show", "find", "search", "tweet", "post", "repost",
           "reply", "read", "play", "kill", "delete", "move", "copy", "rename",

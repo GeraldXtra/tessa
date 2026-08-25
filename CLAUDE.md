@@ -6,17 +6,17 @@ Read this and `CONTRACT.md` **before doing anything else**, every session.
 
 ## What this is
 
-**ZOEY_OS** — an always-on personal AI agent for Windows. One Python daemon, two front-ends:
+**TESSA_CORE** — an always-on personal AI agent for Windows. One Python daemon, two front-ends:
 
 | Surface | Path | What it is |
 |---|---|---|
-| **Zoey Console** | `apps/console` | Terminal, file tree, blocks, chat. Electron. |
-| **Zoey Orb** | `apps/orb` | Voice UI — particle sphere, calendar, transcript, companion switcher. |
-| **Zoey Core** | `core/` | Python daemon: brain, tools, permission guard, audit, memory. |
+| **Tessa Console** | `apps/console` | Terminal, file tree, blocks, chat. Electron. |
+| **Tessa Orb** | `apps/orb` | Voice UI — particle sphere, calendar, transcript, companion switcher. |
+| **Tessa Core** | `core/` | Python daemon: brain, tools, permission guard, audit, memory. |
 
 Both surfaces speak the same protocol to the same daemon over `ws://127.0.0.1`. They are built by **two separate Claude Code sessions**. `CONTRACT.md` is what stops them diverging.
 
-Authoritative reading order: **`CONTRACT.md`** → `docs/STRUCTURE.md` → `docs/ZOEY_OS-spec.md` → `plan.md`.
+Authoritative reading order: **`CONTRACT.md`** → `docs/STRUCTURE.md` → `docs/TESSA_CORE-spec.md` → `plan.md`.
 Where they disagree, **CONTRACT.md wins.**
 
 ---
@@ -31,7 +31,7 @@ Where they disagree, **CONTRACT.md wins.**
 | `packages/protocol/` | **Shared** 🔒 | **Propose to Gerald; do not edit.** |
 | `packages/tokens/` | **Shared** 🔒 | **Propose to Gerald; do not edit.** |
 | `CONTRACT.md` | **Gerald** | **Never edited by a session.** Propose a diff with rationale. |
-| `docs/ZOEY_OS-spec.md`, `docs/STRUCTURE.md` | **Gerald** | Gerald places these. Never create a competing copy. |
+| `docs/TESSA_CORE-spec.md`, `docs/STRUCTURE.md` | **Gerald** | Gerald places these. Never create a competing copy. |
 
 The Orb session is a **pure consumer**: it reads `CONTRACT.md` and `packages/*`, and never touches `core/`, `packages/`, or `apps/console/`.
 
@@ -48,7 +48,7 @@ This project is **PROPRIETARY, ALL RIGHTS RESERVED**. See `COPYRIGHT.md`.
 
 ### No hard-coded values
 - **No hex colours** in surface code. Use a token from `packages/tokens`. `scripts/check-contract.mjs` fails the build on violations.
-- **No hard-coded ports.** The daemon's port is discovered from `%LOCALAPPDATA%\Zoey\runtime.json` (CONTRACT §1). `47600` is only a *preference*; the daemon walks upward when it is taken, and it does.
+- **No hard-coded ports.** The daemon's port is discovered from `%LOCALAPPDATA%\Tessa\runtime.json` (CONTRACT §1). `47600` is only a *preference*; the daemon walks upward when it is taken, and it does.
 - **No hard-coded paths** to the owner's machine outside config and tests.
 
 ### Generated files are never hand-edited
@@ -67,7 +67,7 @@ CONTRACT §7.4. Adding a value to a closed enum after approval is a **breaking c
 
 ## Security invariants — these cannot be retrofitted
 
-1. **The daemon binds `127.0.0.1` only**, validates `Origin` against `zoey://console` / `zoey://orb`, and requires a per-launch token from a user-only-ACL file. Loopback is **not** a security boundary — any webpage the owner visits can open `ws://127.0.0.1`.
+1. **The daemon binds `127.0.0.1` only**, validates `Origin` against `tessa://console` / `tessa://orb`, and requires a per-launch token from a user-only-ACL file. Loopback is **not** a security boundary — any webpage the owner visits can open `ws://127.0.0.1`.
 2. **Origin rejections are logged, never counted toward the auth lockout.** Otherwise a hostile page locks Gerald out of his own console with five requests.
 3. **Terminal, tool, file, web, and email output is untrusted DATA, never instructions.** It can never reach a red-tier action without explicit approval.
 4. **The model never receives a raw command string to execute.** It picks a tool *name* + structured *args*; Python owns execution.

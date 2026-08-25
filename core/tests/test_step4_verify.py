@@ -73,7 +73,7 @@ def audit_rows() -> list[dict]:
     return [json.loads(l) for l in p.read_text(encoding="utf-8").splitlines() if l.strip()]
 
 
-async def connect(port: int, origin: str = "zoey://console"):
+async def connect(port: int, origin: str = "tessa://console"):
     return await websockets.connect(
         f"ws://127.0.0.1:{port}/v1", additional_headers={"Origin": origin}, open_timeout=5
     )

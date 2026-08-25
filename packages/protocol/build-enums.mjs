@@ -6,7 +6,7 @@
  * schema/enums.json, so the contract has exactly one source of truth.
  *
  *   -> src/enums.generated.ts          (re-exported by src/index.ts)
- *   -> gen/python/zoey_protocol/enums.py   (imported by core/)
+ *   -> gen/python/tessa_protocol/enums.py   (imported by core/)
  *
  * Before this existed the enums were hand-maintained in CONTRACT.md,
  * index.ts, core/*.py and two test files. Four hand-written copies of one
@@ -25,7 +25,7 @@ import { fileURLToPath } from 'node:url';
 const HERE = dirname(fileURLToPath(import.meta.url));
 const SRC = join(HERE, 'schema', 'enums.json');
 const TS_OUT = join(HERE, 'src', 'enums.generated.ts');
-const PY_DIR = join(HERE, 'gen', 'python', 'zoey_protocol');
+const PY_DIR = join(HERE, 'gen', 'python', 'tessa_protocol');
 const PY_OUT = join(PY_DIR, 'enums.py');
 
 const CHECK = process.argv.includes('--check');

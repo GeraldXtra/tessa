@@ -1,7 +1,7 @@
 /**
  * apps/console/src/main/token.ts — daemon discovery.
  *
- * Reads %LOCALAPPDATA%\Zoey\runtime.json for the port and the per-launch token.
+ * Reads %LOCALAPPDATA%\Tessa\runtime.json for the port and the per-launch token.
  *
  * ─────────────────────────────────────────────────────────────────────────────
  * REUSED FROM apps/orb/src/main/runtime-file.ts, deliberately.
@@ -42,7 +42,7 @@ import { readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 
-import { PROTOCOL_VERSION, RUNTIME_FILE_RELATIVE } from '@zoey/protocol'
+import { PROTOCOL_VERSION, RUNTIME_FILE_RELATIVE } from '@tessa/protocol'
 
 /** `secrets.token_hex(32)` — 32 bytes, 64 lowercase hex chars (CONTRACT §2.1). */
 const TOKEN_RE = /^[0-9a-f]{64}$/

@@ -1,5 +1,5 @@
 /**
- * @zoey/protocol — the wire contract, in code.
+ * @tessa/protocol — the wire contract, in code.
  *
  * This file is the executable form of CONTRACT.md. It is SHARED by
  * apps/console, apps/orb, and (via generated Python) core/.
@@ -47,10 +47,10 @@ import {
 export const PREFERRED_PORT = 47600 as const;
 
 /** CONTRACT §1 — surfaces discover the real port here, never hard-code it. */
-export const RUNTIME_FILE_RELATIVE = 'Zoey\\runtime.json' as const;
+export const RUNTIME_FILE_RELATIVE = 'Tessa\\runtime.json' as const;
 
 /** CONTRACT §2.1 — the only accepted Origin values. */
-export const ALLOWED_ORIGINS = ['zoey://console', 'zoey://orb'] as const;
+export const ALLOWED_ORIGINS = ['tessa://console', 'tessa://orb'] as const;
 export type AllowedOrigin = (typeof ALLOWED_ORIGINS)[number];
 
 /** CONTRACT §2.1 — a connection must complete cmd.hello inside this window. */
@@ -533,7 +533,7 @@ export function hydrationBytes(entry: Pick<FsEntry, 'size' | 'allocSize'>): numb
 
 /* ══════════════════════════════════════════════ deep links — CONTRACT §6.6 */
 
-export const DEEP_LINK_SCHEME = 'zoey' as const;
+export const DEEP_LINK_SCHEME = 'tessa' as const;
 
 /**
  * Modes reachable from a deep link — a STRICT SUBSET of SPAWN_MODES.
@@ -550,7 +550,7 @@ export type DeepLinkMode = (typeof DEEP_LINK_MODES)[number];
 export interface DeepLink { path: string; mode: DeepLinkMode }
 
 /**
- * Parse a `zoey://` deep link.
+ * Parse a `tessa://` deep link.
  *
  * Any webpage can trigger a registered protocol handler, so this parser is a
  * security boundary, not a convenience. It accepts EXACTLY two parameters —

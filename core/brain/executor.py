@@ -145,7 +145,7 @@ class Executor:
             return (f"No, Emperor. I have content from {sources} in front of me, and that "
                     f"was not a read-only action.{tried} Say forget the page and ask me again.")
         except Exception as exc:  # noqa: BLE001
-            # Never a bare failure. zoey.md bans vagueness: name what broke and
+            # Never a bare failure. tessa.md bans vagueness: name what broke and
             # offer the nearest real thing.
             return action_failed(f"{type(exc).__name__}: {exc}",
                                  "Tell me another way and I will try again.")
@@ -732,7 +732,7 @@ class Executor:
 
         if name == "sys.kill_port":
             # AMBER, and it holds. The executor never kills on the first ask —
-            # confirmation is the caller's to obtain (zoey.md: she says it and
+            # confirmation is the caller's to obtain (tessa.md: she says it and
             # HOLDS, he confirms a second time).
             port = int(args["port"])
             rows = listening_on_port(port)

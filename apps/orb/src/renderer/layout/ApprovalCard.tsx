@@ -174,7 +174,7 @@ function Card({
           the card recognisable as the Orb's own surface rather than something
           a tool argument drew. */}
       <div className="approval__chrome">
-        <span className="approval__mark">ZOEY</span>
+        <span className="approval__mark">TESSA</span>
         <span className="approval__chrome-label">approval required</span>
         <span className="tier" data-tier={request.tier}>
           {tierWord(request.tier)}
@@ -326,7 +326,7 @@ export function ApprovalStack() {
     // card was already decided or already void, and nothing goes on the wire.
     // This is the fast layer; main refuses an unknown id independently.
     if (!approvalClaim(requestId, decision)) return;
-    window.zoey.respondToApproval(requestId, decision, edited);
+    window.tessa.respondToApproval(requestId, decision, edited);
   }, []);
 
   if (entries.length === 0) return null;

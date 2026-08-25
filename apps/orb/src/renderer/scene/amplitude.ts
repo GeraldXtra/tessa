@@ -16,7 +16,7 @@
  * which matters when comparing frame-time measurements between tiers.
  */
 
-import type { AgentState } from '@zoey/protocol';
+import type { AgentState } from '@tessa/protocol';
 
 function clamp01(value: number): number {
   return value < 0 ? 0 : value > 1 ? 1 : value;

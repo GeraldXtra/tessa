@@ -1,6 +1,6 @@
-# ZOEY_OS — Complete Capability Catalogue
+# TESSA_CORE — Complete Capability Catalogue
 
-> Companion to `ZOEY_OS-GOAL.md`. The goal doc says *what finished means*; this says **everything Zoey can do**.
+> Companion to `TESSA_CORE-GOAL.md`. The goal doc says *what finished means*; this says **everything Tessa can do**.
 > Every capability is tagged with a permission tier (🟢 green / 🟡 amber / 🔴 red) and the phase it lands in.
 > Tiers are enforced by `core/security/guard.py`, which is already built and proven.
 
@@ -21,11 +21,11 @@
 
 ## A · VOICE & IDENTITY
 
-The thing that makes Zoey *Zoey* rather than a script runner.
+The thing that makes Tessa *Tessa* rather than a script runner.
 
 | Capability | Tier | Phase | Notes |
 |---|---|---|---|
-| Custom wake word "Zoey" | 🟢 | P3 | Picovoice Porcupine, always listening, <200 ms to chime |
+| Custom wake word "Tessa" | 🟢 | P3 | Picovoice Porcupine, always listening, <200 ms to chime |
 | **Speaker verification — Gerald's voice only** | 🟢 | P3 | See below |
 | Female voice, selectable | 🟢 | P2 | Piper (local, free) or ElevenLabs (alive, paid). Adapter for both |
 | Personality profiles, hot-swappable | 🟢 | P2 | Markdown files under `core/config/personalities/` |
@@ -34,8 +34,8 @@ The thing that makes Zoey *Zoey* rather than a script runner.
 | Push-to-talk fallback | 🟢 | P2 | Built before the wake word — simpler, proves the pipeline |
 | Whisper mode / night voice | 🟢 | P5 | Quiet response during configured quiet hours |
 | Nigerian Pidgin comprehension | 🟢 | P4 | Whisper handles it; the personality decides whether she answers in it |
-| Voice macros — one phrase, many actions | 🟢 | P7 | "Zoey, work mode" → VS Code + terminal + Spotify + DND |
-| Mute / stand down | 🟢 | P3 | "Zoey, stand down" — stops listening until summoned by hotkey |
+| Voice macros — one phrase, many actions | 🟢 | P7 | "Tessa, work mode" → VS Code + terminal + Spotify + DND |
+| Mute / stand down | 🟢 | P3 | "Tessa, stand down" — stops listening until summoned by hotkey |
 | Echo cancellation | 🟢 | P2 | So she doesn't hear herself |
 
 ### Speaker verification — only his voice
@@ -65,7 +65,7 @@ The thing that makes Zoey *Zoey* rather than a script runner.
 | Kill a process | 🟡 | P4 | PID-targeted, never by name |
 | Lock the machine | 🟢 | P1 | |
 | **Sleep / hibernate / shutdown / restart** | 🔴 | P1 | Confirmation always — even scheduled |
-| **Scheduled sleep or shutdown** | 🟡 | P5 | "Zoey, shut down at 2am if nothing's running" |
+| **Scheduled sleep or shutdown** | 🟡 | P5 | "Tessa, shut down at 2am if nothing's running" |
 | Wake-on-schedule | 🟡 | P5 | Windows Task Scheduler wake timer |
 | Battery, thermal, disk, RAM status | 🟢 | P1 | |
 | Wi-Fi / Bluetooth / airplane toggle | 🟡 | P7 | |
@@ -103,7 +103,7 @@ This is his daily work. It deserves first-class tooling.
 |---|---|---|---|
 | **Open a project in VS Code** | 🟢 | P1 | `code <path>` via terminal |
 | **Run a project — detect and execute** | 🟡 | P4 | Reads `package.json` / `requirements.txt` / `*.csproj`, picks the right command |
-| **Open the Zoey Console at a path and run an install** | 🟡 | P4 | Exactly his ask: "open the console and run installation" |
+| **Open the Tessa Console at a path and run an install** | 🟡 | P4 | Exactly his ask: "open the console and run installation" |
 | `npm` / `pip` / `yarn` install, incl. `-g` and `--user` | 🟡 | P1 | The Console's Step 5 exit criterion |
 | Scaffold a new project | 🟡 | P6 | Vite, Express, FastAPI, Hardhat — his stacks |
 | Git: status, log, diff, branch, commit | 🟡 | P5 | |
@@ -145,7 +145,7 @@ This is his daily work. It deserves first-class tooling.
 
 **Never store his X password.** Two supported paths:
 
-1. **Persistent profile (default).** He logs into X once in a dedicated Chrome profile. Playwright drives that already-authenticated session. Zoey never sees the credential, 2FA is already satisfied, and revoking access is deleting a profile folder.
+1. **Persistent profile (default).** He logs into X once in a dedicated Chrome profile. Playwright drives that already-authenticated session. Tessa never sees the credential, 2FA is already satisfied, and revoking access is deleting a profile folder.
 2. **Official X API.** Cleaner and more reliable for posting, but it's a paid tier for write access.
 
 Posting publicly under his name is 🔴 — she drafts, shows him the text, and waits. Likes and bookmarks are 🟡. Reading is 🟢.
@@ -173,7 +173,7 @@ Posting publicly under his name is 🔴 — she drafts, shows him the text, and 
 
 | Capability | Tier | Phase | Notes |
 |---|---|---|---|
-| **Play a video** — local or YouTube | 🟢 | P4 | "Zoey, play the last Man City highlights" |
+| **Play a video** — local or YouTube | 🟢 | P4 | "Tessa, play the last Man City highlights" |
 | Music control — Spotify, local | 🟢 | P4 | Play, pause, skip, playlist, volume |
 | Screen recording | 🟡 | P8 | |
 | Screenshot annotation | 🟢 | P8 | |
@@ -201,11 +201,11 @@ Posting publicly under his name is 🔴 — she drafts, shows him the text, and 
 
 ## I · SENTINEL — SECURITY & THREAT DEFENCE
 
-The panel that replaces "Jobs". This is where Zoey earns trust.
+The panel that replaces "Jobs". This is where Tessa earns trust.
 
 ### Antivirus — driving Microsoft Defender, not replacing it
 
-Building a real AV engine needs signed kernel drivers (no MSVC on this machine), a signature pipeline, and it would fight Defender for the same hooks. **A half-built scanner is worse than none — it creates false confidence.** So Zoey becomes a *console over a real engine*:
+Building a real AV engine needs signed kernel drivers (no MSVC on this machine), a signature pipeline, and it would fight Defender for the same hooks. **A half-built scanner is worse than none — it creates false confidence.** So Tessa becomes a *console over a real engine*:
 
 | Capability | Tier | Phase | Mechanism |
 |---|---|---|---|
@@ -245,7 +245,7 @@ Building a real AV engine needs signed kernel drivers (no MSVC on this machine),
 | **Breach check** — has his email appeared in a known breach | 🟢 | P8 |
 | Weekly security digest | 🟢 | P7 |
 
-### Zoey's own security surface
+### Tessa's own security surface
 
 | Capability | Tier | Phase |
 |---|---|---|
@@ -262,13 +262,13 @@ Building a real AV engine needs signed kernel drivers (no MSVC on this machine),
 
 ## J · PULSE — SYSTEM INTELLIGENCE
 
-The panel that replaces "Agenda". Live vitals, and what Zoey is touching *right now*.
+The panel that replaces "Agenda". Live vitals, and what Tessa is touching *right now*.
 
 | Capability | Tier | Phase |
 |---|---|---|
 | Live CPU, RAM, disk, network sparklines | 🟢 | P4 |
 | Top processes by resource use | 🟢 | P4 |
-| **What Zoey is doing this second** — active tool, target, elapsed | 🟢 | P4 |
+| **What Tessa is doing this second** — active tool, target, elapsed | 🟢 | P4 |
 | Disk space with a projection — "full in ~11 days at this rate" | 🟢 | P6 |
 | **Metered data usage tracker** | 🟢 | P5 | Critical in Lagos |
 | API spend today / this month | 🟢 | P5 |
@@ -290,10 +290,10 @@ The panel that replaces "Transcript" as a rail. The transcript stays, but as an 
 | Procedural memory — learned recipes: "when he says X he means this sequence" | 🟢 | P7 |
 | **Knowledge graph, rendered** — entities and how they connect | 🟢 | P6 |
 | Document index over chosen folders | 🟢 | P6 |
-| **Explicit teaching** — "Zoey, remember that…" | 🟢 | P6 |
+| **Explicit teaching** — "Tessa, remember that…" | 🟢 | P6 |
 | Forgetting and editing memory | 🟢 | P6 |
 | Voice notes, transcribed and indexed | 🟢 | P6 |
-| **Project context awareness** — knows LedgerWatch from Gamers Store from ZOEY_OS | 🟢 | P7 |
+| **Project context awareness** — knows LedgerWatch from Gamers Store from TESSA_CORE | 🟢 | P7 |
 | Learning from correction — she gets it wrong once, not twice | 🟢 | P8 |
 | Memory backup and restore | 🟢 | P8 |
 
@@ -324,7 +324,7 @@ Each with its own voice, personality, and tool allowlist. The switcher under the
 
 | Companion | Owns | Phase |
 |---|---|---|
-| **Zoey** | General assistant, orchestrator, the voice he talks to | P2 |
+| **Tessa** | General assistant, orchestrator, the voice he talks to | P2 |
 | **Sentinel** | Security, scans, quarantine, audit, the download gate | P7 |
 | **Forge** | Development — git, builds, tests, deploys, project scaffolding | P7 |
 | **Scout** | Research, web, summarisation, monitoring | P7 |
@@ -355,7 +355,7 @@ He is a Semester One ADSE student running a company. This domain protects the th
 | Capability | Tier | Phase | Notes |
 |---|---|---|---|
 | **Assignment & deadline tracker** | 🟢 | P5 | Aptech coursework, with escalating reminders as a date approaches |
-| Study timer with subject tracking | 🟢 | P7 | "Zoey, 45 minutes on C pointers" |
+| Study timer with subject tracking | 🟢 | P7 | "Tessa, 45 minutes on C pointers" |
 | **Lecture / meeting transcription** | 🟢 | P8 | Records, transcribes, summarises, extracts action items |
 | Flashcards generated from a document | 🟢 | P8 | Feed it a PDF, get spaced-repetition cards |
 | Note capture by voice, indexed and searchable | 🟢 | P6 | |
@@ -384,7 +384,7 @@ Titan Wave, and the Emperor brand on X and TikTok.
 | Engagement analytics — what performed, what didn't | 🟢 | P9 | |
 | Competitor / market monitoring | 🟢 | P9 | Scheduled, alerts on change |
 | **Crypto & airdrop monitoring** | 🟢 | P9 | Price alerts, testnet task deadlines, gas thresholds. Read-only |
-| Wallet balance checks | 🟢 | P9 | Read-only. **Zoey never signs a transaction** |
+| Wallet balance checks | 🟢 | P9 | Read-only. **Tessa never signs a transaction** |
 
 ---
 
@@ -439,7 +439,7 @@ The sphere is not decoration. Every visual property carries data.
 | **Top bar** | Companion name · state · connection + uptime · data used today · API spend today | P4 |
 | **Top-right** | Notification stack — dismissible, stacked, auto-fading | P4 |
 | **Under the sphere** | Live transcript, one line, fading. The last thing said | P4 |
-| **Bottom-left** | Companion switcher — ◀ ZOEY ▶ with satellites | P7 |
+| **Bottom-left** | Companion switcher — ◀ TESSA ▶ with satellites | P7 |
 | **Bottom-right** | Quick-action dock — pinned macros, one click or one keystroke | P7 |
 | **Floating** | Approval cards. They interrupt, over the sphere, amber. Nothing else does | P5 |
 
@@ -449,7 +449,7 @@ The sphere holds the centre; rails open as overlays, one at a time on a 1366px d
 
 | Rail | Answers | Contents | Phase |
 |---|---|---|---|
-| **PULSE** | *Is my machine healthy?* | CPU/RAM/disk/network sparklines · top processes · **what Zoey is touching this second** · disk projection · metered data · API spend · battery · thermal · uptime | P4 |
+| **PULSE** | *Is my machine healthy?* | CPU/RAM/disk/network sparklines · top processes · **what Tessa is touching this second** · disk projection · metered data · API spend · battery · thermal · uptime | P4 |
 | **SENTINEL** | *Is it safe?* | Defender status & definition age · threat history · **quarantine vault** · pending approvals · active PTY grants · live audit stream · startup & port audit | P6 |
 | **FLOW** | *What is it doing for me?* | Running jobs · scheduled jobs · triggers · **calendar and agenda** · overnight queue · morning digest · alarms and timers | P5 |
 | **INTEL** | *What does it know?* | **Knowledge graph, rendered** · memory browser · indexed documents · project context · teach/forget controls | P6 |
@@ -462,7 +462,7 @@ Sometimes he's in a call, or it's 2am, or the command is a file path.
 | Surface | Trigger | Phase |
 |---|---|---|
 | **Command palette** | `Ctrl+K` — type any command, fuzzy-matched, with preview | P5 |
-| **Global spotlight** | A system-wide hotkey summons a translucent Zoey bar over whatever is on screen. Type or speak, it answers, it vanishes | P7 |
+| **Global spotlight** | A system-wide hotkey summons a translucent Tessa bar over whatever is on screen. Type or speak, it answers, it vanishes | P7 |
 | **Quick-action dock** | Pinned macros — "work mode", "shut down at 2am", "scan downloads" | P7 |
 | **Drag-and-drop target** | Drop a file on the sphere → "what do you want done with this?" | P8 |
 | **Tray menu** | State, mute, panic stop, open rails — without focusing the window | P4 |
@@ -547,7 +547,7 @@ No emoji · no icon fonts · no blue-purple gradients · no drop shadows · no r
 |---|---|---|
 | **First launch** | Opens **maximized** — fills the work area exactly, taskbar respected | P4 |
 | **Subsequent launches** | Restores the last size, position and maximized state | P4 |
-| **State persistence** | `width`, `height`, `x`, `y`, `isMaximized` written to `%LOCALAPPDATA%\Zoey\orb-window.json` on move/resize, debounced 400 ms | P4 |
+| **State persistence** | `width`, `height`, `x`, `y`, `isMaximized` written to `%LOCALAPPDATA%\Tessa\orb-window.json` on move/resize, debounced 400 ms | P4 |
 | **Bounds clamping** | On restore, verify the saved position falls inside a currently-connected display. If not, discard and maximize. A saved position on a disconnected monitor must never open the window offscreen | P4 |
 | **Minimum size** | 900×600. Below that the collapsed layout breaks | P4 |
 | **True fullscreen** | `F11` toggles borderless fullscreen — this is Ambient mode's natural home | P7 |
@@ -562,7 +562,7 @@ No emoji · no icon fonts · no blue-purple gradients · no drop shadows · no r
 
 ## S · SCOPE — the honest number
 
-The original ZOEY_OS was ~3–4 months part-time. **This catalogue is roughly four times that** — call it **12–18 months** at his pace, alongside Aptech and Titan Wave.
+The original TESSA_CORE was ~3–4 months part-time. **This catalogue is roughly four times that** — call it **12–18 months** at his pace, alongside Aptech and Titan Wave.
 
 That is not a reason to cut it. It *is* a reason to order it so every phase is independently useful and nothing is wasted if he stops early:
 

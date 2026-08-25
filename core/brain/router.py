@@ -13,7 +13,7 @@ TWO THINGS CHANGED HERE AFTER GERALD ACTUALLY USED HER.
 2. SHE SOUNDED LIKE A SYSTEM MESSAGE. Every word she speaks today is a fixed
    string in this file — there is no model — so her character for the coming
    weeks is written here, not in a prompt. Every string below follows
-   zoey.md: "Emperor" by default and "sir" when it is serious, a SHORT first
+   tessa.md: "Emperor" by default and "sir" when it is serious, a SHORT first
    sentence because Piper streams per sentence and the opener is the whole
    400 ms budget, and two or three phrasings per situation because one fixed
    string becomes a tic by the fiftieth time he hears it.
@@ -98,10 +98,10 @@ _CONTRACTIONS = {
 #: Dropped from the FRONT only. Stripping "please" anywhere would mangle a
 #: sentence that legitimately contains it.
 _FILLERS = [
-    "hello zoey", "hey zoey", "ok zoey", "okay zoey", "hi zoey",
+    "hello tessa", "hey tessa", "ok tessa", "okay tessa", "hi tessa",
     "i want you to", "i would like you to", "can you please", "could you please",
     "can you", "could you", "would you", "please", "hello", "hey", "hiya",
-    "ok", "okay", "zoey", "so", "um", "uh", "just",
+    "ok", "okay", "tessa", "so", "um", "uh", "just",
 ]
 
 
@@ -193,11 +193,11 @@ _SPECS = (
     # "THANK YOU" IS THE TRAP AND IT IS HANDLED BY REQUIRING HER NAME.
     # Bare "thank you" is NOT here: he says it mid-conversation without meaning
     # to stop, and closing on it would end the session every time he was polite.
-    # "thank you Zoey" IS here, because addressing her by name while thanking
-    # her is a sign-off — nobody says "thank you Zoey" in the middle of handing
+    # "thank you Tessa" IS here, because addressing her by name while thanking
+    # her is a sign-off — nobody says "thank you Tessa" in the middle of handing
     # over a task, they say "thanks". The name is the distinction, and it is
     # available because `strip_wake_name` only removes a LEADING address, so a
-    # trailing "Zoey" survives to be matched.
+    # trailing "Tessa" survives to be matched.
     IntentSpec(Intent.SLEEP, ("stop listening", "go to sleep", "stop the wake word",
                               "sleep now", "stop listening to me", "go to sleep now",
                               "stop listening for me", "wake word off",
@@ -208,7 +208,7 @@ _SPECS = (
                               "we are finished", "were finished", "finished for now",
                               "nothing else", "that is everything",
                               # thanks ONLY when she is named
-                              "thank you zoey", "thanks zoey", "thank you zoi",
+                              "thank you tessa", "thanks tessa", "thank you zoi",
                               "thanks zoi", "thank you zoe", "thanks zoe")),
 )
 
@@ -239,7 +239,7 @@ RETURN_GAP_S = 20 * 60
 _GREETING_ONLY = re.compile(
     r"^\s*(?:hey|hi|hiya|hello|yo|greetings|"
     r"good\s+(?:morning|afternoon|evening|day))"
-    r"(?:\s+(?:there|again|zoey|zoi|zoe|joey|zooey))*"
+    r"(?:\s+(?:there|again|tessa|zoi|zoe|joey|zooey))*"
     r"\s*[.,!?]*\s*$", re.I)
 
 #: Thanks with NO name attached — polite, mid-conversation, not a goodbye.
@@ -322,7 +322,7 @@ def score_intents(norm: str) -> list[tuple[Intent, float]]:
 
 # ── her voice ────────────────────────────────────────────────────────────────
 #
-# Two or three phrasings each. zoey.md's rules, and the FIRST SENTENCE IS SHORT
+# Two or three phrasings each. tessa.md's rules, and the FIRST SENTENCE IS SHORT
 # in every one of them — measured: 13 chars is 296 ms, 47 chars is 660 ms,
 # against a 400 ms budget.
 
@@ -398,7 +398,7 @@ class Router:
         #: When he last said anything at all, and when she last greeted him.
         #:
         #: HIS RULE: "when we're done doing something and I come back again and
-        #: say Hey Zoey, she should also reply back." So a greeting is not once
+        #: say Hey Tessa, she should also reply back." So a greeting is not once
         #: per session, it is once per RETURN — and a return is defined by a gap
         #: of silence, which is the only signal available without asking him.
         self.last_turn_at: float | None = None
@@ -512,7 +512,7 @@ class Router:
             # ── HE SAID HER NAME AND NOTHING ELSE ────────────────────────────
             #
             # This is item 2a, and the old behaviour was actively wrong. "Hey
-            # Zoey" reaches here with `raw` empty — `repair` has stripped the
+            # Tessa" reaches here with `raw` empty — `repair` has stripped the
             # name — so it fell through to `_SILENCE`: "I did not catch that."
             # She heard him perfectly and told him she had not.
             #

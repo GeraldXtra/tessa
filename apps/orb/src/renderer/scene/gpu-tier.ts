@@ -34,7 +34,9 @@ const SOFTWARE_RENDERER = /swiftshader|basic render|llvmpipe|software|microsoft 
 /**
  * Particles per rung. 'dom' draws no particles at all.
  *
- * ─── med went 8,000 -> 20,000 ON MEASUREMENT, and here is the measurement ───
+ * ─── the ladder's history, kept because each step reversed the last ───
+ *
+ * med went 8,000 -> 20,000 on a frame measurement:
  *
  * The old ladder was set before the shell had a crescent, when the fill-rate
  * estimate was a guess. At 20,000 particles with the crescent, on the owner's
@@ -62,11 +64,45 @@ const SOFTWARE_RENDERER = /swiftshader|basic render|llvmpipe|software|microsoft 
  * a headroom probe rather than pruned.
  */
 export const PARTICLE_COUNT: Record<SphereTier, number> = {
-  high: 32_000,
-  med: 20_000,
-  low: 8_000,
+  high: 24_000,
+  med: 15_600,
+  low: 6_800,
   dom: 0,
 };
+
+/*
+ * ─── 11,400 -> 15,600, AND THE COUNT WAS NEVER THE MAIN FAULT ───
+ *
+ * The previous note recorded a 20,000 -> 2,600 -> 11,400 walk driven by size
+ * and density alone. Both of those now match the reference and the image still
+ * did not, so this round measured the thing neither of them can see: the
+ * STATISTICS OF THE POINT FIELD. See buildGeometry in sphere-engine.ts for the
+ * numbers; the short version is that this build's particles sat on a
+ * near-perfect grid (nearest-neighbour direction concentration R = 0.914, with
+ * 204 of 216 neighbour vectors inside one 15-degree bin) and the reference's
+ * are an irregular scatter (R = 0.020, against 0.061 for a synthetic Poisson
+ * field generated at the same density by the same code).
+ *
+ * The fix is tangential lattice jitter, not count. But jitter MERGES points
+ * that land near each other, so at a fixed count the number of resolvable
+ * particles falls — measured, 12,300 particles gave 88.4 per 100x100 px clean
+ * and 77.1 jittered, a 13% loss. The count rise is compensation for that, and
+ * nothing else.
+ *
+ * The fit, at a 514 px disc, mid-face patch, particles as connected components:
+ *
+ *                        R      NN2/NN1  cluster   gap    dens   area
+ *   reference image11   0.020    1.53     0.63    6.85    97.8    6.6
+ *   synthetic Poisson   0.061    1.56     0.48    5.17    97.8     —
+ *   synthetic hex       0.526    1.00     1.03   10.86   104.1     —
+ *   build, before       0.914    1.03     0.90   10.20    90.5    9.6
+ *   build, after        0.103    1.40     0.59    6.52    95.5    6.5
+ *
+ * Density lands within 2.4%, particle area within 1.5%, gap within 5%, and the
+ * field is a scatter rather than a grid. `high` and `low` moved by the same
+ * 1.37 so the ladder keeps its shape and a governor demotion still lands on a
+ * rung whose cost is known.
+ */
 
 function readRendererName(gl: WebGL2RenderingContext): string {
   const ext = gl.getExtension('WEBGL_debug_renderer_info');

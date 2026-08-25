@@ -1,4 +1,4 @@
-# Zoey Orb — state of the surface
+# Tessa Orb — state of the surface
 
 Written for someone who has not seen this code. Facts and numbers, not history.
 Last updated after the approval card and the theme system landed.

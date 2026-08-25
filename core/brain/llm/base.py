@@ -8,7 +8,7 @@ day there is credit.
 
 STREAMING IS THE PRIMARY METHOD, not a convenience.
 
-Piper synthesises sentence by sentence, so Zoey can begin speaking as soon as
+Piper synthesises sentence by sentence, so Tessa can begin speaking as soon as
 the model has produced one sentence — she does not have to wait for the whole
 answer. An interface whose primary call returns a completed string makes that
 impossible by construction and no amount of downstream work recovers it. So

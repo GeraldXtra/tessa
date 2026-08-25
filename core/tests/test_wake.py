@@ -62,7 +62,7 @@ r = Router()
 # the ear open. Only an explicit "completely" / "for good" turns the phrase off,
 # and that case is asserted separately below.
 for utt in ("go to sleep", "go to sleep now", "stop listening", "sleep now",
-            "stop the wake word", "zoey go to sleep", "stop listening to me"):
+            "stop the wake word", "tessa go to sleep", "stop listening to me"):
     out = r.route(utt)
     check(f"{utt!r} -> SLEEP, no tool",
           out.intent is Intent.SLEEP and not out.calls,

@@ -14,7 +14,7 @@
  * false zero.
  *
  * Five regions, of which three have a source today:
- *   name        "ZOEY" — a real constant, not a placeholder
+ *   name        "TESSA" — a real constant, not a placeholder
  *   state       evt.agent.state
  *   connection  the handshake, + uptime from the heartbeat
  *   data used   P5, no source -> NO DATA
@@ -102,7 +102,7 @@ export function StatusBar() {
       {mic.claimed ? <span className="status-bar__mic-rule" aria-hidden="true" /> : null}
 
       <div className="status-bar__drag">
-        <span className="status-bar__mark">ZOEY</span>
+        <span className="status-bar__mark">TESSA</span>
 
         {/* THE AGENT STATE IS NOT HERE ANY MORE. It moved to StateChip, top
             centre of the stage — see that file for the argument. This bar keeps
@@ -186,7 +186,7 @@ export function StatusBar() {
           <button
             type="button"
             className="status-bar__retry"
-            onClick={() => window.zoey.retryConnection()}
+            onClick={() => window.tessa.retryConnection()}
           >
             retry
           </button>
@@ -197,7 +197,7 @@ export function StatusBar() {
         <button
           type="button"
           className="status-bar__control"
-          onClick={() => window.zoey.minimizeWindow()}
+          onClick={() => window.tessa.minimizeWindow()}
           aria-label="Minimise"
           title="Minimise"
         >
@@ -206,7 +206,7 @@ export function StatusBar() {
         <button
           type="button"
           className="status-bar__control status-bar__control--close"
-          onClick={() => window.zoey.closeWindow()}
+          onClick={() => window.tessa.closeWindow()}
           aria-label="Close"
           title="Close"
         >

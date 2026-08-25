@@ -85,7 +85,7 @@ CASES = [
     ("google api key", "AIza" + "C" * 35 + " tail", "AIza" + "C" * 35),
     ("jwt bearer", "Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dBjftJeZ4CVP",
      "eyJhbGciOiJIUzI1NiJ9"),
-    ("postgres url password", "postgres://zoey:hunter2SECRET@db.internal:5432/x", "hunter2SECRET"),
+    ("postgres url password", "postgres://tessa:hunter2SECRET@db.internal:5432/x", "hunter2SECRET"),
     ("mongodb+srv url password", "mongodb+srv://u:TopS3cretPw@cluster0.mongodb.net/db", "TopS3cretPw"),
     ("api_key=value", 'api_key=abcd1234efgh5678 trailing', "abcd1234efgh5678"),
     ("password: value", "password: SuperSecret99", "SuperSecret99"),

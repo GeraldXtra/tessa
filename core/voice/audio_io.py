@@ -160,7 +160,7 @@ class ArmedMicrophone:
     frame arrives 134.99 ms after the call. If push-to-talk opened the stream on
     key-down, the owner would lose the first ~135 ms of their first syllable —
     every single time, silently, and worst on exactly the short commands voice is
-    for. "Zoey" begins with a plosive; 135 ms is most of it.
+    for. "Tessa" begins with a plosive; 135 ms is most of it.
 
     So the stream is held open and always writing into a ring. `arm()` does not
     start capture, it marks a position — and then reaches BACKWARDS into the ring
@@ -375,7 +375,7 @@ class ArmedMicrophone:
             if reason != "cancelled":
                 on_close(reason)
 
-        t = threading.Thread(target=run, name="zoey-vad", daemon=True)
+        t = threading.Thread(target=run, name="tessa-vad", daemon=True)
         t.start()
         return t
 

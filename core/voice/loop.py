@@ -44,7 +44,7 @@ from core.bus import AgentState, AudioBus
 #:
 #: Three, not one: one is a door closing, three in a row is a real fault —
 #: his AGC has been measured winding capture gain from 979 down to 264 RMS
-#: over a fifteen-second stream. Saying it once and resetting is zoey.md's
+#: over a fifteen-second stream. Saying it once and resetting is tessa.md's
 #: own rule about opinions: say it once, never nag.
 EMPTY_TURNS_BEFORE_SPEAKING = 3
 
@@ -95,7 +95,7 @@ class TurnTiming:
         `name` is one of stt | route | tool | tts | playback and nothing else.
 
         THE REASON IT IS CLOSED IS NOT TIDINESS. The daemon's other stage log
-        carries prose like `transcribe.returned 'Zoey, open the LedgerWatch
+        carries prose like `transcribe.returned 'Tessa, open the LedgerWatch
         folder...'` — it contains WHAT HE SAID. Shipping those strings on a
         broadcast event would put his transcript into a field a surface will
         render and may persist, on an event that has nothing to do with
@@ -239,7 +239,7 @@ class VoiceLoop:
 
     def _ask_brain(self, question: str, t0: float) -> str:
         """
-        Hand an unresolved question to the model, with zoey.md as the system
+        Hand an unresolved question to the model, with tessa.md as the system
         prompt.
 
         SHE STAYS IN `thinking` FOR THIS, which is correct and is why the state
@@ -265,10 +265,10 @@ class VoiceLoop:
         #
         # The router already strips it via `normalise`'s filler list, and the
         # search path strips it via `repair()`. This path did not: the model was
-        # handed "Hey Zoey, what is a closure in JavaScript?" verbatim. It copes,
+        # handed "Hey Tessa, what is a closure in JavaScript?" verbatim. It copes,
         # but it pays for the tokens and it invites her to answer as though a
         # third party had been named — the same failure that made a web search
-        # for "Zoey, what is the weather?" return a Zoey-branded weather tweet.
+        # for "Tessa, what is the weather?" return a Tessa-branded weather tweet.
         #
         # `strip_wake_name` is used rather than the router's `_FILLERS` because
         # the filler list only knows the literal spelling, while this regex knows
@@ -489,7 +489,7 @@ class VoiceLoop:
             # THE DIAGNOSTIC SURVIVES, ONCE. If she goes silent three times
             # running, the microphone genuinely is the problem — his AGC has
             # been measured winding capture gain down over a long stream — and
-            # she says so a single time, then resets. That is zoey.md's own
+            # she says so a single time, then resets. That is tessa.md's own
             # rule: say it once, never nag.
             self._empty_turns = getattr(self, "_empty_turns", 0) + 1
             self._stage(
@@ -657,7 +657,7 @@ class VoiceLoop:
                 # costs one HTTP request and no browser.
                 #
                 # THE REPAIRED TEXT, NOT THE RAW TRANSCRIPT. Searching for
-                # "Zoey, what is the weather?" returned a Zoey-branded tweet
+                # "Tessa, what is the weather?" returned a Tessa-branded tweet
                 # about being a weather girl — her own name poisoned the query.
                 query = repair(heard)[0] or heard
                 routed = Routed(Intent.TOOL, "", score=1.0,

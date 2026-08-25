@@ -8,7 +8,7 @@
  *
  * THE HAZARD THAT SHAPES EVERY LINE HERE
  *
- * The daemon is SHARED. Zoey Orb polls for it rather than spawning it, and the
+ * The daemon is SHARED. Tessa Orb polls for it rather than spawning it, and the
  * Orb is live right now. If the Console owned the daemon's lifecycle, closing
  * the Console would kill the Orb's connection — a cross-surface coupling that
  * neither CONTRACT nor the spec sanctions.
@@ -88,7 +88,7 @@ export class DaemonSupervisor {
       // Never in a packaged build. Production gets a Windows service.
       return {
         kind: 'unavailable',
-        reason: `Zoey Core is not running (${existing.reason}). Start it with: python core/server.py`,
+        reason: `Tessa Core is not running (${existing.reason}). Start it with: python core/server.py`,
       }
     }
 

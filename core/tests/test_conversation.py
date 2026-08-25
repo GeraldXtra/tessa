@@ -46,7 +46,7 @@ def check(label: str, cond: bool, extra: str = "") -> None:
         print(f"  FAIL  {label} {extra}")
 
 
-tmp = Path(tempfile.mkdtemp(prefix="zoey-conv-")) / "conversation.json"
+tmp = Path(tempfile.mkdtemp(prefix="tessa-conv-")) / "conversation.json"
 print("\nconversation memory\n")
 
 # ── 1. the thread, and his exact exchange ───────────────────────────────────
@@ -153,7 +153,7 @@ c7.add("user", "something")
 n = c7.clear()
 check("clear() empties it and reports how many went", n >= 1 and c7.turns == [])
 check("...and it stays cleared across a restart", Conversation(tmp).turns == [])
-for phrase in ["forget that", "Zoey, forget that", "start fresh", "start over",
+for phrase in ["forget that", "Tessa, forget that", "start fresh", "start over",
                "clear your memory", "clear the context", "new conversation",
                "wipe your memory", "forget the last thing", "never mind that"]:
     check(f"{phrase!r} clears", is_clear_request(phrase))

@@ -1,8 +1,8 @@
 {
-  "name": "@zoey/orb",
+  "name": "@tessa/orb",
   "version": "0.1.0",
   "private": true,
-  "description": "Zoey Orb — the voice surface. Particle sphere, collapsed layout, one WebSocket in the main process.",
+  "description": "Tessa Orb — the voice surface. Particle sphere, collapsed layout, one WebSocket in the main process.",
   "main": "./out/main/index.js",
   "scripts": {
     "predev": "node scripts/check-tokens.mjs",
@@ -24,8 +24,8 @@
     "@types/three": "0.185.4",
     "@types/ws": "8.18.1",
     "@vitejs/plugin-react": "5.2.0",
-    "@zoey/protocol": "1.0.0",
-    "@zoey/tokens": "1.0.0",
+    "@tessa/protocol": "1.0.0",
+    "@tessa/tokens": "1.0.0",
     "electron": "43.4.0",
     "electron-vite": "5.0.0",
     "vite": "7.3.6"
@@ -37,9 +37,9 @@
     "and the preload then fails to load at runtime. Source is written as ESM TypeScript either",
     "way; electron-vite transpiles main/preload to CJS and the renderer stays ESM via Vite.",
     "",
-    "@zoey/protocol and @zoey/tokens are devDependencies ON PURPOSE. electron-vite's",
+    "@tessa/protocol and @tessa/tokens are devDependencies ON PURPOSE. electron-vite's",
     "`build.externalizeDeps` (on by default for main and preload) externalises everything in",
-    "`dependencies`, and @zoey/protocol's entry is raw TypeScript (src/index.ts, which imports",
+    "`dependencies`, and @tessa/protocol's entry is raw TypeScript (src/index.ts, which imports",
     "./enums.generated.ts). Externalised, that becomes a runtime require() of a .ts file and main",
     "crashes on launch. In devDependencies they are bundled, which is what we want.",
     "",

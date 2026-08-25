@@ -115,4 +115,4 @@ export const PTY_HOST_KINDS = ['utilityProcess', 'main', 'forkedNode'] as const
 export type PtyHostKind = (typeof PTY_HOST_KINDS)[number]
 
 /** IPC channel on which main hands the renderer its MessagePort. */
-export const PTY_PORT_CHANNEL = 'zoey:pty-port'
+export const PTY_PORT_CHANNEL = 'tessa:pty-port'

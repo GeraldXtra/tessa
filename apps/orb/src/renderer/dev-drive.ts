@@ -167,7 +167,7 @@ export async function runDevScript(
         report(`DEV-DRIVE ${i} respond "${step.arg}" BAD DECISION (want approve|deny)`);
         continue;
       }
-      window.zoey.respondToApproval(requestId, decision);
+      window.tessa.respondToApproval(requestId, decision);
       report(`DEV-DRIVE ${i} respond ${requestId} ${decision} — sent straight to the bridge`);
       continue;
     }

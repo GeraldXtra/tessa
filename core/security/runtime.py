@@ -4,7 +4,7 @@ core/security/runtime.py — the per-launch auth token and its discovery file.
 CONTRACT §1 and §2.1.
 
 The whole security model of the local WebSocket rests on one assumption: that
-`%LOCALAPPDATA%\\Zoey\\runtime.json` is readable ONLY by the owner. If that ACL
+`%LOCALAPPDATA%\\Tessa\\runtime.json` is readable ONLY by the owner. If that ACL
 is wrong, the token is public and the Origin check is the only thing left
 standing. So this module does not "try" to set the ACL — it sets it, reads it
 back, and refuses to start if it did not take.
@@ -22,18 +22,123 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-RUNTIME_DIRNAME = "Zoey"
+RUNTIME_DIRNAME = "Tessa"
+#: What the directory was called before the rename. Used ONLY by `migrate_local_appdata`.
+LEGACY_DIRNAME = "Zoey"
 RUNTIME_FILENAME = "runtime.json"
 PROTOCOL_VERSION = 1
 TOKEN_BYTES = 32  # -> 64 hex chars, per CONTRACT §2.1
 
 
-def runtime_path() -> Path:
+def local_appdata_root() -> Path:
     base = os.environ.get("LOCALAPPDATA")
     if not base:
         # Non-Windows dev fallback; the daemon targets Windows.
         base = str(Path.home() / ".local" / "share")
-    return Path(base) / RUNTIME_DIRNAME / RUNTIME_FILENAME
+    return Path(base) / RUNTIME_DIRNAME
+
+
+def runtime_path() -> Path:
+    return local_appdata_root() / RUNTIME_FILENAME
+
+
+def migrate_local_appdata() -> str | None:
+    """
+    Move `%LOCALAPPDATA%\\Zoey` to `%LOCALAPPDATA%\\Tessa`, once.
+
+    Returns a one-line description if anything moved, else None.
+
+    WHY THIS EXISTS AND WHY IT MOVES RATHER THAN RECREATES.
+
+    The repo's own `data/` is referenced by RELATIVE paths, so it travels with
+    the folder when the repo is renamed and needs nothing. This directory does
+    not: it sits under the user profile and no rename of the repo touches it.
+
+    It holds `browser-profiles/`, and THAT is his logged-in X session. Pointing
+    the code at a new empty directory would not lose the folder — it would
+    simply stop using it, and he would find himself logged out of X with his
+    profile still sitting in a directory nothing reads any more. `os.replace` on
+    the DIRECTORY preserves every byte inside it, cookies and all; creating a
+    fresh profile would not.
+
+    BOTH PRESENT — AND "PRESENT" IS NOT THE SAME AS "IN USE".
+
+    My first version refused whenever the new directory existed, reasoning that
+    it meant a newer daemon had already run. That reasoning is wrong and I
+    caught it by looking: `%LOCALAPPDATA%\\Tessa` already existed on this machine
+    and was COMPLETELY EMPTY. Refusing there would have stranded a 38 MB browser
+    profile — his logged-in X session — in the old directory while the daemon
+    read an empty new one. He would have been logged out of X with his profile
+    still on disk in a place nothing reads.
+
+    So the test is CONTENT, not existence:
+
+      new absent            -> rename the whole directory (atomic, cheapest)
+      new present but EMPTY -> move each entry across, then drop the empty shell
+      new present with data -> a real daemon has run; prefer it, leave the old
+                               alone and name it in the log
+
+    The last case still refuses to MERGE, and that part of the original
+    reasoning stands: interleaving two Chrome profile directories risks a
+    half-merged profile, which is a corrupted login rather than a missing one —
+    worse than either input on its own.
+    """
+    base = os.environ.get("LOCALAPPDATA")
+    if not base:
+        return None
+    old = Path(base) / LEGACY_DIRNAME
+    new = Path(base) / RUNTIME_DIRNAME
+    if not old.is_dir():
+        return None
+
+    if not new.exists():
+        try:
+            os.replace(old, new)
+        except OSError as exc:
+            return f"could not move {old} to {new}: {exc}"
+        return (f"moved {old} -> {new} "
+                f"(browser profiles, window and theme state intact)")
+
+    # ── PER ENTRY, NOT ALL-OR-NOTHING ───────────────────────────────────────
+    #
+    # The check used to be "does the new directory have ANY contents", and that
+    # was too coarse — it cost him something real on this very machine. Another
+    # process created `Tessa\\browser-profiles` (a fresh, empty-of-login Chrome
+    # profile) minutes before this ran. The whole migration then refused, so his
+    # THEME and WINDOW STATE — for which the new directory held nothing at all
+    # and there was no conflict of any kind — stayed stranded in the old one
+    # alongside the 38 MB profile that actually has his X session in it.
+    #
+    # So each entry is judged on its own: move what has no counterpart, never
+    # overwrite what does. That still refuses to merge a Chrome profile — the
+    # original reasoning stands, an interleaved profile is a corrupted login
+    # rather than a missing one — while rescuing everything that was never in
+    # conflict.
+    moved, kept = [], []
+    for entry in list(old.iterdir()):
+        target = new / entry.name
+        if target.exists():
+            kept.append(entry.name)
+            continue
+        try:
+            os.replace(entry, target)
+            moved.append(entry.name)
+        except OSError as exc:
+            return (f"partially migrated: moved {moved}, then failed on "
+                    f"{entry.name}: {exc}")
+    try:
+        old.rmdir()
+    except OSError:
+        pass          # leftovers are expected when something was kept back
+
+    if moved and kept:
+        return (f"moved {', '.join(moved)} into {new}; LEFT BEHIND in {old} "
+                f"because {new.name} already has its own: {', '.join(kept)} "
+                f"- compare them yourself and delete the one you do not want")
+    if moved:
+        return f"moved {len(moved)} entr(ies) into {new}: {', '.join(moved)}"
+    return (f"nothing to move - {new} already has its own copy of: "
+            f"{', '.join(kept)}; {old} is untouched")
 
 
 def new_token() -> str:

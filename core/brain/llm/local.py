@@ -22,7 +22,7 @@ a new failure surface, and a second thing to keep alive.
     ctranslate2 4.8.1 | Generator: True
     supported compute types (cpu): {'int8', 'int8_float32', 'int16', 'float32'}
 
-STREAMING IS REAL HERE. `generate_tokens` yields token by token, so Zoey can
+STREAMING IS REAL HERE. `generate_tokens` yields token by token, so Tessa can
 begin speaking after the first sentence instead of after the whole answer —
 which is the entire reason `stream()` is the primary method in base.py.
 """

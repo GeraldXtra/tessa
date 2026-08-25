@@ -42,14 +42,21 @@ CPU_THREADS = 4
 #: machinery — one less thing that behaves differently after an upgrade.
 #:
 #: It fixes exactly the class of error the accent produces: proper nouns.
-#: Zui -> Zoey, "larger watch" -> LedgerWatch, Aptek -> Aptech. Generic English
-#: was already verbatim without it.
+#: "larger watch" -> LedgerWatch, Aptek -> Aptech. Generic English was already
+#: verbatim without it.
 #: UPDATED FROM HIS ACTUAL TRANSCRIPTS. The old list was proper nouns from an
 #: earlier sprint and had gone stale — meanwhile the words he says every day
 #: were mangled: "documents" -> "Taluts", "tweet that I'm building an AI
-#: assistant" -> "Tweets, Data Mbudinon AI Assist", and his own assistant's name
-#: "Zoey" -> "Zoi". Priming is measured as a 2x SPEED SAVING as well as an
-#: accuracy fix, so a longer, RELEVANT list costs nothing and is exactly its job.
+#: assistant" -> "Tweets, Data Mbudinon AI Assist". Priming is measured as a 2x
+#: SPEED SAVING as well as an accuracy fix, so a longer, RELEVANT list costs
+#: nothing and is exactly its job.
+#:
+#: HER NAME NOW NEEDS THIS MORE THAN IT DID. Measured over twenty synthesised
+#: utterances with no prime, "Tessa" came back exact only 3 times in 20 — the
+#: rest were Tesser (5), Chester (4), Tessor, Tessir, Tester, Pessar. The old
+#: name's vowel was stable; this one's is not. So her name appears here in
+#: several carriers rather than once, and `repair._NAME_FORMS` carries the
+#: measured confusion set as the net beneath it.
 #:
 #: Her own name first, and spelled once. The folder nouns, the verbs he uses on
 #: them, the apps he actually opens, and the domain words that keep coming back
@@ -61,8 +68,8 @@ CPU_THREADS = 4
 #: contains, so a list of isolated nouns primes isolated nouns. Sentences prime
 #: sentences.
 VOCABULARY_PRIME = (
-    "Zoey, open my downloads. Zoey, open my documents, desktop, pictures, "
-    "videos or music. Zoey, what is the weather? Zoey, what is a closure in "
+    "Tessa, open my downloads. Tessa, open my documents, desktop, pictures, "
+    "videos or music. Tessa, what is the weather? Tessa, what is a closure in "
     "JavaScript? Open Chrome, Google, WhatsApp, VS Code or Explorer. "
     "Tweet that I am building an AI assistant. Post this to X. Repost that. "
     "Reply to post two. Read my timeline. Check my notifications. "
@@ -79,11 +86,11 @@ VOCABULARY_PRIME = (
     # written here as SENTENCES rather than as a word list — a list of isolated
     # phrases primes isolated phrases, which is the mistake the comment above
     # records having already made once.
-    "Hey Zoey. Hey Zoey, are you there? Stop listening. Zoey, stop listening. "
-    "Go to sleep. Stop the wake word. Go back to sleep, Zoey. "
+    "Hey Tessa. Hey Tessa, are you there? Stop listening. Tessa, stop listening. "
+    "Go to sleep. Stop the wake word. Go back to sleep, Tessa. "
     "Stop. Be quiet. Cancel that. "
     "google.com, x.com, web.whatsapp.com, github.com. "
-    "LedgerWatch, Aptech, naira, Titan Wave, ZOEY_OS, Lagos."
+    "LedgerWatch, Aptech, naira, Titan Wave, TESSA_CORE, Lagos."
 )
 
 
@@ -122,7 +129,7 @@ class Transcript:
 #: decoder regurgitating the prompt; a transcript made of "open" and "my" is a
 #: man giving an instruction.
 _ECHO_WORDS = {
-    "ledgerwatch", "aptech", "naira", "titan", "wave", "zoey_os", "lagos",
+    "ledgerwatch", "aptech", "naira", "titan", "wave", "tessa_core", "lagos",
     "dioco", "piper",
 }
 
@@ -133,7 +140,7 @@ _PRIME_WORDS = _ECHO_WORDS
 #: partial and reordered; rather than 0.4 because a real command can legitimately
 #: contain two primed proper nouns ("open LedgerWatch and check Aptech").
 PRIME_ECHO_RATIO = 0.6
-#: Utterances this short are exempt: "Zoey" on its own is a real thing to say.
+#: Utterances this short are exempt: "Tessa" on its own is a real thing to say.
 PRIME_ECHO_MIN_WORDS = 3
 
 
@@ -149,7 +156,7 @@ def _is_prime_echo(text: str) -> bool:
 #:
 #: MEASURED, and this is the mechanism behind the fiction. A captured segment at
 #: RMS 90.5 (peak 822, -32.0 dBFS) produced the confident transcript
-#: "I can't even talk to you." from audio that said "Zoey, open my downloads."
+#: "I can't even talk to you." from audio that said "Tessa, open my downloads."
 #: Gerald's own fixture measures RMS 2966 and transcribes correctly. Whisper does
 #: not return silence for silence — it HALLUCINATES, fluently, and the router
 #: then acts on the hallucination.
@@ -289,7 +296,7 @@ class WhisperSTT:
         #
         # Attenuating Gerald's real 15 s fixture from RMS 3499 down to RMS 264 —
         # the level a 15-second AGC-settled stream produces — still transcribed
-        # CORRECTLY: "Zoey, Open LedgerWatch folder and show me what it looks
+        # CORRECTLY: "Tessa, Open LedgerWatch folder and show me what it looks
         # like." Whisper is robust to low level. Peak-normalising it back up made
         # the result slightly WORSE ("what things like").
         #
@@ -331,10 +338,10 @@ class WhisperSTT:
         #
         # On near-silent audio the decoder has nothing to condition on and
         # echoes its own `initial_prompt` back as the transcript. Observed live
-        # at 03:01:37: "aptech, naira, Titan Wave, ZOEY." — the prime, returned
+        # at 03:01:37: "aptech, naira, Titan Wave, TESSA." — the prime, returned
         # verbatim as though he had said it, then routed as a real utterance.
         #
-        # The prime STAYS: it fixed Zoey, LedgerWatch and Aptech and it is a 2x
+        # The prime STAYS: it fixed Tessa, LedgerWatch and Aptech and it is a 2x
         # speed saving. The failure is detected instead.
         #
         # TOKEN OVERLAP, not string similarity: the echo comes back reordered,
@@ -342,7 +349,7 @@ class WhisperSTT:
         # subsets in any order), so a sequence-based ratio misses it while a set
         # overlap catches every variant. The test is "what fraction of what he
         # said is just my own prime words" — at 60% or more it is an echo, and
-        # short utterances are exempt because "Zoey" alone is a real thing to say.
+        # short utterances are exempt because "Tessa" alone is a real thing to say.
         if _is_prime_echo(joined):
             return Transcript(
                 text="", language=info.language,

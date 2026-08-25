@@ -17,7 +17,7 @@ handlers. Two reasons, and the second is the real one:
      she says when it works and when it does not. A voice agent whose replies
      are only discoverable by reading 30 handlers is one whose character drifts
      silently.
-  2. zoey.md's rules ("name what broke, offer the nearest real thing", short
+  2. tessa.md's rules ("name what broke, offer the nearest real thing", short
      first sentence because Piper streams per sentence and the opener is the
      whole 400 ms budget) are then enforced in ONE place. A handler cannot
      accidentally answer in a different voice.
@@ -38,7 +38,7 @@ class ToolError(Exception):
     A failure she can explain.
 
     `reason` names what actually broke. `alternative` is the nearest real thing
-    she can still do. zoey.md bans the bare apology: "that failed" tells him
+    she can still do. tessa.md bans the bare apology: "that failed" tells him
     nothing and sends him looking in the wrong place.
     """
 

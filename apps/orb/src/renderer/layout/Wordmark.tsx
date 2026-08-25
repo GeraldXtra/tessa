@@ -2,7 +2,7 @@
  * Her name, under the sphere. The reference's identity block, minus its lies.
  *
  * ─── what the reference has here, and what of it is real ───
- * The reference shows four things under the sphere: the word ZOEY, a small
+ * The reference shows four things under the sphere: the word TESSA, a small
  * indicator strip beneath it, a left and right arrow flanking it, and a pill
  * button reading KNOWLEDGE VIEW. Two are built and two are not.
  *
@@ -55,7 +55,7 @@ export function Wordmark() {
 
   return (
     <div className="wordmark">
-      <span className="wordmark__name">ZOEY</span>
+      <span className="wordmark__name">TESSA</span>
       <span className="wordmark__rungs" role="img" aria-label={RUNG_LABEL[lit]}>
         {[0, 1, 2].map((i) => (
           <span key={i} className="wordmark__rung" data-lit={i <= lit ? 'true' : undefined} />

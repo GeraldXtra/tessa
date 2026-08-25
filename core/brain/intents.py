@@ -98,7 +98,7 @@ _CORRECTIONS = re.compile(
 
 def split_clauses(text: str) -> list[str]:
     """
-    "open my Zoey console and check my node version" -> two clauses.
+    "open my Tessa console and check my node version" -> two clauses.
 
     Deliberately naive, and bounded to 3: a real conjunction parser would start
     splitting "node and npm" into two jobs. Anything it gets wrong falls through
@@ -116,7 +116,7 @@ def split_clauses(text: str) -> list[str]:
 
 
 _LEADS = re.compile(
-    r"^(?:hello|hey|hi|ok|okay|please|zoey|hello zoey|hey zoey|ok zoey)\b[\s,]*", re.I)
+    r"^(?:hello|hey|hi|ok|okay|please|tessa|hello tessa|hey tessa|ok tessa)\b[\s,]*", re.I)
 
 
 def strip_lead(text: str) -> str:
@@ -324,8 +324,8 @@ class IntentParser:
             #
             # Item 1g: "everything on my system" is not only applications. A
             # literal path he names must open as itself and never be fuzzy
-            # matched against an application — "open C:\\dev\\zoey" hunting the
-            # Start Menu for something called "dev zoey" would be absurd.
+            # matched against an application — "open C:\\dev\\tessa" hunting the
+            # Start Menu for something called "dev tessa" would be absurd.
             explicit = _explicit_path(clause)
             if explicit is not None:
                 if explicit.exists():

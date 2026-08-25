@@ -16,7 +16,7 @@ import { PRODUCTION_CSP } from './src/shared/csp.ts';
  */
 function cspMetaPlugin(): Plugin {
   return {
-    name: 'zoey-csp-meta',
+    name: 'tessa-csp-meta',
     apply: 'build',
     transformIndexHtml: {
       order: 'pre',
@@ -41,11 +41,11 @@ function cspMetaPlugin(): Plugin {
  * load-bearing here — see the $comment block in package.json. In short:
  *
  *   dependencies      ws            → externalised (has optional native deps)
- *   devDependencies   @zoey/*       → bundled (their entry point is raw .ts)
+ *   devDependencies   @tessa/*       → bundled (their entry point is raw .ts)
  *
  * It defaults to true for main and preload, so stating it is redundant — and
  * stated anyway, on purpose. This is the setting that decides whether
- * @zoey/protocol gets bundled or turns into a runtime `require()` of a .ts file
+ * @tessa/protocol gets bundled or turns into a runtime `require()` of a .ts file
  * that crashes main on launch. A silent default is exactly how that trap gets
  * reintroduced by someone reorganising package.json.
  *

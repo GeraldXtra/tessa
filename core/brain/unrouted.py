@@ -3,7 +3,7 @@ core/brain/unrouted.py — what to do when the local router has no match.
 
 THE BUG THIS FILE EXISTS TO FIX
 
-Gerald asked "Zoey, what is a closure in JavaScript?" It transcribed perfectly.
+Gerald asked "Tessa, what is a closure in JavaScript?" It transcribed perfectly.
 She said "Heard. That is not mine yet." He asked eight things; one worked.
 
 The engine was there the whole time. `make_engine()` was built, wired into
@@ -14,7 +14,7 @@ contained ZERO references to it. `route()` returned `Routed(Intent.UNROUTED,
 _pick(_UNROUTED))` and that sentence went straight to Piper.
 
 That is the fourth time in this project: `wait_for_silence` called by nothing,
-`executor.py` imported by nothing, `zoey.md` read by nothing, and now an engine
+`executor.py` imported by nothing, `tessa.md` read by nothing, and now an engine
 answered by nothing. Built, measured, reported, unreachable.
 
 THE DESIGN, STATED PLAINLY
@@ -158,7 +158,7 @@ def needs_live_data(text: str) -> bool:
 #
 # THIS IS THE MOST IMPORTANT RULE IN THE FILE AND IT WAS MISSING.
 #
-# "Zoey, Open My Taluts" — Whisper's mangling of "documents". The folder did not
+# "Tessa, Open My Taluts" — Whisper's mangling of "documents". The folder did not
 # resolve, so the router returned UNROUTED, so it went to the model as a
 # question, and the model said:
 #
@@ -214,7 +214,7 @@ def classify(text: str) -> Disposition:
 
     THE TEXT IS REPAIRED HERE, not by the caller. Every verb test in this module
     is anchored to the start of the utterance, and his transcripts begin with
-    her name — "Zoey, Open My Taluts" does not start with "Open", so
+    her name — "Tessa, Open My Taluts" does not start with "Open", so
     `is_unresolved_command` missed it and the instruction went to the model
     anyway. Repairing inside `classify` means no caller can forget, which is the
     same reasoning as fencing inside the executor rather than in each handler.
@@ -234,7 +234,7 @@ def classify(text: str) -> Disposition:
 
 
 #: What she says for an action she has no tool for. Names the gap and does not
-#: pretend, per zoey.md's rule on failure.
+#: pretend, per tessa.md's rule on failure.
 _ACTION_REFUSAL = (
     "That is not something I can do yet, Emperor. I have no tool for it. "
     "Files, windows, processes, your machine, the browser and X are mine."

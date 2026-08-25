@@ -1,5 +1,5 @@
 /**
- * Smoke test for @zoey/protocol.
+ * Smoke test for @tessa/protocol.
  *
  * Runs with zero dependencies:
  *   node --experimental-strip-types packages/protocol/test/smoke.ts
@@ -30,7 +30,7 @@ const ok = (name: string, fn: () => void) => {
   console.log(`  ok  ${name}`);
 };
 
-console.log('@zoey/protocol smoke test\n');
+console.log('@tessa/protocol smoke test\n');
 
 /* ── version ─────────────────────────────────────────────────────────────── */
 
@@ -51,17 +51,17 @@ ok('close codes match CONTRACT §2.2', () => {
 
 /* ── §2.1 Origin allowlist ───────────────────────────────────────────────── */
 
-ok('only zoey://console and zoey://orb are allowed origins', () => {
-  assert.deepEqual([...ALLOWED_ORIGINS], ['zoey://console', 'zoey://orb']);
-  assert.equal(isAllowedOrigin('zoey://console'), true);
-  assert.equal(isAllowedOrigin('zoey://orb'), true);
+ok('only tessa://console and tessa://orb are allowed origins', () => {
+  assert.deepEqual([...ALLOWED_ORIGINS], ['tessa://console', 'tessa://orb']);
+  assert.equal(isAllowedOrigin('tessa://console'), true);
+  assert.equal(isAllowedOrigin('tessa://orb'), true);
 });
 
 ok('browser-shaped origins are rejected — the drive-by attack', () => {
   for (const bad of [
     'http://evil.com', 'https://evil.com', 'http://localhost:3000',
     'https://127.0.0.1', 'file://', 'null', '', undefined, null,
-    'zoey://console.evil.com', 'zoey://consol', 'ZOEY://CONSOLE',
+    'tessa://console.evil.com', 'tessa://consol', 'TESSA://CONSOLE',
   ]) {
     assert.equal(isAllowedOrigin(bad as string), false, `should reject: ${String(bad)}`);
   }
@@ -70,7 +70,7 @@ ok('browser-shaped origins are rejected — the drive-by attack', () => {
 /* ── §3 envelope ─────────────────────────────────────────────────────────── */
 
 ok('makeEnvelope produces a valid envelope', () => {
-  const e = makeEnvelope('evt.agent.state', { companionId: 'zoey', state: 'thinking' });
+  const e = makeEnvelope('evt.agent.state', { companionId: 'tessa', state: 'thinking' });
   assert.equal(isEnvelope(e), true);
   assert.equal(e.v, 1);
   assert.equal(e.type, 'evt.agent.state');
@@ -118,7 +118,7 @@ ok('unknown types are structurally VALID but flagged unknown (§3.2)', () => {
 
 ok('unknown payload fields do not invalidate a known type (§3.2)', () => {
   const e = makeEnvelope('evt.agent.state', {
-    companionId: 'zoey', state: 'idle', futureField: 42,
+    companionId: 'tessa', state: 'idle', futureField: 42,
   } as never);
   assert.equal(isEnvelope(e), true);
 });
@@ -162,7 +162,7 @@ ok('closed enums match the contract exactly (§7.4)', () => {
 });
 
 ok('SURFACES stays console|orb — `mobile` deliberately excluded', () => {
-  // A phone cannot read %LOCALAPPDATA%\Zoey\runtime.json and cannot reach
+  // A phone cannot read %LOCALAPPDATA%\Tessa\runtime.json and cannot reach
   // 127.0.0.1. Adding the value would promise a capability §1/§2 cannot serve.
   assert.deepEqual([...SURFACES], ['console', 'orb']);
 });
@@ -181,7 +181,7 @@ ok('`blocked` and `needsReview` are distinct job states', () => {
 });
 
 ok('deep links cannot reach cdCurrent — it mutates an existing session', () => {
-  assert.equal(parseDeepLink('zoey://open?path=C%3A%5Cdev&mode=cdCurrent'), null);
+  assert.equal(parseDeepLink('tessa://open?path=C%3A%5Cdev&mode=cdCurrent'), null);
   // ...but it IS a valid spawnAt mode from inside the app.
   assert.ok((SPAWN_MODES as readonly string[]).includes('cdCurrent'));
 });
@@ -237,21 +237,21 @@ ok('pty lifecycle report events are a closed set (§6.5)', () => {
 
 ok('valid deep links parse', () => {
   assert.deepEqual(
-    parseDeepLink('zoey://open?path=C%3A%5Cdev%5Czoey&mode=tab'),
-    { path: 'C:\\dev\\zoey', mode: 'tab' });
+    parseDeepLink('tessa://open?path=C%3A%5Cdev%5Ctessa&mode=tab'),
+    { path: 'C:\\dev\\tessa', mode: 'tab' });
   // mode defaults to window
   assert.deepEqual(
-    parseDeepLink('zoey://open?path=C%3A%5Cdev'),
+    parseDeepLink('tessa://open?path=C%3A%5Cdev'),
     { path: 'C:\\dev', mode: 'window' });
 });
 
 ok('deep link REJECTS any command parameter — RCE vector (§6.6)', () => {
   for (const hostile of [
-    'zoey://open?path=C%3A%5C&cmd=calc.exe',
-    'zoey://open?path=C%3A%5C&mode=tab&cmd=rm+-rf+%2F',
-    'zoey://open?path=C%3A%5C&run=whoami',
-    'zoey://open?path=C%3A%5C&exec=1',
-    'zoey://run?cmd=calc.exe',
+    'tessa://open?path=C%3A%5C&cmd=calc.exe',
+    'tessa://open?path=C%3A%5C&mode=tab&cmd=rm+-rf+%2F',
+    'tessa://open?path=C%3A%5C&run=whoami',
+    'tessa://open?path=C%3A%5C&exec=1',
+    'tessa://run?cmd=calc.exe',
   ]) {
     assert.equal(parseDeepLink(hostile), null, `must reject: ${hostile}`);
   }
@@ -259,9 +259,9 @@ ok('deep link REJECTS any command parameter — RCE vector (§6.6)', () => {
 
 ok('deep link rejects wrong scheme, host, or mode', () => {
   assert.equal(parseDeepLink('https://open?path=C%3A%5C'), null, 'wrong scheme');
-  assert.equal(parseDeepLink('zoey://run?path=C%3A%5C'), null, 'wrong host');
-  assert.equal(parseDeepLink('zoey://open?mode=window'), null, 'missing path');
-  assert.equal(parseDeepLink('zoey://open?path=C%3A%5C&mode=bogus'), null, 'bad mode');
+  assert.equal(parseDeepLink('tessa://run?path=C%3A%5C'), null, 'wrong host');
+  assert.equal(parseDeepLink('tessa://open?mode=window'), null, 'missing path');
+  assert.equal(parseDeepLink('tessa://open?path=C%3A%5C&mode=bogus'), null, 'bad mode');
   assert.equal(parseDeepLink('not a url'), null);
 });
 

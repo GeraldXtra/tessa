@@ -2,7 +2,7 @@
  * PULSE — "Is my machine healthy?" (§R.3)
  *
  * §R.3 lists far more than exists: disk and network sparklines, top processes,
- * what Zoey is touching this second, disk projection, metered data, battery,
+ * what Tessa is touching this second, disk projection, metered data, battery,
  * thermal. None of those have a source in the daemon today. The six fields of
  * `evt.daemon.health` do, and they are all real as of Session 1's landing —
  * so those six render and everything else says NO DATA.
@@ -33,7 +33,7 @@ export function PulsePanel() {
    */
   useEffect(() => {
     if (!health) return;
-    window.zoey.reportMetrics(
+    window.tessa.reportMetrics(
       `PULSE-RENDER src_uptimeS=${health.uptimeS} src_cpuPct=${health.cpuPct} ` +
         `src_memMB=${health.memMB} src_apiReachable=${health.apiReachable} ` +
         `src_budgetSpent=${health.budgetSpent} src_budgetCap=${health.budgetCap} ` +
@@ -126,7 +126,7 @@ export function PulsePanel() {
 
       {/*
         Everything §R.3 lists for PULSE that has no source: disk, network, top
-        processes, what Zoey is touching, disk projection, metered data,
+        processes, what Tessa is touching, disk projection, metered data,
         battery, thermal. One honest empty section rather than eight.
       */}
       <Section title="Machine">

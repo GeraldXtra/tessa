@@ -56,7 +56,7 @@ import {
   type EvtDaemonHealth,
   type ResHello,
   type Surface,
-} from '@zoey/protocol';
+} from '@tessa/protocol';
 
 import type {
   ApprovalDecision,
@@ -65,6 +65,7 @@ import type {
   DaemonHealth,
   PermissionRequest,
   PtySession,
+  CalendarToday,
   TranscriptLine,
   TurnTiming,
 } from '../shared/ipc-contract.ts';
@@ -120,7 +121,7 @@ const ROLE_PROVENANCE: Record<string, string> = {
  * Typed against the contract's allowlist, so a typo is a compile error rather
  * than a 403 at runtime. CONTRACT §2.1.
  */
-const ORIGIN: AllowedOrigin = 'zoey://orb';
+const ORIGIN: AllowedOrigin = 'tessa://orb';
 const SURFACE: Surface = 'orb';
 
 /** How often to re-read runtime.json while there is no daemon. No socket is opened. */
@@ -217,6 +218,7 @@ export interface DaemonConnectionOptions {
   onHealth: (health: DaemonHealth) => void;
   onAgentState: (state: AgentState, detail: AgentDetailIn | null) => void;
   onTurnTiming: (timing: TurnTiming) => void;
+  onCalendarToday: (today: CalendarToday) => void;
   onAuditHistory: (entries: AuditEntry[]) => void;
   onAuditAppended: (entry: AuditEntry) => void;
   onPtySessions: (sessions: PtySession[]) => void;
@@ -276,6 +278,7 @@ export class DaemonConnection {
   private helloId: string | null = null;
   private subscribeId: string | null = null;
   private auditQueryId: string | null = null;
+  private calendarQueryId: string | null = null;
   private stopped = false;
   private loggedFirstHealth = false;
 
@@ -690,6 +693,43 @@ export class DaemonConnection {
       return;
     }
 
+    if (parsed.type === 'res.calendar.today' && parsed.corr === this.calendarQueryId) {
+      const p = parsed.payload as Record<string, unknown>;
+      const rows = Array.isArray(p['events']) ? (p['events'] as Record<string, unknown>[]) : [];
+      /**
+       * Sanitised on the way in. Event titles are `external` provenance — the
+       * highest risk in CONTRACT §6.2 — and this is the process boundary they
+       * cross. Non-strings are dropped rather than coerced, control characters
+       * are stripped by code point so no escape sequence can reach a log, and
+       * the title is bounded because an unbounded string in a fixed panel is a
+       * layout weapon whatever it says.
+       */
+      const clean = (v: unknown, max: number): string => {
+        if (typeof v !== 'string') return '';
+        let out = '';
+        for (const ch of v.slice(0, max)) {
+          const code = ch.codePointAt(0) ?? 0;
+          out += code < 0x20 || code === 0x7f ? ' ' : ch;
+        }
+        return out;
+      };
+      this.opts.onCalendarToday({
+        connected: p['connected'] === true,
+        stale: p['stale'] === true,
+        ageSeconds: typeof p['ageSeconds'] === 'number' ? p['ageSeconds'] : 0,
+        date: clean(p['date'], 32),
+        reason: clean(p['reason'], 120) || undefined,
+        events: rows.slice(0, 12).map((e, i) => ({
+          id: clean(e['id'], 96) || 'ev-' + i,
+          title: clean(e['title'], 140),
+          allDay: e['allDay'] === true,
+          start: clean(e['start'], 40),
+          end: clean(e['end'], 40),
+        })),
+      });
+      return;
+    }
+
     if (parsed.type === 'res.audit' && parsed.corr === this.auditQueryId) {
       const rows = (parsed.payload as { entries?: unknown }).entries;
       if (Array.isArray(rows)) {
@@ -1042,6 +1082,37 @@ export class DaemonConnection {
     const query = makeEnvelope('cmd.audit.query', { limit: AUDIT_HISTORY_LIMIT });
     this.auditQueryId = query.id;
     this.socket?.send(JSON.stringify(query));
+
+    // Today's calendar, once per connection, for the TODAY panel. Read-only
+    // and answered by Session 1's producer; an older daemon that does not know
+    // the type replies err.protocol.unknownType and CONTRACT §3.2 makes that a
+    // silent no-op here, which is exactly the "NO DATA" state.
+    /**
+     * Built by hand rather than with `makeEnvelope`, and that is a REPORTED
+     * GAP rather than a shortcut.
+     *
+     * `makeEnvelope` is generic over `PayloadMap` in @tessa/protocol, and
+     * `cmd.calendar.today` is not in it — Session 1 shipped the daemon handler
+     * (core/server.py:544) before the type existed, and CONTRACT.md does not
+     * list the pair either. packages/protocol is shared and locked to this
+     * session, so I cannot add it; casting through `never` would have hidden
+     * the gap behind a shrug.
+     *
+     * The envelope is CONTRACT §3's shape exactly, and `ulid()` and
+     * `PROTOCOL_VERSION` come from the protocol package so the two cannot
+     * drift. When Gerald applies the additive §5.1 entry, this collapses back
+     * to one `makeEnvelope` call.
+     */
+    const cal = {
+      v: PROTOCOL_VERSION,
+      id: ulid(),
+      ts: new Date().toISOString().replace(/(\.\d{3})\d*Z$/, '$1Z'),
+      type: 'cmd.calendar.today',
+      corr: null,
+      payload: {},
+    };
+    this.calendarQueryId = cal.id;
+    this.socket?.send(JSON.stringify(cal));
   }
 
   /**
@@ -1082,7 +1153,7 @@ export class DaemonConnection {
       this.rejectedCredential = credentialDigest(info.port, info.token);
       this.emit({
         phase: 'authRejected',
-        detail: 'daemon rejected Origin: zoey://orb — this is a bug, not a lockout',
+        detail: 'daemon rejected Origin: tessa://orb — this is a bug, not a lockout',
       });
       this.opts.log('!! upgrade refused on Origin — check ALLOWED_ORIGINS in core/server.py');
     } else if (code === 429) {
@@ -1110,6 +1181,7 @@ export class DaemonConnection {
     this.helloId = null;
     this.subscribeId = null;
     this.auditQueryId = null;
+    this.calendarQueryId = null;
     this.assembler.reset();
 
     // Every unanswered voice command fails closed. A `start` whose reply was

@@ -49,12 +49,38 @@ const LOAD_CEILING = 25;
  * The clamp. §5.1's whole point is that the sphere tells him her state from
  * across the room, and an aura with a wide swing competes with exactly that.
  *
- * The floor is chosen so the RESTING stage looks like it did before this
- * existed: `--bg-ambient` mixes the accent at 20%, and 0.70 of that is the 14%
- * the stage carried as a flat value. So nothing about the idle view changes,
- * and everything above the floor is headroom the instrument did not have.
+ * ─── THE FLOOR WENT 0.70 -> 0.00, ON A MEASUREMENT, AND IT IS AN ARGUMENT ───
+ *
+ * The old floor was chosen so the resting stage looked exactly as it had before
+ * this instrument existed. Measured against the reference, that resting look is
+ * wrong. Median luminance of an annulus just outside the silhouette, minus the
+ * median of the frame's own far background:
+ *
+ *                       1.05-1.20 R   1.20-1.45 R   1.45-1.80 R
+ *   reference image11      -1.00         +0.00         +0.50
+ *   build, floor 0.70      +5.84         +4.49         +2.35
+ *
+ * The reference has NO halo. Its numbers are noise around zero — and note it is
+ * a photograph, so if anything it should show MORE glow than a screenshot, not
+ * less. The build had six luminance units of navy sitting where CONTRACT §9.1
+ * says the centre stage floats over pure void, and magnified it reads as a wash
+ * across the whole frame. That wash is what he is looking at.
+ *
+ * A correction to the brief, which read this as the background being off true
+ * black. It is not: the build's far background measures a median of 0.00
+ * against the reference photograph's 8.57. The fault is local to the sphere —
+ * a halo, not a wash — and only the halo is removed here.
+ *
+ * The instrument is not weakened by this; it is TRIPLED. At a floor of 0.70,
+ * seventy percent of the aura's range was spent on a constant and load could
+ * only ever move the remaining thirty. From zero the whole range is the signal,
+ * and a glow that APPEARS is a stronger peripheral cue than one that swells —
+ * which is what §R.1's "felt, not read" is asking for.
+ *
+ * What it costs: spec §3.8's ambient glow is gone at rest. That is the point.
+ * He asked for the reference's black and the reference's black is black.
  */
-const ALPHA_FLOOR = 0.7;
+const ALPHA_FLOOR = 0.0;
 const ALPHA_CEIL = 1.0;
 const SCALE_FLOOR = 0.97;
 const SCALE_CEIL = 1.18;
@@ -148,7 +174,9 @@ export function applyAura(health: DaemonHealth | null): void {
   }
 
   if (reducedMotion) {
-    // Pinned at the floor, written once. No transition, no updates.
+    // Pinned at the floor, written once. No transition, no updates. The floor
+    // is now zero, so reduced motion means a black stage — which is both the
+    // reference's appearance and the least motion available.
     if (lastBucket !== 0) {
       lastBucket = 0;
       root.style.setProperty('--aura-alpha', String(ALPHA_FLOOR));

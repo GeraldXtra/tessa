@@ -1,6 +1,6 @@
-# Zoey Console — Plan & Architecture
+# Tessa Console — Plan & Architecture
 
-> **Read [`CONTRACT.md`](./CONTRACT.md) first.** It is the shared protocol between Zoey Console, Zoey Orb, and Zoey Core, and it is read-only for surface sessions. This document is the Console's build plan; the contract is the law.
+> **Read [`CONTRACT.md`](./CONTRACT.md) first.** It is the shared protocol between Tessa Console, Tessa Orb, and Tessa Core, and it is read-only for surface sessions. This document is the Console's build plan; the contract is the law.
 
 Owner: Gerald (Titan Wave LTD) · Created 2026-08-12
 
@@ -19,19 +19,19 @@ It is **not** a standalone product. It is **one of two front-ends onto a single 
 
 ```
         ┌──────────────┐         ┌──────────────┐
-        │  Zoey Orb    │         │ Zoey Console │
+        │  Tessa Orb    │         │ Tessa Console │
         │ (voice UI)   │         │ (this repo)  │
         │ apps/orb     │         │ apps/console │
         └──────┬───────┘         └──────┬───────┘
                │   ws://127.0.0.1:47600/v1
                └───────────┬─────────────┘
                     ┌──────▼───────┐
-                    │  Zoey Core   │  core/
+                    │  Tessa Core   │  core/
                     │ Python daemon│  brain · tools · guard · audit · memory
                     └──────────────┘
 ```
 
-Zoey Orb is built in **a separate Claude Code session**. The two must not diverge — hence `CONTRACT.md`.
+Tessa Orb is built in **a separate Claude Code session**. The two must not diverge — hence `CONTRACT.md`.
 
 ---
 
@@ -74,7 +74,7 @@ What ships instead — same experience, no hang:
 ## 3. Repository layout
 
 ```
-C:\dev\zoey\                       # NOT in OneDrive — deliberate (2,634 node_modules would thrash sync)
+C:\dev\tessa\                       # NOT in OneDrive — deliberate (2,634 node_modules would thrash sync)
 ├── CONTRACT.md                    # SHARED LAW. Read every session. Never edited by a surface session.
 ├── plan.md                        # this file
 ├── package.json                   # npm workspaces root
@@ -92,14 +92,14 @@ C:\dev\zoey\                       # NOT in OneDrive — deliberate (2,634 node_
 │   ├── security\{guard,audit,secrets}.py
 │   ├── pty\supervisor.py
 │   ├── fs\{enumerate,watch}.py    #   metadata-only (CONTRACT §6.3)
-│   └── config\permissions.yaml    #   green/amber/red — from ZOEY_OS-spec §6
+│   └── config\permissions.yaml    #   green/amber/red — from TESSA_CORE-spec §6
 ├── apps\
 │   ├── console\                   # ← THIS SESSION OWNS THIS
 │   │   ├── src\main\              #   Electron main: WS client, token read, window mgmt
 │   │   ├── src\preload\           #   contextBridge only
 │   │   └── src\renderer\          #   React: terminal, tree, tabs
 │   └── orb\                       # ← ORB SESSION OWNS THIS. NEVER EDIT.
-└── docs\ZOEY_OS-spec.md           # canonical copy
+└── docs\TESSA_CORE-spec.md           # canonical copy
 ```
 
 **Ownership rule.** This session touches `apps/console` and — with owner approval — `core/pty` and `core/fs`. It never touches `apps/orb`. Changes to `packages/*` or `CONTRACT.md` are **proposed to the owner, not made**.
@@ -150,9 +150,9 @@ On 2 cores:
 ```
 ┌──────────────────────────────────────────────────────────┐
 │ Electron MAIN process (Node)                             │
-│  • reads %LOCALAPPDATA%\Zoey\runtime.json (port, token)  │
+│  • reads %LOCALAPPDATA%\Tessa\runtime.json (port, token)  │
 │  • owns the ONLY WebSocket client → 127.0.0.1:47600      │
-│  • sets Origin: zoey://console   (a renderer cannot)     │
+│  • sets Origin: tessa://console   (a renderer cannot)     │
 │  • window manager: spawnAt(path) → new BrowserWindow     │
 │  • asks the daemon for a SPAWN GRANT before any PTY      │
 └──────▲──────────────────────────────┬────────────────────┘
@@ -168,7 +168,7 @@ On 2 cores:
 └──────────────────────────┘   └───────────────────────────┘
                 │ WS: grant requests, lifecycle reports, fs, permissions
 ┌───────────────▼──────────────────────────────────────────┐
-│ Zoey Core (Python) — WS server, permission guard,        │
+│ Tessa Core (Python) — WS server, permission guard,        │
 │ audit log, fs enumeration.  Also serves apps\orb.        │
 │ Authorizes and audits PTYs. NEVER carries their bytes.   │
 └──────────────────────────────────────────────────────────┘
@@ -181,7 +181,7 @@ On 2 cores:
 **Why a `utilityProcess` rather than the main process** 🔵 — a native-module crash in `node-pty` takes down whatever process hosts it. In main, that kills *every* window. In a per-window `utilityProcess`, it kills one tab's backend and the app survives.
 
 **Click a folder → new console window:**
-1. Renderer: tree click → `window.zoey.spawnAt(path, mode)` over contextBridge.
+1. Renderer: tree click → `window.tessa.spawnAt(path, mode)` over contextBridge.
 2. Main: validate `path` is a real directory; reject reparse-point traversal outside allowed roots.
 3. Main → daemon: `cmd.pty.requestSpawn { profileId, cwd: path, actor: 'human' }`.
 4. Daemon applies tier + protected-path policy, writes an audit entry, returns `res.pty.grant`. If the path is protected, the owner sees an approval card first.
@@ -213,7 +213,7 @@ See `CONTRACT.md` §6 for the invariants binding **both** surfaces. Console-spec
 1. **WS auth** — loopback bind + Origin allowlist + per-launch token + 3 s handshake deadline (CONTRACT §2). Without this any webpage commands the agent.
 2. **Electron hardening** — `contextIsolation: true`, `nodeIntegration: false`, `sandbox: true`, no remote module, strict CSP. Token stays in main.
 3. **Audit log from commit one** — append-only, hash-chained, every command tagged `actor ∈ {user, agent, schedule}`. **Retrofitting provenance is impossible — the information is gone by then.**
-4. **Protected paths** — `C:\dev\zoey`, `C:\Users\<user>\OneDrive`, and system directories, marked in `permissions.yaml`. Writes/deletes there confirm regardless of origin.
+4. **Protected paths** — `C:\dev\tessa`, `C:\Users\<user>\OneDrive`, and system directories, marked in `permissions.yaml`. Writes/deletes there confirm regardless of origin.
 5. **Secret redaction before any write** — history, logs, session records. A secret written unredacted once is leaked permanently.
 
 ### 5.2 Honest residual risk ⚪
@@ -293,7 +293,7 @@ Rejected deliberately. Do not re-litigate.
 |---|---|
 | Tauri v2 | Rust + MSVC ≈ 3–7 GB on metered data against 14.5 GB free. |
 | Custom Go ConPTY host | Third language; hand-rolled syscalls, no compiler validation; the premise for rejecting node-pty was factually wrong (§4.1). |
-| A custom Zoey shell language | 🔵 Fleet proposed it. Cut. The need is to run projects, not learn a new language. |
+| A custom Tessa shell language | 🔵 Fleet proposed it. Cut. The need is to run projects, not learn a new language. |
 | Reimplementing CMD/PowerShell/WSL builtins | Infinite scope, strictly worse result. Host the real binaries. |
 | Primary-menu Win11 shell extension | Needs MSVC + Sparse MSIX. Legacy verb instead. |
 | Web Worker stream decimation (Phase 1) | 2 physical cores. Benchmark before adding contention. |
@@ -309,7 +309,7 @@ Rejected deliberately. Do not re-litigate.
 
 **Phase 0 — contract & auth boundary**
 - Bad token → `4401`. Disallowed Origin (`http://evil.com`) → `4401` + audit entry. No `cmd.hello` in 3 s → `4408`. Test all three with a raw `ws` script.
-- `icacls %LOCALAPPDATA%\Zoey\runtime.json` shows only the owner SID and SYSTEM.
+- `icacls %LOCALAPPDATA%\Tessa\runtime.json` shows only the owner SID and SYSTEM.
 - **Browser drive-by test:** a page running `new WebSocket('ws://127.0.0.1:47600/v1')` in Chrome must be rejected on Origin and logged.
 - Unknown-type test: `cmd.nonexistent.thing` → `err.protocol.unknownType`, **connection stays open**. An unknown field in a known payload is ignored.
 

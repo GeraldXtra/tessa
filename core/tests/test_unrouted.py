@@ -48,14 +48,14 @@ print("\nunrouted: the router reaching the brain\n")
 
 # ── 1. HIS EIGHT TRANSCRIPTS, verbatim, each to the right disposition ────────
 EIGHT = [
-    ("Zoey, what is the weather?",            Disposition.LIVE_DATA),
-    ("Zoey, what is a closure in JavaScript?", Disposition.QUESTION),
+    ("Tessa, what is the weather?",            Disposition.LIVE_DATA),
+    ("Tessa, what is a closure in JavaScript?", Disposition.QUESTION),
     ("The",                                   Disposition.FRAGMENT),
-    ("Zoey, Open My Taluts",                  Disposition.UNRESOLVED),
+    ("Tessa, Open My Taluts",                  Disposition.UNRESOLVED),
     ("Zoi, OpenGoogle.com",                   None),   # routes — never classified
-    ("Zoey, OpenGoogle.com",                  None),
-    ("ZOEY, Open My Downloads",               None),
-    ("Zoey, Tweets, Data Mbudinon AI Assist", None),
+    ("Tessa, OpenGoogle.com",                  None),
+    ("TESSA, Open My Downloads",               None),
+    ("Tessa, Tweets, Data Mbudinon AI Assist", None),
 ]
 for text, want in EIGHT:
     r = Router()
@@ -86,10 +86,10 @@ for u in ["open my taluts", "show me the thingummy", "close the wotsit"]:
     check(f"{u!r} names the word she could not place",
           classify(u) is Disposition.UNRESOLVED, classify(u).value)
 check("the refusal names the object, not the verb",
-      "Taluts" in unresolved_refusal("Zoey, Open My Taluts"),
-      unresolved_refusal("Zoey, Open My Taluts"))
+      "Taluts" in unresolved_refusal("Tessa, Open My Taluts"),
+      unresolved_refusal("Tessa, Open My Taluts"))
 check("...and never claims to have done it",
-      not any(w in unresolved_refusal("Zoey, Open My Taluts").lower()
+      not any(w in unresolved_refusal("Tessa, Open My Taluts").lower()
               for w in ("opening", "on it", "i have opened", "done")))
 
 for live in ["what is the weather", "what is the naira rate",
@@ -123,18 +123,32 @@ check("no UNROUTED line opens with an acknowledgement",
               for s in __import__("core.brain.router", fromlist=["_UNROUTED"])._UNROUTED))
 
 # ── 6. TRANSCRIPT REPAIR ────────────────────────────────────────────────────
+# THE PHONETIC SET IS HERS NOW, AND IT IS MEASURED.
+#
+# These used to assert Zoi / Joey / Zoe — Whisper's renderings of "Zoey". After
+# the rename they kept passing for a while, which is the trap: a test that still
+# asserts the old name is not testing what it claims. They now assert the set
+# measured for "Tessa" over twenty synthesised utterances with no initial_prompt:
+# Tesser (5), Tessa (3), Chester (4), Tessor, Tessir, Tester, Pessar.
 for raw, want in [
-    ("Zoi, OpenGoogle.com", "Open Google.com"),
-    ("Zoey, Open My Downloads", "Open My Downloads"),
-    ("Joey, open my documents", "open my documents"),
+    ("Tesser, OpenGoogle.com", "Open Google.com"),
+    ("Tessa, Open My Downloads", "Open My Downloads"),
+    ("Chester, open my documents", "open my documents"),
+    ("Tester, open my downloads", "open my downloads"),
     # The question mark SURVIVES on purpose: it is a signal to the
     # classifier and to the model, and Piper needs the punctuation.
-    ("Zoe, what is the weather?", "what is the weather?"),
+    ("Tessor, what is the weather?", "what is the weather?"),
 ]:
     got = repair(raw)[0]
     check(f"repair {raw!r} -> {want!r}", got == want, f"got {got!r}")
 check("her name is only stripped as an ADDRESS",
-      repair("tell me about Zoe Saldana")[0] == "tell me about Zoe Saldana")
+      repair("tell me about Chester Bennington")[0]
+      == "tell me about Chester Bennington")
+# "professor" was returned once by the decoder and DELIBERATELY excluded from
+# the list: it is a real English word, and stripping it would eat a real
+# sentence rather than an address.
+check("a common word that merely sounds close is NOT stripped",
+      repair("professor, what is a closure?")[0] == "professor, what is a closure?")
 check("concatenation splits on a capital, not on a plural",
       split_concatenated("Tweets") == "Tweets" and
       split_concatenated("OpenGoogle") == "Open Google")
@@ -149,7 +163,7 @@ check("'the dot product' is not a domain",
       recover_domains("the dot product") == "the dot product")
 
 # ── 7. THE TWEET REACHES THE GATE ───────────────────────────────────────────
-out = Router().route("Zoey, Tweets, Data Mbudinon AI Assist")
+out = Router().route("Tessa, Tweets, Data Mbudinon AI Assist")
 check("his tweet transcript routes to x.post",
       bool(out.calls) and out.calls[0].name == "x.post",
       str([c.name for c in out.calls]))

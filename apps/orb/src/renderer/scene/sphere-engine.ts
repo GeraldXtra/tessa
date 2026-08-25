@@ -37,13 +37,14 @@ import {
   WebGLRenderer,
 } from 'three';
 
-import type { AgentState } from '@zoey/protocol';
+import type { AgentState } from '@tessa/protocol';
 
 import type { SphereTier } from '../../shared/ipc-contract.ts';
 import { tokenValue } from '../design-tokens.ts';
 import { fakeAmplitude } from './amplitude.ts';
 import { PARTICLE_COUNT } from './gpu-tier.ts';
 import { paramsFor, type SphereParams } from './states.ts';
+import { createCompanion, type Companion } from './companions.ts';
 
 import vertexShader from './shaders/particles.vert.glsl?raw';
 import fragmentShader from './shaders/particles.frag.glsl?raw';
@@ -320,6 +321,16 @@ export interface SphereStats {
   /** Frames measured in the window. */
   samples: number;
   /**
+   * The palette-luminance gain actually applied to the shell this frame.
+   *
+   * Published because it shipped wrong and silently: a constant in the wrong
+   * colour space made magenta's gain 0.7237 where the arithmetic claimed
+   * 1.0000, and nothing on screen or in any log said so. A capture whose log
+   * reads `pgain` other than 1.000 under magenta is a capture taken with that
+   * bug back.
+   */
+  paletteGain: number;
+  /**
    * The canvas geometry the last resize() actually applied.
    *
    * Present because a measured 12px clip at the bottom of the sphere could not
@@ -469,6 +480,21 @@ export interface SphereEngineOptions {
     rimPow: number;
     spreadPow: number;
   };
+  /**
+   * DEV ONLY. `--force-count=<main>[,<companion>]`, overriding PARTICLE_COUNT.
+   *
+   * Point SIZE already sweeps through `rim.bodySize`; this completes the pair
+   * so the (count x size) grid the particle work needs is one build and N
+   * launches rather than N builds. A governor demotion during a forced-count
+   * run would swap the count out from under the measurement, so `setTier` keeps
+   * the override rather than reverting to the tier's own number — the sweep is
+   * measuring the count it was given, and it says so in `stats().particles`.
+   */
+  counts?: { main: number; companion: number | null; companionSize: number | null };
+  /** DEV ONLY. `--force-facesat=<0..1>`. 1 reproduces the pre-faceSat shell. */
+  faceSat?: number;
+  /** DEV ONLY. `--force-pgain=<0|1>`. false reproduces the un-normalised shell. */
+  paletteGain?: boolean;
   /** Read each frame. Never a subscription — no React involvement. */
   getState: () => AgentState;
   /** Fired when the governor or a context loss changes the tier. */
@@ -521,6 +547,16 @@ export interface SphereEngine {
    */
   setFit(factor: number): void;
   /**
+   * Place the two background companions, as fractions of the canvas.
+   *
+   * The caller owns the composition and therefore owns where they sit; this
+   * engine only knows how to draw them. `scale` is their world radius, so a
+   * value of 0.2 is a fifth of the main sphere's — see companions.ts.
+   */
+  setCompanions(
+    placements: readonly { side: 'left' | 'right'; fx: number; fy: number; scale: number }[],
+  ): void;
+  /**
    * Discard the measured refresh rate and re-derive the frame divider.
    *
    * Called when the display layout changes. Without this a move to a panel with
@@ -540,10 +576,10 @@ export interface SphereEngine {
   /**
    * §R.1 colour temperature — "cool at rest → hot under load".
    *
-   * `load` is 0..1, normalised by the caller. This is ZOEY's exertion, not the
+   * `load` is 0..1, normalised by the caller. This is TESSA's exertion, not the
    * machine's: §R.1 lists the machine's CPU and RAM separately as the P6
    * "resource aura". Feeding machine load in here would collapse two distinct
-   * instruments into one and make the sphere claim Zoey is busy when it is
+   * instruments into one and make the sphere claim Tessa is busy when it is
    * something else on the box that is.
    */
   setLoad(load: number): void;
@@ -641,23 +677,128 @@ function tokenColor(property: string): Color {
 }
 
 /**
- * Fibonacci lattice — even coverage without the pole clustering of a naive
- * lat/long grid, which on a particle shell shows up as two bright caps.
+ * Fibonacci lattice, TANGENTIALLY JITTERED — and the jitter is the finding.
+ *
+ * ─── WHAT THE REFERENCE ACTUALLY IS, MEASURED ───
+ * Every round so far compared how BIG the particles are and how MANY there are.
+ * Both now match. The image still did not, and this is why: the two point
+ * FIELDS have different statistics, and no size-or-count measurement can see
+ * it. Sampled at mid-face, both normalised to a 514 px disc, particles found as
+ * connected components:
+ *
+ *                            NN-direction     NN2/NN1   gap/hexPredicted
+ *   reference image11          R = 0.020        1.53          0.63
+ *   synthetic Poisson          R = 0.061        1.56          0.48
+ *   synthetic hex lattice      R = 0.575        1.00          1.00
+ *   THIS BUILD (before)        R = 0.914        1.03          0.90
+ *
+ * `R` is the circular concentration of the direction from each particle to its
+ * nearest neighbour, on doubled angles. R near 0 means those directions are
+ * spread over every angle; R near 1 means they all point the same way. This
+ * build measured 0.914 — 204 of 216 nearest-neighbour vectors fell in ONE 15
+ * degree bin. That is not a cloud of points, it is a printed grid, and a grid
+ * reads as flat wallpaper no matter how small its dots are.
+ *
+ * The reference measures 0.020, which is Poisson. Its points are IRREGULARLY
+ * scattered. That single fact also resolves a contradiction that had been
+ * standing for two rounds — its nearest-neighbour gap (6.77 px) is far smaller
+ * than its own density implies for an even field (10.86 px). It was read as
+ * "the points cluster along the Fibonacci rows". They do not. Random points
+ * simply land near each other sometimes, and a Poisson field's mean NN distance
+ * is 0.46x a lattice's at the same density. No row clustering needs to exist,
+ * and inventing one would have been the wrong fix built on a right number.
+ *
+ * ─── WHY TANGENTIAL, AND WHY THE OLD RADIAL JITTER FAILED ───
+ * `uJitter` already existed and is measured to zero, with a note saying the
+ * lattice could not be broken without destroying the silhouette. That note is
+ * half right and the half that is wrong cost this round. uJitter is RADIAL: it
+ * moves particles off the shell, so of course the limb dissolves — at 0.10 the
+ * crescent was already a diffuse band. But the crisp limb comes from every
+ * particle sharing one RADIUS, and the visible lattice comes from their ANGULAR
+ * arrangement. Those are independent, and radial jitter conflated them.
+ *
+ * Displacing along the TANGENT PLANE and renormalising leaves every particle
+ * at exactly radius 1. The silhouette is arithmetically untouched; only the
+ * regularity goes. It is baked into the buffer at build time, so it costs
+ * nothing per frame, and it is driven by a fixed-seed PRNG so the shell is
+ * identical on every launch — a shell that reshuffled per run could not be
+ * measured twice.
+ *
+ * @param latticeJitter tangential offset as a multiple of the lattice's own
+ *   mean spacing. 0 restores the exact previous geometry.
  */
-function buildGeometry(count: number): BufferGeometry {
+function buildGeometry(count: number, latticeJitter: number): BufferGeometry {
   const positions = new Float32Array(count * 3);
   const seeds = new Float32Array(count);
   const goldenAngle = Math.PI * (3 - Math.sqrt(5));
   const denominator = Math.max(count - 1, 1);
+
+  /**
+   * Mean nearest-neighbour spacing of N points on the unit sphere.
+   *
+   * Area per point is 4*PI/N; a hexagonal cell of side s has area
+   * (sqrt(3)/2)*s^2, so s = sqrt(8*PI/(sqrt(3)*N)) = 3.8093/sqrt(N). The jitter
+   * is expressed as a multiple of this rather than in absolute units, so
+   * changing the count does not silently change how disordered the shell is.
+   */
+  const spacing = 3.8093 / Math.sqrt(Math.max(count, 1));
+  const sigma = Math.max(0, latticeJitter) * spacing;
+
+  // Deterministic LCG. Math.random() would reshuffle the shell on every launch,
+  // which would make two captures of "the same" build not comparable.
+  let rngState = 0x9e3779b9;
+  const next = (): number => {
+    rngState = (Math.imul(rngState, 1664525) + 1013904223) >>> 0;
+    return (rngState >>> 8) / 16777216;
+  };
+  const gauss = (): number => {
+    // Box-Muller. Build time only, so the cost of a log and a cos is irrelevant
+    // and correctness of the distribution is not.
+    const u = Math.max(next(), 1e-9);
+    return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * next());
+  };
 
   for (let i = 0; i < count; i++) {
     const y = 1 - (i / denominator) * 2;
     const ring = Math.sqrt(Math.max(0, 1 - y * y));
     const theta = goldenAngle * i;
 
-    positions[i * 3] = Math.cos(theta) * ring;
-    positions[i * 3 + 1] = y;
-    positions[i * 3 + 2] = Math.sin(theta) * ring;
+    let px = Math.cos(theta) * ring;
+    let py = y;
+    let pz = Math.sin(theta) * ring;
+
+    if (sigma > 0) {
+      // An orthonormal tangent basis at p. The reference axis is swapped near
+      // the poles so the cross product never degenerates — without it the two
+      // caps would get no jitter at all and would keep the lattice.
+      const ax = Math.abs(py) > 0.9 ? 1 : 0;
+      const ay = Math.abs(py) > 0.9 ? 0 : 1;
+      let t1x = ay * pz - 0 * py;
+      let t1y = 0 * px - ax * pz;
+      let t1z = ax * py - ay * px;
+      const t1n = Math.hypot(t1x, t1y, t1z) || 1;
+      t1x /= t1n;
+      t1y /= t1n;
+      t1z /= t1n;
+      const t2x = py * t1z - pz * t1y;
+      const t2y = pz * t1x - px * t1z;
+      const t2z = px * t1y - py * t1x;
+
+      const g1 = gauss() * sigma;
+      const g2 = gauss() * sigma;
+      px += t1x * g1 + t2x * g2;
+      py += t1y * g1 + t2y * g2;
+      pz += t1z * g1 + t2z * g2;
+      // Back onto the shell. THIS is what keeps the silhouette exact.
+      const n = Math.hypot(px, py, pz) || 1;
+      px /= n;
+      py /= n;
+      pz /= n;
+    }
+
+    positions[i * 3] = px;
+    positions[i * 3 + 1] = py;
+    positions[i * 3 + 2] = pz;
 
     // Golden-ratio stride: decorrelated per particle, deterministic per index.
     seeds[i] = (i * 0.618033988749895) % 1;
@@ -669,6 +810,69 @@ function buildGeometry(count: number): BufferGeometry {
   return geometry;
 }
 
+/**
+ * How disordered the shell is, as a multiple of its own lattice spacing.
+ *
+ * ─── 0.40 -> 0.12. THE OLD VALUE ERASED THE LATTICE COMPLETELY ───
+ *
+ * 0.40 was fitted with a statistic that could not measure what it claimed to.
+ * That statistic was `R`, the circular concentration of the direction to the
+ * SINGLE nearest neighbour, and its own control falsified it at the time: a
+ * PERFECT hexagonal lattice scored R = 0.526, not 1.0, because in a hex lattice
+ * six neighbours are equidistant and which one is "nearest" is decided by noise.
+ * R measures ANISOTROPY, not ORDER. The build scored 0.914 on it because a
+ * projected Fibonacci lattice is strongly anisotropic at mid-face, and the
+ * reference scored 0.020, so the reference was called a random scatter and this
+ * constant was raised until the build matched it.
+ *
+ * The right statistic is the bond-orientational order parameter over k=6
+ * neighbours, psi6 = |mean_j exp(6 i theta_j)|, which does not care which
+ * neighbour is closest. Measured with one instrument across synthetic controls,
+ * the three largest fully-in-frame reference photographs, and this build:
+ *
+ *                                             sd/mean    psi6
+ *   synthetic Poisson                          0.578     0.375
+ *   BUILD as shipped, jitter 0.40              0.227     0.343   <- a scatter
+ *   REFERENCE image9 / image5 / image2      .264/.271/.260  0.437/0.514/0.524
+ *   BUILD jitter 0.00                          0.037     0.775
+ *   synthetic hexagonal                        0.000     0.888
+ *
+ * At 0.40 this build scored 0.343 against Poisson's 0.375 — it had NO angular
+ * order at all, and scored below the reference's own moire controls (background
+ * 0.347-0.362, UI panel 0.403-0.436). The reference sits decisively above all of
+ * them. It is a lattice and the build was not.
+ *
+ * ─── WHY 0.12 AND NOT 0 ───
+ * The reference is not a CLEAN lattice either: 0.44-0.52 against 0.775 for this
+ * renderer with the jitter off. That gap is not the camera. Pushing the
+ * jitter-0 render through the reference's own pipeline — upscaled to its disc
+ * size, blurred 1.2 px, JPEG 4:2:0 q75, plus sensor noise swept to sigma 9 —
+ * left psi6 at 0.756-0.763 and sd/mean at 0.072-0.082. Blur, chroma subsampling
+ * and noise do not erase angular order, so the reference's partial disorder is
+ * really there.
+ *
+ * Swept on this renderer, r<=0.4R, engine-truth geometry:
+ *
+ *     jitter   0.00   0.05   0.10   0.15   0.20   0.28   0.40
+ *     psi6     0.775  0.715  0.563  0.409  0.350  0.341  0.343
+ *     sd/mean  0.037  0.069  0.122  0.163  0.204  0.222  0.227
+ *
+ * The reference's median psi6 of 0.514 falls between 0.10 and 0.15;
+ * interpolated, 0.12 gives ~0.50. Its three frames span 0.437-0.524, i.e.
+ * jitter 0.10-0.145, so 0.12 is the centre of the reference's own range.
+ *
+ * ─── ONE DISAGREEMENT, REPORTED NOT HIDDEN ───
+ * sd/mean does NOT agree. The reference measures 0.260-0.271, above even this
+ * build at jitter 0.40 (0.227), which read alone would say the reference is MORE
+ * disordered than the shipped build — the opposite verdict. psi6 is weighted
+ * because it is an angular average over six neighbours and survives positional
+ * noise, whereas spacing variance is inflated directly by it: the reference's
+ * dots are photographed at fwhm 5.8-7.8 px on a 12-16 px spacing, so neighbours
+ * partially merge and centroids pull, widening the spacing distribution without
+ * disturbing the angular pattern.
+ */
+export const LATTICE_JITTER_DEFAULT = 0.12;
+
 /** Default depth falloff. `--force-depth=` overrides it via bootstrap. */
 export const DEPTH_FAR_DEFAULT = 0.42;
 
@@ -679,8 +883,151 @@ export const DEPTH_FAR_DEFAULT = 0.42;
  * report and the varying `vFresnel` in particles.vert.glsl. `--force-sphere=`
  * overrides all four rim/body numbers so a sweep needs one build, not twelve.
  */
-export const RIM_GAIN_DEFAULT = 0.5;
-export const RIM_SIZE_DEFAULT = 3.5;
+/**
+ * ─── THE WHOLE CRESCENT WAS REFITTED, AND THE BRIEF HAD IT BACKWARDS ───
+ *
+ * The instruction was that the crescent is "too wide — a broad band down the
+ * right where the reference has a narrow edge hugging the silhouette". The
+ * measurement says the opposite and the measurement wins.
+ *
+ * Sector luminance along a radius through the lit limb, both discs normalised,
+ * both background-subtracted (the reference is a photograph and its frame sits
+ * on a floor of 6.6 that belongs to the camera, not to the app):
+ *
+ *                        body/peak   half-max width   clipped   peak RGB
+ *   reference image11      0.206         22.5%         0.15%   (239,122,227)
+ *   build, before          0.132          7.5%        40.73%   (255,180,255)
+ *   build, after           0.202         12.5%         0.00%   (212, 37,189)
+ *
+ * The reference's crescent is THREE TIMES WIDER than this build's was, and the
+ * build's was clipping four pixels in ten to white. (255,180,255) is not a
+ * colour: it is the framebuffer running out of room, and a limb that saturates
+ * stops carrying the theme — which is half of why the shell read as a hard
+ * white wire rather than as a lit edge.
+ *
+ * WHAT ACTUALLY CONTROLS THE WIDTH, and it is not what the name suggests.
+ * `uRimPow` is documented as the width control and moving it 0.8 -> 0.2 changed
+ * the measured width by nothing at all. The width is set by `uRimSize`: bigger
+ * points at the limb OVERLAP, and under additive blending overlap is where the
+ * peak comes from. A tall narrow peak puts the half-max threshold high, so the
+ * band measures thin. Dropping rimSize 3.5 -> 2.4 and raising the energy-spread
+ * exponent 0.6 -> 0.85 lowered the peak, which both stopped the clipping and
+ * widened the band, from one change.
+ *
+ * RAISING BODY BRIGHTNESS MAKES body/peak WORSE, which was worth learning: the
+ * body scales linearly with it and the limb scales faster, because more
+ * brightness per particle means more of the overlapping stack clears the
+ * visible floor. bodyBright stays at 1.0 and the contrast is closed from the
+ * limb end instead.
+ *
+ * `uDarkSide` 0.18 -> 0.38 and `uLambertPow` 1.8 -> 0.85 are the other half:
+ * they set the UNLIT side's gradient, which is the depth cue item 4 is about.
+ * Measured limb/centre on the unlit side: reference 0.74, build 0.43 before,
+ * 0.92-1.20 across the bracket this lands inside.
+ *
+ * WHAT DOES NOT REACH THE REFERENCE, stated rather than glossed: 12.5% against
+ * 22.5%. The reference's profile rises smoothly from its centre; this one is
+ * flat across the inner half and then knees. Closing that needs the mid-face
+ * to carry more light relative to the limb than an additive point cloud with a
+ * clamped sprite size produces, and every lever tried here trades it against
+ * clipping. It is 1.8x short and it is 3x better than it was.
+ */
+/**
+ * ─── THESE THREE WENT TOO FAR AND TOOK THE CRESCENT WITH THEM ───
+ *
+ * 0.5 -> 0.24, 3.5 -> 2.4 and 0.6 -> 0.85 were changed together, in one pass,
+ * to stop the crescent clipping 40.73% of its band to white. They stopped it.
+ * They also removed the crescent, and the summary metric being optimised at the
+ * time could not see that — see the note on `litLimb` below.
+ *
+ * Bisected one constant at a time from the shipped values, everything else held,
+ * magenta, idle, palette gain forced to 1:
+ *
+ *     restored             litLimb   peak-bg
+ *     (nothing)             50.4%     31.54
+ *     rimGain    -> 0.50    76.3%     60.73   <- largest single effect
+ *     spreadPow  -> 0.60    78.1%     55.86
+ *     rimSize    -> 3.5     74.0%     44.90
+ *     darkSide   -> 0.18    50.3%     31.70   (no effect)
+ *     lambertPow -> 1.80    47.4%     30.18   (no effect)
+ *     rimPow     -> 0.80    44.6%     28.63   (no effect)
+ *     reference             75.0%     58.06
+ *
+ * Three constants, each independently able to restore it, all moved the same
+ * way at once. The values below are the fitted middle: litLimb 76.0% against
+ * the reference's 75.0%, peak 53.25 against 58.06, and 0.02% clipped against
+ * its 0.15% — so the clipping fix is kept and the crescent comes back.
+ *
+ * ─── AND WHY THE METRIC DID NOT CATCH IT ───
+ * The figure being optimised was `body/peak`, a RATIO. It cannot tell "the body
+ * got brighter" from "the peak collapsed", and what happened was the second:
+ * body/peak IMPROVED from 0.132 to 0.148 while the crescent's absolute peak
+ * fell from 100.99 to 31.54. `litLimb` — an ABSOLUTE coverage number earlier
+ * rounds reported and this one had stopped reporting — fell 89.9% -> 50.4% over
+ * the same change. Both numbers are now in the instrument and both are quoted.
+ */
+/**
+ * ─── 0.34 -> 0.10. IT WAS FITTED IN GOLD AND MAGENTA WAS NEVER MEASURED ───
+ *
+ * Every crescent fit in this file's history was done in GOLD. Gold's accent
+ * (`--theme-gold-body`) has two channels near full and a luminance of 208.
+ * Magenta's (`--theme-magenta-body`) has one, and a luminance of 99.8.
+ * `gainFor` normalises the palette by LUMINANCE, so to reach
+ * the same luminance magenta needs 2.08x gold's amplitude, and that drives its
+ * red and blue channels past 255 while its luminance is still moderate. The
+ * result was never looked at: the lit limb in magenta measures
+ *
+ *     clipped pixels in the lit limb wedge, median over 19 captured frames
+ *       gold     0.15%
+ *       magenta 17.02%      reference image11  0.16%
+ *       red     17.11%
+ *
+ * and magnified it is not a crescent at all but a solid white-pink wall with no
+ * dots left in it, beside a reference whose lit limb stays resolved into
+ * separate bright dots right up to the silhouette.
+ *
+ * NOT A REGRESSION FROM THE LATTICE CHANGE, and that was tested rather than
+ * assumed: rendering magenta at the OLD lattice jitter of 0.40 clips 17.41%
+ * against 0.12's 17.02%. Ordering the lattice did not cause this. It was
+ * already there and nobody had rendered magenta.
+ *
+ * ─── THE SWEEP, magenta, idle, 9-19 frames each, medians ───
+ *
+ *   rimGain  RIBBON  HALF-MAX  litLimb  peak-bg  body/peak  CLIPPED
+ *     0.34    27.5%     7.5%    89.8%    84.88     0.073    17.02%
+ *     0.12    30.0%     7.5%    77.8%    66.12     0.090     7.41%
+ *     0.08    27.5%     7.5%    66.2%    52.04     0.120     2.40%
+ *     0.00    28.8%     7.5%    68.8%    52.49     0.103     1.63%
+ *   reference image11  27.5%   22.5%    74.9%    57.50     0.198     0.16%
+ *   reference median   30.0%   23.8%    67.1%    53.77     0.262     0.16%
+ *   (across image2/5/9/11)
+ *
+ * 0.10 interpolates to litLimb ~72%, peak-bg ~59, clipped ~4.9%, ribbon ~28.8%
+ * — four metrics on the reference's own medians, and the fifth (body/peak)
+ * improved by about 45%. It is not the point that minimises clipping; it is the
+ * point that keeps the crescent while removing the wall.
+ *
+ * ─── WHAT IT DOES NOT FIX, STATED ───
+ * The HALF-MAX WIDTH does not move at all: 7.5% at every value of rimGain from
+ * 0.34 to 0.00, against the reference's 17.5-37.5%. rimGain sets the crescent's
+ * HEIGHT, not its width — which agrees with the note below that uRimSize is the
+ * width control, and with the fact that dropping rimSize to 0 only takes the
+ * half-max to 5.0%. The width remains open and it remains a factor of three.
+ *
+ * ─── AND WHY THE OLD 50.4% COLLAPSE IS NOT BEING REPEATED ───
+ * The failure that produced this constant's previous value was litLimb falling
+ * to 50.4% with peak-bg at 31.54 — the crescent gone. At 0.10 litLimb lands
+ * near 72% and peak-bg near 59, both ABOVE the reference's own medians of 67.1%
+ * and 53.77. The crescent is not being removed; a saturated rim line is.
+ *
+ * THE COMPANIONS ARE NOT FOLLOWING THIS and that is deliberate: companions.ts
+ * carries its own uRimGain of 0.24, and measured against the reference their
+ * brightness ratios are already right (right/main 0.524 against the reference's
+ * 0.493). Changing a thing that measures correctly to chase a constant it does
+ * not share would be trading a right answer for a tidy one. Flagged, not done.
+ */
+export const RIM_GAIN_DEFAULT = 0.1;
+export const RIM_SIZE_DEFAULT = 3.0;
 
 /**
  * How much brightness the side facing away from the light keeps.
@@ -690,10 +1037,10 @@ export const RIM_SIZE_DEFAULT = 3.5;
  * not a sphere: the terminator becomes a hard edge and half the shell is simply
  * gone. This floor is the compromise, and it is stated rather than hidden.
  */
-export const DARK_SIDE_DEFAULT = 0.18;
+export const DARK_SIDE_DEFAULT = 0.38;
 
 /** Exponent on the wrapped lambert. See the uniform's note in particles.frag. */
-export const LAMBERT_POW_DEFAULT = 1.8;
+export const LAMBERT_POW_DEFAULT = 0.85;
 
 /**
  * Peak-to-peak radial jitter. ZERO, and deliberately so.
@@ -726,15 +1073,71 @@ export const JITTER_DEFAULT = 0.0;
  * and the reference's band is wide and NOT bright — its limb is only 1.65x the
  * luminance of its own body.
  */
-export const RIM_POW_DEFAULT = 0.8;
-export const SPREAD_POW_DEFAULT = 0.6;
+export const RIM_POW_DEFAULT = 0.2;
+export const SPREAD_POW_DEFAULT = 0.75;
 
 /**
- * The light, in VIEW space. Right, below, and slightly toward the camera.
+ * How much of the palette the UNLIT FACE keeps. See uFaceSat in particles.frag
+ * for the measurement and for why this is 0.45 and not the 0.11 that would
+ * match the reference photograph exactly.
+ */
+/**
+ * ─── 0.45 -> 1.0. THE DESATURATION IS DELETED, AND IT WAS FITTED TO AN ARTEFACT ───
+ *
+ * This is the constant that made the face grey, and it is mine. Measured on the
+ * rendered pixels, one core pixel per connected component, gold at idle:
+ *
+ *                        face saturation   limb saturation
+ *   uFaceSat 0.45            0.422             0.611
+ *   uFaceSat 1.00 (off)      0.865             0.931
+ *
+ * It removes more than half the hue from the body and leaves the limb alone,
+ * which is exactly what he has described seven times.
+ *
+ * ─── AND THE TARGET IT WAS FITTED TO DOES NOT EXIST ───
+ * It was set to chase the reference's mid-face saturation of 0.077. That number
+ * is an encoding artefact, and the test is this build's own capture pushed
+ * through the reference's pipeline — upscaled to its disc size, blurred by the
+ * measured 1.2 px PSF, then JPEG-encoded:
+ *
+ *     pipeline                      face sat   limb sat
+ *     as rendered                     0.865      0.931
+ *     blur only, 4:4:4 (control)      0.806      0.929
+ *     blur + 4:2:0 q90                0.535      0.862
+ *     blur + 4:2:0 q75                0.400      0.814
+ *     blur + 4:2:0 q60                0.369      0.785
+ *     reference image11               0.077      0.540
+ *
+ * 4:2:0 chroma subsampling averages colour over 2x2 blocks. An ISOLATED face
+ * dot has its chroma averaged with the black around it; MERGED limb dots
+ * protect each other. So the pipeline alone reproduces the reference's
+ * face-neutral/limb-coloured split, and the 4:4:4 control does not — it is the
+ * subsampling, not the blur, and not a design decision. The reference is a
+ * photograph of a screen showing an already-compressed video, so it has been
+ * through that chain more times than this test can reproduce, which is why even
+ * q60 only reaches 0.369.
+ *
+ * ─── THE READING THAT WAS WRONG, STATED PLAINLY ───
+ * Saturation is scale-invariant, so a LOW saturation number says nothing about
+ * whether a particle looks white or grey. The reference's face particles
+ * measure luminance 97.3 at saturation 0.077 — bright and neutral. This build's
+ * measured 49.3 at 0.422 — DIM and washed. Half the brightness and a hue
+ * half-removed is grey, and grey is what he sees. The two states share a
+ * saturation figure and share nothing else, which is what made a single number
+ * enough to fit the wrong thing to.
+ *
+ * 1.0 means the term is inert: `sat` becomes 1 everywhere and the mix and its
+ * luminance rescale are identities. The uniform and the flag stay so the
+ * finding survives and so this is one launch to re-test rather than a rebuild.
+ */
+export const FACE_SAT_DEFAULT = 1.0;
+
+/**
+ * The light, in VIEW space. LEFT, below, and slightly toward the camera.
  *
  * Direction taken from the reference rather than chosen: its bottom patch
- * measures 12.3% lit coverage against 1.5% at the top, and its right limb 34.8%
- * against 0.0% at the left. Right and below, therefore, and the small +z tips
+ * measures 12.3% lit coverage against 1.5% at the top, and its lit limb 34.8%
+ * against 0.0% at the opposite one. Below, therefore, and the small +z tips
  * the highlight a few degrees onto the face so the crescent has a soft inner
  * edge instead of ending exactly on the silhouette.
  *
@@ -743,8 +1146,23 @@ export const SPREAD_POW_DEFAULT = 0.6;
  * at -0.45 mine measured 45.3 : 35.0, i.e. 1.3 : 1. The light was sitting too
  * low, which pooled the crescent under the sphere and read as the contact
  * ellipse he had just rejected, in a different form.
+ *
+ * ─── AND THEN X FLIPPED, ON A COUNT ACROSS ALL SIXTEEN ───
+ *
+ * "Right" came from ONE image. Measuring the lit azimuth in every one of the
+ * sixteen says the reference is lit from the LEFT in twelve and from the right
+ * in four (images 3, 7, 10, 15). Among the well-determined left-lit frames the
+ * azimuth clusters at 157-200 degrees with a median near 176 — due left, nine
+ * o'clock, near-horizontal, wrapping about 90 degrees of limb.
+ *
+ * So the earlier reading was not wrong about its own image; it was a sample of
+ * one. Twelve to four is not a tie and image11, the sharpest and the one every
+ * particle measurement in this project is taken from, is left-lit. x goes
+ * +1.0 -> -1.0 and nothing else about the vector moves: the elevation and the
+ * few degrees of +z were measured on ratios, which are unaffected by which side
+ * they are measured on.
  */
-const LIGHT_DIR = new Vector3(1.0, -0.28, 0.3).normalize();
+const LIGHT_DIR = new Vector3(-1.0, -0.28, 0.3).normalize();
 
 function percentile(sorted: readonly number[], fraction: number): number {
   if (sorted.length === 0) return 0;
@@ -833,9 +1251,14 @@ export function createSphereEngine(options: SphereEngineOptions): SphereEngine {
     uRimSize: { value: options.rim?.size ?? RIM_SIZE_DEFAULT },
     uDarkSide: { value: options.rim?.darkSide ?? DARK_SIDE_DEFAULT },
     uLambertPow: { value: options.rim?.lambertPow ?? LAMBERT_POW_DEFAULT },
-    uJitter: { value: options.rim?.jitter ?? JITTER_DEFAULT },
+    // Radial jitter, and it stays at zero. `--force-sphere`'s seventh slot no
+    // longer reaches it: that slot now drives the TANGENTIAL lattice jitter in
+    // buildGeometry, which is the one that breaks the grid without breaking the
+    // silhouette. See the note there.
+    uJitter: { value: JITTER_DEFAULT },
     uRimPow: { value: options.rim?.rimPow ?? RIM_POW_DEFAULT },
     uSpreadPow: { value: options.rim?.spreadPow ?? SPREAD_POW_DEFAULT },
+    uFaceSat: { value: options.faceSat ?? FACE_SAT_DEFAULT },
     uLightDir: { value: LIGHT_DIR.clone() },
   };
 
@@ -858,9 +1281,32 @@ export function createSphereEngine(options: SphereEngineOptions): SphereEngine {
     blending: AdditiveBlending,
   });
 
-  let geometry = buildGeometry(PARTICLE_COUNT[tier]);
+  /**
+   * The count actually in the buffer. `--force-count` pins it; otherwise it is
+   * the tier's own number and a demotion changes it.
+   */
+  const forcedCount = options.counts?.main ?? null;
+  function countFor(t: SphereTier): number {
+    return forcedCount ?? PARTICLE_COUNT[t];
+  }
+
+  const latticeJitter = options.rim?.jitter ?? LATTICE_JITTER_DEFAULT;
+  let geometry = buildGeometry(countFor(tier), latticeJitter);
   const points = new Points(geometry, material);
   scene.add(points);
+
+  /**
+   * THE TWO BACKGROUND COMPANIONS. See companions.ts.
+   *
+   * Built here rather than by the caller because they share this engine's
+   * scene, camera and projection — three of them in one context is two extra
+   * draw calls, where three contexts would be three GPU contexts on a part
+   * that has one.
+   */
+  const companions: Companion[] = [
+    createCompanion(scene, 'left', () => worldPerPixel, () => ({ w: appliedW, h: appliedH }), options.counts?.companion ?? null, options.counts?.companionSize ?? null, latticeJitter),
+    createCompanion(scene, 'right', () => worldPerPixel, () => ({ w: appliedW, h: appliedH }), options.counts?.companion ?? null, options.counts?.companionSize ?? null, latticeJitter),
+  ];
 
   // Palette targets, resolved once from tokens. `amber` is the `blocked` state:
   // flat --status-warn, no gradient, because stillness plus a single hue is the
@@ -869,6 +1315,155 @@ export function createSphereEngine(options: SphereEngineOptions): SphereEngine {
     flame: { hot: tokenColor('--sphere-hot'), cool: tokenColor('--sphere-cool') },
     amber: { hot: tokenColor('--status-warn'), cool: tokenColor('--status-warn') },
   };
+
+  /**
+   * ─── THE SHELL IS NORMALISED FOR THE PALETTE'S LUMINANCE, AND IT HAS TO BE ───
+   *
+   * Every shell parameter in this file was fitted under MAGENTA, and magenta is
+   * a dark colour: `--theme-magenta-body` has a relative luminance of 0.283,
+   * because its green channel is 41. `--theme-gold-body` has 0.699 — TWO AND A
+   * HALF TIMES more — because gold is red plus almost all of green, and green
+   * carries 71.5% of luminance. (Hashes are omitted throughout this note so it
+   * does not itself trip the no-hard-coded-colour gate; the values live in
+   * tokens.json, which is the only place a colour may.)
+   *
+   * Under additive blending that multiplies straight through. Switching to gold
+   * with the fitted parameters measured a crescent peak of rgb(255,255,0) with
+   * 4.93% of the band clipped, against magenta's rgb(212,37,189) and 0.00%.
+   * Pure yellow is not a colour the palette contains; it is two channels
+   * running out of headroom, and a limb that saturates stops carrying the theme
+   * — which is the exact failure the ALPHA_MAX ceiling was added to bound.
+   *
+   * So the gain divides the fitted brightness by how bright the palette already
+   * is. Reference luminance is magenta's, because that is what the fit was done
+   * against, so magenta comes out at exactly 1.0 and nothing about the round's
+   * measurements moves. Every other theme is corrected relative to it.
+   *
+   * Clamped to [0.35, 2.0]: violet is the darkest palette here and would ask
+   * for a 1.6x boost, which is fine, but an unclamped ratio would let a future
+   * near-black token drive the shell into overdraw.
+   *
+   * ─── AND IT APPLIES TO `amber` TOO, WHICH REVERSES MY FIRST ATTEMPT ───
+   *
+   * The first version exempted `blocked` on the reasoning that CONTRACT §4.1
+   * fixes its colour and the alarm must not be normalised. That conflated HUE
+   * with BRIGHTNESS. `--status-warn` has a linear luminance of 0.509,
+   * so an unnormalised `blocked` beside six gold states at gain 0.406 measured
+   * a body of 15.2 against their 3.4-5.7 and a crescent peak of 164 against
+   * their 21-52 — eight times brighter than `idle`, which is not a signature,
+   * it is a flashbang. Its `brightness` parameter is 1.25, mid-table between
+   * idle's 1.10 and listening's 1.50, and it should render mid-table.
+   *
+   * Normalising the brightness leaves the hue untouched: amber is still amber,
+   * still fixed, still unthemed. §4.1 is satisfied by the colour and by the
+   * stillness, neither of which this touches.
+   */
+  /**
+   * ─── THIS CONSTANT WAS IN THE WRONG COLOUR SPACE AND IT DIMMED EVERY THEME ───
+   *
+   * It was 0.2834, magenta's LINEAR-sRGB luminance, and it was divided by the
+   * output of `relativeLuminance()`, which measures the ENCODED values. Those
+   * are different numbers for the same colour — magenta encodes to 0.3916 — so
+   * the ratio that was supposed to be exactly 1.0000 for magenta shipped at
+   * 0.7237. Every palette came out 28% darker than the arithmetic claimed, and
+   * gold landed on the 0.35 CLAMP FLOOR instead of its true 0.4801, which is
+   * why gold and magenta looked the same to the owner: the normaliser was
+   * compressing them toward each other and then flooring the brighter one.
+   *
+   * The comment that used to sit on `relativeLuminance` asserted the opposite
+   * and that assertion is the whole bug: three's `LinearSRGBColorSpace` means
+   * NO CONVERSION IS APPLIED, not "these are linear". `tokenColor` passes it
+   * precisely so the transfer function is NOT applied — the raw ShaderMaterial
+   * writes `gl_FragColor` directly and never runs three's colorspace pass — so
+   * what is stored is the sRGB code value, 0..1.
+   *
+   * ENCODED is also the right space to normalise in, which is why the constant
+   * moves rather than the function. Additive blending sums whatever the shader
+   * writes, and the shader writes encoded values; how bright a palette *looks*
+   * when summed is a property of those numbers, not of their linearisation.
+   *
+   * Recomputed in the same space the function measures. (Hex values omitted
+   * throughout this note so it does not itself trip the no-hard-coded-colour
+   * gate — every body colour is `theme-<name>-body` in tokens.json, which is
+   * the only place a colour may live. This has now caught the same comment
+   * twice; the gate is right and the comment is what moves.)
+   *
+   *     theme      encoded L(body)   gain BEFORE   gain NOW
+   *     magenta        0.3916           0.7237       1.0000
+   *     gold           0.8156           0.3500*      0.4801
+   *     cyan           0.7986           0.3549*      0.4903
+   *     violet         0.4248           0.6671       0.9217
+   *     emerald        0.5927           0.4782       0.6607
+   *     red            0.3422           0.8281       1.1442
+   *     (* on the clamp floor)
+   *
+   * The gain is published on the metrics line so this can never drift silently
+   * again — a capture whose log says pgain != 1.000 under magenta is a capture
+   * taken with this bug back.
+   */
+  const MAGENTA_REF_ENCODED_LUMINANCE = 0.3916;
+
+  function relativeLuminance(c: Color): number {
+    // ENCODED sRGB, not linear. `tokenColor` reads with LinearSRGBColorSpace,
+    // which in three means "apply no conversion" — so `c.r/g/b` are the code
+    // values 0..1, and this is their weighted sum in that same space. See the
+    // note above; getting this wrong is what shipped a 28% dimming.
+    return 0.2126 * c.r + 0.7152 * c.g + 0.0722 * c.b;
+  }
+
+  /**
+   * ─── AND THE GAIN IS A SQUARE ROOT, BECAUSE THE OUTPUT IS QUADRATIC IN IT ───
+   *
+   * This is the second half of the same bug and it is the half that made GOLD
+   * specifically broken while magenta merely dimmed.
+   *
+   * The fragment stage ends `gl_FragColor = vec4(tint * out_, out_)` — a
+   * PREMULTIPLIED colour — and the material blends with three's
+   * `AdditiveBlending`, whose source factor is `SrcAlphaFactor`. So what
+   * actually reaches the framebuffer is
+   *
+   *     dst += (tint * out_) * out_   =   tint * out_^2
+   *
+   * The contribution is QUADRATIC in alpha. The gain divides alpha, so dividing
+   * by L reduces the contribution by L^2 while the tint only supplies L — and
+   * the brighter the palette, the worse it gets. Measured against magenta:
+   *
+   *     theme      linear gain   relative output   sqrt gain   relative output
+   *     magenta       1.0000          1.000          1.0000         1.000
+   *     gold          0.4801          0.414          0.6929         0.862
+   *     cyan          0.4903          0.422          0.7002         0.861
+   *     emerald       0.6607          0.621          0.8128         0.940
+   *     violet        0.9217          0.890          0.9601         0.966
+   *     red           1.1442          1.197          1.0697         1.046
+   *
+   * 0.414 is what the owner was looking at: gold rendering at four tenths of
+   * magenta, both already dimmed 28% by the colour-space error above. Measured
+   * on the captures, gold's face p95 was 16.7 against magenta's 35.9 — a ratio
+   * of 0.465 against the 0.414 this arithmetic predicts.
+   *
+   * The square root leaves magenta at exactly 1.0000, so nothing this round
+   * fitted under magenta moves.
+   *
+   * The residual — gold at 0.862 rather than 1.000 — is because the gain is
+   * taken from `--sphere-cool` alone while the rendered tint is a hot/cool mix
+   * that varies with `uCoolMix` per state and per frame. Closing that would
+   * mean recomputing the gain every frame from the live mix. 14% is inside the
+   * frame-to-frame variance of every number in this file, so it is reported
+   * rather than chased.
+   *
+   * NOT fixing the blend factor instead, deliberately: every shell parameter in
+   * this file was fitted with the squaring in place, so changing it would
+   * invalidate the whole round rather than one constant.
+   */
+  function gainFor(c: Color): number {
+    const l = relativeLuminance(c);
+    if (!(l > 0.001)) return 1;
+    return Math.min(2.0, Math.max(0.35, Math.sqrt(MAGENTA_REF_ENCODED_LUMINANCE / l)));
+  }
+
+  const paletteGainOn = options.paletteGain ?? true;
+  let flameGain = paletteGainOn ? gainFor(palette.flame.cool) : 1;
+  let amberGain = paletteGainOn ? gainFor(palette.amber.cool) : 1;
 
   /* ── smoothed parameter state ──────────────────────────────────────────── */
 
@@ -947,7 +1542,8 @@ export function createSphereEngine(options: SphereEngineOptions): SphereEngine {
   const ZERO: Percentiles = { p50: 0, p95: 0 };
   let stats: SphereStats = {
     tier,
-    particles: PARTICLE_COUNT[tier],
+    particles: countFor(tier),
+    paletteGain: 1,
     cost: ZERO,
     raf: ZERO,
     present: ZERO,
@@ -1054,6 +1650,7 @@ export function createSphereEngine(options: SphereEngineOptions): SphereEngine {
       publishedAt: performance.now(),
       focused,
       samples,
+      paletteGain: flameGain,
     };
 
     if (!focused) return;
@@ -1150,7 +1747,12 @@ export function createSphereEngine(options: SphereEngineOptions): SphereEngine {
     // state's resting temperature is.
     loadCurrent = approach(loadCurrent, loadTarget, rate);
     uniforms.uCoolMix.value = smooth.coolMix * (1 - loadCurrent);
-    uniforms.uBrightness.value = smooth.brightness * bodyBrightMul;
+    // The palette gain rides on the state's brightness, not on the token, so a
+    // theme switch crossfades through it with everything else. `blocked` gets
+    // its own gain from --status-warn rather than an exemption — see the note
+    // on gainFor for why exempting it was wrong.
+    uniforms.uBrightness.value =
+      smooth.brightness * bodyBrightMul * (target.palette === 'amber' ? amberGain : flameGain);
 
     points.rotation.y = spinAngle;
 
@@ -1162,6 +1764,10 @@ export function createSphereEngine(options: SphereEngineOptions): SphereEngine {
     points.position.x = -offsetCurrentPx * 0.5 * worldPerPixel;
     // World +y is screen UP, so a positive yPx lifts the sphere.
     points.position.y = offsetCurrentYPx * 0.5 * worldPerPixel;
+
+    // The companions advance on the same accepted frame as the main sphere, so
+    // all three share one clock and cannot drift into looking independent.
+    for (const c of companions) c.step(deltaMs, uniforms.uSizeScale.value);
 
     renderer.render(scene, camera);
 
@@ -1363,10 +1969,10 @@ export function createSphereEngine(options: SphereEngineOptions): SphereEngine {
     if (next === tier || disposed) return;
     tier = next;
 
-    const count = PARTICLE_COUNT[tier];
+    const count = countFor(tier);
     scene.remove(points);
     geometry.dispose();
-    geometry = buildGeometry(count);
+    geometry = buildGeometry(count, latticeJitter);
     points.geometry = geometry;
     scene.add(points);
 
@@ -1454,6 +2060,21 @@ export function createSphereEngine(options: SphereEngineOptions): SphereEngine {
   return {
     setTier,
 
+    setCompanions(placements) {
+      for (const p of placements) {
+        const c = companions.find((x) => x.side === p.side);
+        // Clamped rather than trusted: a NaN out of a layout calculation would
+        // put a sphere at an undefined position, which renders as nothing and
+        // looks exactly like "the feature was never built".
+        if (!c || !Number.isFinite(p.fx) || !Number.isFinite(p.fy) || !Number.isFinite(p.scale)) continue;
+        c.place(
+          Math.min(1.4, Math.max(-0.4, p.fx)),
+          Math.min(1.4, Math.max(-0.4, p.fy)),
+          Math.min(0.6, Math.max(0.04, p.scale)),
+        );
+      }
+    },
+
     setFit(factor: number) {
       // Clamped, not trusted. A zero or a NaN out of a layout calculation
       // would silently render nothing, which is the hardest bug to see.
@@ -1511,6 +2132,11 @@ export function createSphereEngine(options: SphereEngineOptions): SphereEngine {
     retint() {
       palette.flame.hot.copy(tokenColor('--sphere-hot'));
       palette.flame.cool.copy(tokenColor('--sphere-cool'));
+      // Recomputed here and nowhere else: the gain is a property of the tokens,
+      // so the one place that re-reads the tokens is the one place that may
+      // change it.
+      flameGain = paletteGainOn ? gainFor(palette.flame.cool) : 1;
+      amberGain = paletteGainOn ? gainFor(palette.amber.cool) : 1;
       palette.amber.hot.copy(tokenColor('--status-warn'));
       palette.amber.cool.copy(tokenColor('--status-warn'));
     },
@@ -1521,6 +2147,7 @@ export function createSphereEngine(options: SphereEngineOptions): SphereEngine {
       observer.disconnect();
       canvas.removeEventListener('webglcontextlost', onContextLost);
       if (redrawListener) document.removeEventListener('visibilitychange', redrawListener);
+      for (const c of companions) c.dispose();
       geometry.dispose();
       material.dispose();
       renderer.dispose();

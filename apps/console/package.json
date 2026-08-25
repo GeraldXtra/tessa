@@ -1,12 +1,13 @@
 {
-  "name": "@zoey/console",
+  "name": "@tessa/console",
   "version": "0.1.0",
   "private": true,
-  "description": "Zoey Console \u2014 the terminal surface. ConPTY under xterm, one WebSocket in the main process.",
+  "description": "Tessa Console \u2014 the terminal surface. ConPTY under xterm, one WebSocket in the main process.",
   "main": "./out/main/index.js",
   "scripts": {
     "smoke:pty": "node scripts/smoke-pty.mjs",
     "dev": "electron-vite dev",
+    "start": "electron out/main/index.js",
     "build": "electron-vite build",
     "preview": "electron-vite preview",
     "typecheck": "tsc -p tsconfig.node.json --noEmit && tsc -p tsconfig.preload.json --noEmit && tsc -p tsconfig.web.json --noEmit"
@@ -25,8 +26,8 @@
     "@types/react-dom": "19.2.4",
     "@types/ws": "8.18.1",
     "@vitejs/plugin-react": "5.2.0",
-    "@zoey/protocol": "1.0.0",
-    "@zoey/tokens": "1.0.0",
+    "@tessa/protocol": "1.0.0",
+    "@tessa/tokens": "1.0.0",
     "electron": "43.4.0",
     "electron-vite": "5.0.0",
     "vite": "7.3.6"
@@ -43,7 +44,7 @@
     "    resolves its binary via a runtime dynamic require plus an on-disk package.json read, so",
     "    bundling it is fatal. Bundling ws would drag in its optional native deps (bufferutil,",
     "    utf-8-validate) as unresolvable imports.",
-    "  - @zoey/protocol and @zoey/tokens are devDependencies ON PURPOSE. @zoey/protocol's entry is raw",
+    "  - @tessa/protocol and @tessa/tokens are devDependencies ON PURPOSE. @tessa/protocol's entry is raw",
     "    TypeScript (src/index.ts, importing ./enums.generated.ts). Externalized, that becomes a",
     "    runtime require() of a .ts file and main crashes on launch. As devDeps they are bundled.",
     "  - react/react-dom/@xterm/* are renderer-only; Vite bundles the renderer regardless of class.",

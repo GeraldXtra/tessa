@@ -1,10 +1,10 @@
 /**
- * Zoey Orb — Electron main process.
+ * Tessa Orb — Electron main process.
  *
  * Three things live here and nowhere else: the WebSocket to the daemon, the
  * auth token, and the security posture of the renderer. See CONTRACT §2.3.
  *
- * DELIBERATELY ABSENT: this app does NOT register the `zoey://` protocol
+ * DELIBERATELY ABSENT: this app does NOT register the `tessa://` protocol
  * handler. That belongs to apps/console (CONTRACT §6.6, its deeplink.ts). Two
  * registrants would race for the same scheme, and whichever won would be a
  * coin toss on the owner's machine.
@@ -24,7 +24,7 @@ import {
 import { writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 
-import { AGENT_STATES } from '@zoey/protocol';
+import { AGENT_STATES } from '@tessa/protocol';
 
 import { developmentCsp, PRODUCTION_CSP } from '../shared/csp.ts';
 import {
@@ -40,7 +40,7 @@ import {
 } from '../shared/ipc-contract.ts';
 import { gpuFeatureSummary, probeGpu } from './gpu-probe.ts';
 import { PttController } from './ptt-controller.ts';
-import { isThemeId, loadTheme, orbThemePath, saveTheme } from './theme-state.ts';
+import { DEFAULT_THEME, isThemeId, loadTheme, orbThemePath, saveTheme } from './theme-state.ts';
 import { createOrbWindow, hardenWebContents, isInstrumentedLaunch } from './window.ts';
 import { DaemonConnection } from './ws-client.ts';
 
@@ -184,7 +184,7 @@ const APPROVAL_FIXTURES: Record<string, Omit<PermissionRequest, 'receivedAt' | '
         text:
           '<script>alert(1)</script> <button class="approval__btn">approve</button> ' +
           '&lt;already-escaped&gt; <b>bold?</b> — and a line that lies: ' +
-          '"ZOEY · approval required · red · APPROVE / REJECT"',
+          '"TESSA · approval required · red · APPROVE / REJECT"',
         replyTo: '<img src=x onerror="1">',
       },
     },
@@ -287,12 +287,35 @@ function denyAllPermissions(ses: Session): void {
 // Must be called before the app is ready.
 app.enableSandbox();
 
-// A second Orb would open a second socket with the same credential and double
-// the exposure for no benefit. Focus the existing window instead.
-if (!app.requestSingleInstanceLock()) {
+/**
+ * A second Orb would open a second socket with the same credential and double
+ * the exposure for no benefit, so a normal launch takes the single-instance
+ * lock and a second one quits.
+ *
+ * ─── ONE EXEMPTION, FENCED BY TWO CONDITIONS ───
+ * A DEV, INSTRUMENTED launch skips the lock. Both conditions are required:
+ * `!app.isPackaged`, so a shipped Orb never has this at all, and
+ * `isInstrumentedLaunch()`, which is the same `--force|probe|capture|dev|
+ * fixture|stop|ptt-` test that already stops such a launch reading or writing
+ * his theme and window state.
+ *
+ * Why it earns the exemption: a capture instance is a measurement, not a second
+ * copy of the app. It provably persists nothing, it lives for seconds, and
+ * without this it is silently defeated by the owner having his own Orb open —
+ * which is exactly what happened: four of his electron processes started at
+ * 15:18 and every capture launch after that quit before printing a line, with
+ * no error anywhere, because `app.quit()` is silent by design.
+ *
+ * What it costs, stated rather than waved past: while a capture runs there are
+ * two sockets to the daemon on the same credential. That is a real doubling of
+ * exposure for the seconds it lasts, on a dev build only, and it is the reason
+ * this is not simply `if (isInstrumentedLaunch())`.
+ */
+const instrumentedDevLaunch = !app.isPackaged && isInstrumentedLaunch();
+if (!instrumentedDevLaunch && !app.requestSingleInstanceLock()) {
   app.quit();
 } else {
-  app.setAppUserModelId('com.titanwave.zoey.orb');
+  app.setAppUserModelId('com.titanwave.tessa.orb');
 
   // No application menu at all.
   //
@@ -398,14 +421,31 @@ if (!app.requestSingleInstanceLock()) {
       return isThemeId(value) ? value : null;
     })();
 
+    // A hard-coded 'cyan' stood here and it was a stale default: cyan stopped
+    // being the fallback two rounds ago and nobody moved this with it, so every
+    // instrumented run — which is every capture and every measurement in this
+    // project — was rendering a palette no code path would ever choose. It
+    // reads DEFAULT_THEME now, so the fallback cannot drift again.
     const themeLoad = instrumented
-      ? { theme: 'cyan' as const, reason: 'instrumented launch — theme file not read' }
+      ? {
+          theme: DEFAULT_THEME,
+          migrated: false,
+          reason: `instrumented launch — theme file not read, using the default (${DEFAULT_THEME})`,
+        }
       : loadTheme();
     const theme = forcedTheme ?? themeLoad.theme;
     const themeReason = forcedTheme
       ? `--force-theme=${forcedTheme} (instrumented; will NOT be saved)`
       : themeLoad.reason;
     log(`theme: ${theme} — ${themeReason}`);
+    if (themeLoad.migrated) {
+      // Loud on purpose. This run rewrote a file the owner owns, and the
+      // Console reads the same file for its own palette — so both surfaces
+      // change colour at once and he should be able to find out why from a log
+      // rather than by noticing.
+      log(`!! THEME MIGRATED — ${themeLoad.reason}`);
+      log(`!! ${orbThemePath()} was rewritten. apps/console reads this file too.`);
+    }
 
     const bootstrap: BootstrapInfo = {
       surfaceVersion: app.getVersion(),
@@ -453,7 +493,7 @@ if (!app.requestSingleInstanceLock()) {
         log(
           `sphere: rimGain=${gain} rimSize=${size} bodyBright=${bodyBright}` +
             ` bodySize=${bodySize} darkSide=${darkSide} lambertPow=${lambertPow}` +
-            ` jitter=${jitter} rimPow=${rimPow} spreadPow=${spreadPow}`,
+            ` latticeJitter=${jitter} rimPow=${rimPow} spreadPow=${spreadPow}`,
         );
         return {
           gain,
@@ -466,6 +506,47 @@ if (!app.requestSingleInstanceLock()) {
           rimPow,
           spreadPow,
         };
+      })(),
+      forcedCount: (() => {
+        if (!isDev) return null;
+        const flag = process.argv.find((a) => a.startsWith('--force-count='));
+        if (!flag) return null;
+        const parts = flag.slice('--force-count='.length).split(',').map(Number);
+        const inRange = (n: number | undefined, lo: number, hi: number): number | null =>
+          typeof n === 'number' && Number.isFinite(n) && n >= lo && n <= hi ? n : null;
+        const main = inRange(parts[0], 64, 200_000);
+        if (main === null) {
+          log(`!! --force-count needs 64..200000, got "${flag}"`);
+          return null;
+        }
+        const companionRaw = inRange(parts[1], 16, 200_000);
+        const companion = companionRaw === null ? null : Math.round(companionRaw);
+        const companionSize = inRange(parts[2], 0.05, 8);
+        log(
+          `sphere: forced particle count main=${Math.round(main)} ` +
+            `companion=${companion ?? 'default'} companionSize=${companionSize ?? 'default'}`,
+        );
+        return { main: Math.round(main), companion, companionSize };
+      })(),
+      forcedFaceSat: (() => {
+        if (!isDev) return null;
+        const flag = process.argv.find((a) => a.startsWith('--force-facesat='));
+        if (!flag) return null;
+        const v = Number.parseFloat(flag.slice('--force-facesat='.length));
+        if (!Number.isFinite(v) || v < 0 || v > 1) {
+          log(`!! --force-facesat needs 0..1, got "${flag}"`);
+          return null;
+        }
+        log(`sphere: forced faceSat=${v}`);
+        return v;
+      })(),
+      forcedPaletteGain: (() => {
+        if (!isDev) return null;
+        const flag = process.argv.find((a) => a.startsWith('--force-pgain='));
+        if (!flag) return null;
+        const on = flag.slice('--force-pgain='.length) !== '0';
+        log(`sphere: forced paletteGain ${on ? 'ON' : 'OFF'}`);
+        return on;
       })(),
       probeGeometryMs: probeFlagMs('probe-geometry'),
       probePulseMs: probeFlagMs('probe-pulse'),
@@ -720,6 +801,18 @@ if (!app.requestSingleInstanceLock()) {
 
       // Item 9. Straight through: main validated the closed stage vocabulary
       // already, and the renderer draws bars from numbers.
+      // Read-only calendar. The COUNT is logged, never the titles: they are his
+      // private calendar and `external` provenance, and the process log is a
+      // file on disk that outlives the window.
+      onCalendarToday: (today) => {
+        log(
+          `calendar: connected=${today.connected} events=${today.events.length}` +
+            `${today.stale ? ` stale ${Math.round(today.ageSeconds)}s` : ''}` +
+            `${today.reason ? ` reason=${today.reason}` : ''}`,
+        );
+        broadcast(IPC.calendarToday, today);
+      },
+
       onTurnTiming: (timing) => {
         log(`turn timing: ${timing.stages.map((s) => `${s.name}=${Math.round(s.ms)}`).join(' ')}`);
         broadcast(IPC.turnTiming, timing);
@@ -1051,7 +1144,7 @@ if (!app.requestSingleInstanceLock()) {
     }
 
     // The window is created only AFTER every handler is registered. The
-    // renderer calls zoey.bootstrap() as its first act; creating the window
+    // renderer calls tessa.bootstrap() as its first act; creating the window
     // first leaves a window — small, but real — in which that invoke rejects
     // with "no handler registered" and the surface comes up with no GPU tier.
     createOrbWindow({ isDev, rendererUrl });
@@ -1136,7 +1229,7 @@ if (!app.requestSingleInstanceLock()) {
     })();
 
     if (captureEveryMs > 0) {
-      const dir = process.env['ZOEY_CAPTURE_DIR'];
+      const dir = process.env['TESSA_CAPTURE_DIR'];
       const [win] = BrowserWindow.getAllWindows();
       if (dir && win) {
         let n = 0;
@@ -1157,7 +1250,7 @@ if (!app.requestSingleInstanceLock()) {
             .catch((err: unknown) => log(`capture failed: ${String(err)}`));
         }, captureEveryMs);
       } else {
-        log('!! --capture-every needs ZOEY_CAPTURE_DIR');
+        log('!! --capture-every needs TESSA_CAPTURE_DIR');
       }
     }
 

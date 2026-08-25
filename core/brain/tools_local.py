@@ -29,7 +29,7 @@ class ToolCall:
     name: str
     args: dict[str, Any] = field(default_factory=dict)
     tier: Tier = "green"
-    #: What Zoey says while doing it. Short first sentence — Piper streams per
+    #: What Tessa says while doing it. Short first sentence — Piper streams per
     #: sentence and the opener is the whole 400 ms budget.
     speech: str = ""
 
@@ -49,8 +49,16 @@ _KNOWN_FOLDERS = {
     "videos": Path.home() / "Videos",
     "music": Path.home() / "Music",
     "home": Path.home(),
-    "zoey": Path(r"C:\dev\zoey"),
-    "dev": Path(r"C:\dev"),
+    # DERIVED, NOT HARD-CODED. This was `C:\dev\zoey` and the rename turned it
+    # into `C:\dev\tessa` — a path that does not exist until Gerald renames the
+    # folder, so "open tessa" would have failed silently in between.
+    #
+    # It was also a CLAUDE.md violation the whole time: "No hard-coded paths to
+    # the owner's machine outside config and tests." Deriving it from this
+    # file's own location fixes both, and keeps working wherever he puts the
+    # repo — including after the folder rename, with no further edit.
+    "tessa": Path(__file__).resolve().parents[2],
+    "dev": Path(__file__).resolve().parents[3],
 }
 
 #: SPOKEN NAMES FOR THE SAME FOLDER. He does not say "pictures" — he says
@@ -67,7 +75,7 @@ _FOLDER_ALIASES = {
     "movies": "videos", "vids": "videos", "films": "videos",
     "songs": "music", "tunes": "music",
     "my pc": "home", "user folder": "home", "home folder": "home", "my folder": "home",
-    "repo": "zoey", "the repo": "zoey", "zoey os": "zoey", "zoey repo": "zoey",
+    "repo": "tessa", "the repo": "tessa", "tessa os": "tessa", "tessa repo": "tessa",
     "projects": "dev", "project folder": "dev",
 }
 

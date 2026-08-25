@@ -7,7 +7,7 @@ Running as LocalSystem is not merely "wrong user". Session 0 isolation silently
 redirects the per-user environment: APPDATA becomes
 `C:\\Windows\\System32\\config\\systemprofile\\AppData\\Roaming`, so `npm install -g`
 lands somewhere the owner's PATH will never look, `pip install --user` writes to
-a profile no human logs into, and `%LOCALAPPDATA%\\Zoey\\runtime.json` — the file
+a profile no human logs into, and `%LOCALAPPDATA%\\Tessa\\runtime.json` — the file
 both surfaces discover the daemon through — is written to a different path
 entirely. Every one of those failures presents as something else: "npm installed
 but the command is not found", "the Console cannot see the daemon". The cause is
@@ -121,5 +121,5 @@ def assert_not_service_account() -> dict[str, str]:
         "sid": sid or "unknown",
         "user": getpass.getuser(),
         "appdata": appdata_detail,
-        "runtimeParent": str(Path(os.environ.get("LOCALAPPDATA", "")) / "Zoey"),
+        "runtimeParent": str(Path(os.environ.get("LOCALAPPDATA", "")) / "Tessa"),
     }

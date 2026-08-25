@@ -156,7 +156,7 @@ _RULES: list[tuple[re.Pattern[str], str, Builder, str]] = [
      "x.reply", lambda m: {"index": _ordinal(m["idx"]), "text": _clean(m["text"] or "")},
      "Reading it back."),
     # PLURAL AND COMMA TOLERANT. His real transcript was
-    # "Zoey, Tweets, Data Mbudinon AI Assist" — Whisper wrote the verb as a
+    # "Tessa, Tweets, Data Mbudinon AI Assist" — Whisper wrote the verb as a
     # plural noun and put a comma where he paused. The old rule required
     # `tweet` followed by whitespace, matched none of it, and the utterance
     # fell through to UNROUTED: he got "I caught that. Not yet." instead of
@@ -304,7 +304,7 @@ _RULES: list[tuple[re.Pattern[str], str, Builder, str]] = [
     # He would have said four ordinary words and watched the machine go dark
     # mid-job.
     #
-    # Addressed to Zoey, "go to sleep" means Zoey. Suspending the computer is a
+    # Addressed to Tessa, "go to sleep" means Tessa. Suspending the computer is a
     # different and more consequential act, so it now has to say so.
     (re.compile(r"\b(?:sleep\s+the\s+(?:machine|laptop|pc|computer)|"
                 r"put\s+the\s+(?:machine|laptop|pc|computer)\s+to\s+sleep|"

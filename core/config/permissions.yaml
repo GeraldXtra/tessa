@@ -3,7 +3,7 @@
 # THE SINGLE AUTHORITY on permission tiers. Surfaces render tiers; they never
 # define or evaluate them (CONTRACT.md §6.4).
 #
-# Derived from ZOEY_OS-spec.md §6. Console-specific capabilities are added
+# Derived from TESSA_CORE-spec.md §6. Console-specific capabilities are added
 # under the same three tiers rather than inventing a fourth model.
 
 version: 1
@@ -68,7 +68,7 @@ tiers:
 # Writes, deletes, and renames under these confirm REGARDLESS of tier or actor.
 # Read and list are unaffected.
 protected_paths:
-  - "C:\\dev\\zoey"                        # this repo — the agent must not rewrite its own contract
+  - "C:\\dev\\tessa"                        # this repo — the agent must not rewrite its own contract
   - "C:\\Users\\SERIOUS-PC\\OneDrive"      # 60+ project folders, cloud-synced
   - "C:\\Windows"
   - "C:\\Program Files"
@@ -86,10 +86,10 @@ hydration:
 # ── Never ────────────────────────────────────────────────────────────────────
 # Not tiers. Absolute. No approval prompt can enable these.
 never:
-  - hard_delete               # Recycle Bin only, always (ZOEY_OS-spec §3.3)
+  - hard_delete               # Recycle Bin only, always (TESSA_CORE-spec §3.3)
   - execute_model_string      # the model picks a tool NAME + ARGS; Python owns execution
   - read_content_from_reparse_point   # would trigger a metered download
-  - deep_link_command         # zoey:// carries path+mode only (CONTRACT §6.6)
+  - deep_link_command         # tessa:// carries path+mode only (CONTRACT §6.6)
 
 # ── Audit ────────────────────────────────────────────────────────────────────
 audit:

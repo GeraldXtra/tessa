@@ -79,7 +79,7 @@ def _load_binding() -> Any | None:
         if not path.exists():
             continue
         try:
-            spec = importlib.util.spec_from_file_location("_zoey_rnnoise", path)
+            spec = importlib.util.spec_from_file_location("_tessa_rnnoise", path)
             if spec is None or spec.loader is None:
                 continue
             mod = importlib.util.module_from_spec(spec)

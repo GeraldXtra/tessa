@@ -26,6 +26,7 @@ from __future__ import annotations
 import ctypes
 import os
 import subprocess
+import sys
 from ctypes import wintypes
 from pathlib import Path
 from typing import Any, Iterator
@@ -85,7 +86,8 @@ def _recycle(paths: list[Path]) -> None:
 
 # ── path helpers ─────────────────────────────────────────────────────────────
 
-#: Attribute bit for a reparse point. Set on every OneDrive placeholder.
+#: Attribute bit for a reparse point. KEPT FOR REFERENCE ONLY — see below for
+#: why no runtime we have can read it, and why it is the wrong question anyway.
 FILE_ATTRIBUTE_REPARSE_POINT = 0x400
 
 #: read_text cap. Whisper-sized commands do not ask for a 40 MB log, and an
@@ -130,7 +132,138 @@ def _resolve(raw: Any, *, must_exist: bool = True) -> Path:
     return p
 
 
+# ── THE HYDRATION FIREWALL, REWRITTEN AFTER MEASURING ────────────────────────
+#
+# CLAUDE.md invariant 5 says never read content from a cloud placeholder,
+# because recalling one costs metered data. The guard that enforced it was
+# `st_file_attributes & FILE_ATTRIBUTE_REPARSE_POINT`, and it was DEAD:
+#
+#   PowerShell / .NET FileSystemInfo.Attributes   22 of 85 entries are reparse
+#   Python  os.stat().st_file_attributes           0 of 22 seen
+#   Win32   GetFileAttributesW                     0 of 22 seen
+#   Win32   FindFirstFileW (path and enumeration)  0 of 22 seen
+#
+# For one folder .NET reports 525328 and every other route reports 524304 — a
+# difference of exactly 1024, the reparse bit. Only .NET's directory query sees
+# it; every path-based Win32 call resolves the placeholder first and hands back
+# the target's attributes. So this guard has been returning False for every
+# placeholder on the machine.
+#
+# ── AND THE REPARSE BIT IS THE WRONG QUESTION ANYWAY ─────────────────────────
+#
+# The bit means "this is a placeholder". It does NOT mean "the content is
+# remote". Measured on his own OneDrive: all 22 carry FILE_ATTRIBUTE_PINNED —
+# "always keep on this device" — and 4,000 files walked found ZERO with no
+# allocation. Everything is already local. A guard on the reparse bit would
+# have refused 22 files of which none needed refusing, and he would have
+# reported it as Tessa suddenly refusing to read his own documents.
+#
+# ── WHAT IS ACTUALLY ASKED ───────────────────────────────────────────────────
+#
+# "Would reading this cost bytes?" — which is exactly `AllocationSize == 0`
+# while the file has a length. A dehydrated placeholder has no clusters; a
+# hydrated one has them and is free to read.
+#
+# The handle is opened with FILE_READ_ATTRIBUTES ONLY and never asks for data,
+# so the query itself cannot trigger a recall. Verified: probing every file at
+# the OneDrive root left all six zero-allocation candidates untouched.
+#
+# NOTE FOR ANYONE PORTING THIS: Node's `Stats.blocks` is NOT a substitute. It is
+# AllocationSize floored to 512-byte units, so every MFT-resident file under
+# 512 bytes reports 0 and looks dehydrated. 610 of his files are exactly that.
+
+_FILE_READ_ATTRIBUTES = 0x80
+_FILE_SHARE_ALL = 0x07
+_OPEN_EXISTING = 3
+_FILE_FLAG_BACKUP_SEMANTICS = 0x02000000
+_FILE_FLAG_OPEN_REPARSE_POINT = 0x00200000
+_FileStandardInfo = 1
+
+
+if sys.platform == "win32":
+    _w = wintypes
+
+    class _FileStandardInfoStruct(ctypes.Structure):
+        _fields_ = [
+            ("AllocationSize", ctypes.c_longlong),
+            ("EndOfFile", ctypes.c_longlong),
+            ("NumberOfLinks", _w.DWORD),
+            ("DeletePending", _w.BOOLEAN),
+            ("Directory", _w.BOOLEAN),
+        ]
+
+    _k32 = ctypes.windll.kernel32
+    _k32.CreateFileW.argtypes = [
+        _w.LPCWSTR, _w.DWORD, _w.DWORD, ctypes.c_void_p, _w.DWORD, _w.DWORD, _w.HANDLE,
+    ]
+    _k32.CreateFileW.restype = _w.HANDLE
+    _k32.GetFileInformationByHandleEx.argtypes = [
+        _w.HANDLE, ctypes.c_int, ctypes.c_void_p, _w.DWORD,
+    ]
+    _k32.GetFileInformationByHandleEx.restype = _w.BOOL
+    _k32.CloseHandle.argtypes = [_w.HANDLE]
+    _k32.CloseHandle.restype = _w.BOOL
+    _INVALID_HANDLE = ctypes.c_void_p(-1).value
+else:  # pragma: no cover - the daemon is Windows-only, but importing must work
+    _k32 = None
+
+
+def allocation_of(p: Path) -> tuple[int, int] | None:
+    """
+    (allocated bytes, length) without touching the data.
+
+    `None` means COULD NOT CLASSIFY — a missing file, a permission error, a path
+    the API rejected. Callers must treat that as a refusal, never as consent:
+    an error that reads as permission-to-proceed is the worst shape this could
+    take.
+
+    Returns None on non-Windows too, which is correct: there are no OneDrive
+    placeholders there, and callers fall back to their own checks.
+    """
+    if _k32 is None:
+        return None
+    handle = _k32.CreateFileW(
+        str(p), _FILE_READ_ATTRIBUTES, _FILE_SHARE_ALL, None, _OPEN_EXISTING,
+        _FILE_FLAG_BACKUP_SEMANTICS | _FILE_FLAG_OPEN_REPARSE_POINT, None,
+    )
+    if handle == _INVALID_HANDLE:
+        return None
+    try:
+        info = _FileStandardInfoStruct()
+        ok = _k32.GetFileInformationByHandleEx(
+            handle, _FileStandardInfo, ctypes.byref(info), ctypes.sizeof(info)
+        )
+        if not ok:
+            return None
+        return int(info.AllocationSize), int(info.EndOfFile)
+    finally:
+        _k32.CloseHandle(handle)
+
+
+def is_cloud_only(p: Path) -> bool:
+    """
+    True when the content is NOT on this disk and reading it would download it.
+
+    FAILS CLOSED. If the file cannot be classified at all we say yes, because
+    the cost of a wrong "no" is his money and the cost of a wrong "yes" is one
+    sentence asking him to try again.
+    """
+    if sys.platform != "win32":
+        return False
+    r = allocation_of(p)
+    if r is None:
+        return True
+    allocated, length = r
+    return length > 0 and allocated == 0
+
+
 def is_reparse_point(p: Path) -> bool:
+    """
+    Deprecated and deliberately kept: it is what the walk uses to avoid
+    DESCENDING into a junction, which is a different question from whether a
+    file's bytes are local. It still cannot see OneDrive placeholders, and that
+    no longer matters here because nothing gates a READ on it any more.
+    """
     try:
         return bool(p.stat(follow_symlinks=False).st_file_attributes  # type: ignore[attr-defined]
                     & FILE_ATTRIBUTE_REPARSE_POINT)
@@ -206,12 +339,12 @@ def search(name: str, root: str | None = None, limit: int = 40) -> dict[str, Any
 
 def read_text(path: str, max_bytes: int = MAX_READ_BYTES) -> dict[str, Any]:
     p = _resolve(path)
-    if is_reparse_point(p):
-        # INVARIANT 5. This is the hydration firewall doing its job: refusing
-        # BEFORE the read, not warning after it, because after it the metered
-        # bytes are already spent.
-        raise ToolError(f"{p.name} is a cloud placeholder, not a local file",
-                        "Opening it would download it on your metered link. Say hydrate and I will ask first.")
+    if is_cloud_only(p):
+        # INVARIANT 5. The hydration firewall, refusing BEFORE the read rather
+        # than warning after it — after it, the metered bytes are already spent.
+        raise ToolError(f"{p.name} is not downloaded to this machine",
+                        "Opening it would pull it down on your metered link. "
+                        "Say download it and I will ask first.")
     size = p.stat().st_size
     if size > max_bytes:
         raise ToolError(f"{p.name} is {size / 1e6:.1f} megabytes",

@@ -130,7 +130,7 @@ export function Column() {
     <aside className="col" aria-label="Telemetry">
       {/* h · her identity, with more presence than a 10px wordmark */}
       <section className="col__group col__group--identity">
-        <span className="col__mark">ZOEY</span>
+        <span className="col__mark">TESSA</span>
         <span className="col__sub">
           {connection.daemonVersion ? `core ${connection.daemonVersion}` : 'no daemon'}
         </span>

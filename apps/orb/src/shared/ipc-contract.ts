@@ -23,9 +23,9 @@
 
 export const IPC = {
   /** renderer → main, invoke. One round trip at startup. */
-  bootstrap: 'zoey:bootstrap',
+  bootstrap: 'tessa:bootstrap',
   /** renderer → main, invoke. Current status, for first paint. */
-  getConnection: 'zoey:get-connection',
+  getConnection: 'tessa:get-connection',
   /**
    * renderer → main, invoke. Everything already received, for first paint.
    *
@@ -35,23 +35,25 @@ export const IPC = {
    * audit history to a race and SENTINEL shows NO DATA while main's log says it
    * forwarded 100 entries. The renderer pulls this once on mount.
    */
-  getSnapshot: 'zoey:get-snapshot',
+  getSnapshot: 'tessa:get-snapshot',
   /** main → renderer, push. Status changed. */
-  connectionChanged: 'zoey:connection-changed',
+  connectionChanged: 'tessa:connection-changed',
   /** main → renderer, push. evt.daemon.health, every 5 s while subscribed. */
-  healthChanged: 'zoey:health-changed',
+  healthChanged: 'tessa:health-changed',
   /** main → renderer, push. evt.agent.state — validated against the closed set. */
-  agentStateChanged: 'zoey:agent-state-changed',
+  agentStateChanged: 'tessa:agent-state-changed',
   /** main → renderer, push. evt.turn.timing — one turn's stage breakdown. */
-  turnTiming: 'zoey:turn-timing',
+  turnTiming: 'tessa:turn-timing',
+  /** main → renderer, push. res.calendar.today — the TODAY panel. */
+  calendarToday: 'tessa:calendar-today',
   /** main → renderer, push. One audit entry, from evt.audit.appended. */
-  auditAppended: 'zoey:audit-appended',
+  auditAppended: 'tessa:audit-appended',
   /** main → renderer, push. res.audit history, in reply to cmd.audit.query. */
-  auditHistory: 'zoey:audit-history',
+  auditHistory: 'tessa:audit-history',
   /** main → renderer, push. evt.pty.sessions roster (CONTRACT §4.2). */
-  ptySessions: 'zoey:pty-sessions',
+  ptySessions: 'tessa:pty-sessions',
   /** main → renderer, push. A completed transcript line. */
-  transcriptLine: 'zoey:transcript-line',
+  transcriptLine: 'tessa:transcript-line',
   /**
    * main → renderer, push. A display was added, removed, or changed mode.
    *
@@ -62,9 +64,9 @@ export const IPC = {
    * frame rate. This forces an immediate re-measure instead of waiting for the
    * estimate to drift into place over the next sampling window.
    */
-  displayChanged: 'zoey:display-changed',
+  displayChanged: 'tessa:display-changed',
   /** main → renderer, push. One notification for the §R.2 stack. */
-  notify: 'zoey:notify',
+  notify: 'tessa:notify',
   /**
    * main → renderer, push. The microphone claim, as the DAEMON confirmed it.
    *
@@ -75,7 +77,7 @@ export const IPC = {
    * the one thing where being wrong is a privacy breach rather than a cosmetic
    * one.
    */
-  micState: 'zoey:mic-state',
+  micState: 'tessa:mic-state',
   /**
    * renderer → main, send. One push-to-talk edge: 'down' or 'up'.
    *
@@ -84,13 +86,13 @@ export const IPC = {
    * means under the current mode. Same reason nothing here takes a message type
    * or a payload.
    */
-  pttEdge: 'zoey:ptt-edge',
+  pttEdge: 'tessa:ptt-edge',
   /** renderer → main, send. 'toggle' | 'hold'. */
-  pttSetMode: 'zoey:ptt-set-mode',
+  pttSetMode: 'tessa:ptt-set-mode',
   /** main → renderer, push. `evt.permission.request` — one approval card. */
-  approvalRequested: 'zoey:approval-requested',
+  approvalRequested: 'tessa:approval-requested',
   /** main → renderer, push. A requestId that is no longer pending. */
-  approvalCleared: 'zoey:approval-cleared',
+  approvalCleared: 'tessa:approval-cleared',
   /**
    * main → renderer, push. The daemon REFUSED a decision.
    *
@@ -100,7 +102,7 @@ export const IPC = {
    * on the way out), so the card must come BACK with his edit intact. A refusal
    * from the pending lookup means the request is gone and the card must not.
    */
-  approvalRefused: 'zoey:approval-refused',
+  approvalRefused: 'tessa:approval-refused',
   /**
    * renderer → main, send. `{ requestId, decision }` — the owner's answer.
    *
@@ -110,7 +112,7 @@ export const IPC = {
    * `requestId` is only ever echoed back against a request main already holds.
    * Main will not forward an id it never issued a card for.
    */
-  approvalRespond: 'zoey:approval-respond',
+  approvalRespond: 'tessa:approval-respond',
   /**
    * renderer → main, send. One of five theme ids, for persistence only.
    *
@@ -120,9 +122,9 @@ export const IPC = {
    * id against its own list and refuses anything else, so a compromised
    * renderer's worst outcome here is a file containing a word.
    */
-  themeSet: 'zoey:theme-set',
+  themeSet: 'tessa:theme-set',
   /** renderer → main, send. Owner pressed RETRY after a terminal failure. */
-  retryConnection: 'zoey:retry-connection',
+  retryConnection: 'tessa:retry-connection',
   /**
    * renderer → main, send. DEV ONLY — one line of sphere metrics every 5 s,
    * logged by main.
@@ -132,10 +134,10 @@ export const IPC = {
    * argued from screenshotted values that turned out to be stale, and a metric
    * you cannot script is a metric you cannot check.
    */
-  devMetrics: 'zoey:dev-metrics',
+  devMetrics: 'tessa:dev-metrics',
   /** renderer → main, send. Frameless window needs its own controls. */
-  windowMinimize: 'zoey:window-minimize',
-  windowClose: 'zoey:window-close',
+  windowMinimize: 'tessa:window-minimize',
+  windowClose: 'tessa:window-close',
 } as const;
 
 /**
@@ -162,6 +164,34 @@ export const IPC = {
 export interface AgentStatePush {
   state: string;
   detail: { tool?: string; target?: string; note?: string } | null;
+}
+
+/**
+ * `res.calendar.today` — Session 1's Google Calendar producer, READ-ONLY.
+ *
+ * Three states the surface must never conflate, which is why `connected` is a
+ * separate field from an empty `events`: "no events today" is a real answer and
+ * "not connected" is a different fact. `stale` + `ageSeconds` cover the fourth
+ * case that is not a state — cached events served while the network is down.
+ *
+ * `title` is EXTERNAL content (CONTRACT §6.2, the highest-risk provenance).
+ * It is rendered as inert text and never as a link, a path, or a command.
+ */
+export interface CalendarEvent {
+  id: string;
+  title: string;
+  allDay: boolean;
+  start: string;
+  end: string;
+}
+
+export interface CalendarToday {
+  connected: boolean;
+  events: readonly CalendarEvent[];
+  stale: boolean;
+  ageSeconds: number;
+  date: string;
+  reason?: string;
 }
 
 export interface TurnTiming {
@@ -538,6 +568,37 @@ export interface BootstrapInfo {
    * rather than argued about.
    */
   forcedAura: number | 'cycle' | null;
+  /**
+   * DEV ONLY.
+   * `--force-count=<mainParticles>[,<companionParticles>[,<companionSizeMul>]]`.
+   *
+   * The count is the one sphere parameter that could not be swept without a
+   * rebuild, and it is the parameter the whole particle finding turns on. Point
+   * SIZE already sweeps through `--force-sphere`'s `bodySize` multiplier, so a
+   * count override completes the pair: one build, then a grid of
+   * (count x size) launches measured per-particle rather than by eye.
+   *
+   * It overrides PARTICLE_COUNT for whatever tier is active, so a governor
+   * demotion during a sweep would silently change the thing being measured —
+   * which is why sweeps run focused, short, and are read back from the engine's
+   * own `stats().particles` rather than assumed.
+   */
+  forcedCount: { main: number; companion: number | null; companionSize: number | null } | null;
+  /**
+   * DEV ONLY. `--force-facesat=<0..1>` and `--force-pgain=<0|1>`.
+   *
+   * The two mechanisms added at the end of the last round — the face
+   * desaturation and the palette-luminance normalisation — were the only shell
+   * parameters with NO command-line override, so the only way to test whether
+   * either caused a regression was to edit and rebuild. That is exactly the
+   * class of parameter that needs a flag: one that changes every pixel and that
+   * nobody can bisect without one.
+   *
+   * `facesat` at 1.0 disables the desaturation entirely and reproduces the
+   * pre-faceSat shell. `pgain` at 0 disables the palette normalisation.
+   */
+  forcedFaceSat: number | null;
+  forcedPaletteGain: boolean | null;
 }
 
 /* ───────────────────────────────────────────────────── the bridge, in types */
@@ -567,7 +628,7 @@ export interface Snapshot {
   approvals: PermissionRequest[];
 }
 
-export interface ZoeyBridge {
+export interface TessaBridge {
   bootstrap(): Promise<BootstrapInfo>;
   getConnection(): Promise<ConnectionStatus>;
   getSnapshot(): Promise<Snapshot>;
@@ -578,6 +639,7 @@ export interface ZoeyBridge {
   /** Returns an unsubscribe function. Daemon-authoritative agent state. */
   onAgentState(listener: (payload: AgentStatePush) => void): () => void;
   onTurnTiming(listener: (timing: TurnTiming) => void): () => void;
+  onCalendarToday(listener: (today: CalendarToday) => void): () => void;
   /** Returns an unsubscribe function. Fires when the display layout changes. */
   onDisplayChanged(listener: () => void): () => void;
   /** Returns an unsubscribe function. One newly appended audit entry. */

@@ -1,6 +1,6 @@
 <div align="center">
 
-# ZOEY_OS
+# TESSA_CORE
 
 **A voice-driven personal agent for Windows.**
 
@@ -10,17 +10,17 @@ with a permission model that never lets it act on your behalf unseen.
 </div>
 
 ```
-        ┌──────────────┐         ┌──────────────┐
-        │   Zoey Orb   │         │ Zoey Console │
-        │ voice · orb  │         │ term · tree  │
-        └──────┬───────┘         └──────┬───────┘
-               │   local-only channel   │
-               └───────────┬────────────┘
-                    ┌──────▼───────┐
-                    │  Zoey Core   │
-                    │   (Python)   │
-                    └──────────────┘
-              brain · tools · guard · audit · memory
+        ┌───────────────┐        ┌───────────────┐
+        │   Tessa Orb   │        │ Tessa Console │
+        │  voice · orb  │        │  term · tree  │
+        └───────┬───────┘        └───────┬───────┘
+                │  local-only channel    │
+                └───────────┬────────────┘
+                    ┌───────▼───────┐
+                    │   Tessa Core  │
+                    │    (Python)   │
+                    └───────────────┘
+             brain · tools · guard · audit · memory
 ```
 
 ---

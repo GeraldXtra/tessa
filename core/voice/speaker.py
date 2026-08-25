@@ -27,7 +27,7 @@ but naming it ECAPA would be repeating a claim I did not verify.
 ────────────────────────────────────────────────────────────────────────────────
 IT SCORES THE SEGMENT, NOT THE WAKE PHRASE
 
-"Hey Zoey" is under a second. Speaker embeddings need seconds of speech to be
+"Hey Tessa" is under a second. Speaker embeddings need seconds of speech to be
 stable, and scoring a sub-second phrase produces exactly the false rejections of
 HIM that this module must not produce. So the phrase wakes her and the SEGMENT
 is verified — which is also the right security shape: a stranger can wake her
@@ -455,11 +455,11 @@ REFUSAL = ("I am not sure that is you, Emperor. "
 # of the feature that has to be handed over rather than delivered finished.
 
 ENROL_PROMPTS = [
-    "Zoey, open my downloads folder and show me what changed last night.",
+    "Tessa, open my downloads folder and show me what changed last night.",
     "What is the weather like today, and how much of my budget is left?",
     "Kill process four two four two, then tell me the time.",
     "I want you to search for the LedgerWatch repository and read me the summary.",
-    "Good evening Zoey. Status report, please — memory, uptime, everything.",
+    "Good evening Tessa. Status report, please — memory, uptime, everything.",
 ]
 
 
@@ -530,7 +530,7 @@ def _enrol_cli(seconds: float = 6.0) -> int:
 if __name__ == "__main__":
     import argparse
 
-    ap = argparse.ArgumentParser(description="Zoey speaker verification")
+    ap = argparse.ArgumentParser(description="Tessa speaker verification")
     ap.add_argument("--enrol", action="store_true", help="record and build the voiceprint")
     ap.add_argument("--check", action="store_true", help="report the current state")
     ap.add_argument("--clear", action="store_true", help="delete the voiceprint")

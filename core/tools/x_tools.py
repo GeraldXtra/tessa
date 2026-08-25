@@ -1,6 +1,6 @@
 """
 core/tools/x_tools.py — X (Twitter), driven through the already-authenticated
-session in Zoey's own Chrome profile.
+session in Tessa's own Chrome profile.
 
 NO PASSWORD EVER TOUCHES THIS CODE
 
@@ -58,7 +58,7 @@ X_NOTIFICATIONS = "https://x.com/notifications"
 #: zero articles, zero buttons and none of those phrases anywhere. So she said
 #: "I cannot find any posts on this page. Either X changed its markup, or
 #: nothing has loaded", which is precisely the wrong diagnosis: it sends him to
-#: debug Zoey when the answer is that he has never signed in.
+#: debug Tessa when the answer is that he has never signed in.
 #:
 #: The cookie is better on every axis: deterministic, instant, language-
 #: independent, and immune to the markup churn that will eventually break every

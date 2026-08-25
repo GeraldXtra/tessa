@@ -37,6 +37,36 @@
  *   brightness x1.90 then x1.05, because the shell now carries a wrapped-lambert
  *              term that costs the body most of its light on the unlit side
  *
+ * ─── AND THEN EVERY pointScale WENT DOWN 0.85x, ON A BETTER MEASUREMENT ───
+ *
+ * Uniformly, so the six states keep their ordering. Fitted with the count and
+ * the new tangential lattice jitter as one three-parameter sweep against the
+ * reference's mid-face patch: at 15,600 particles with jitter 0.40, a 0.85
+ * multiplier puts the mean particle area at 6.5 px against the reference's 6.6.
+ * The sweep is in gpu-tier.ts's PARTICLE_COUNT note.
+ *
+ * ─── the earlier reversal, kept because it is what the new measurement undid ───
+ * EVERY pointScale WENT UP 2.2x, ON A MEASUREMENT
+ *
+ * He said the particles were too small, and the measurement agrees in a way
+ * that was not the obvious guess. Sampled per 100x100 px with both spheres
+ * scaled to the SAME 480 px disc, so density is comparable:
+ *
+ *                     blobs   mean area   lit
+ *   reference (photo)    74     42.58 px   31.5%
+ *   this build          168      2.80 px    4.7%
+ *
+ * The reference has FEWER particles, each about fifteen times the area. Its
+ * density comes from SIZE, not from count — this build already has twice the
+ * count. So the count stays at 20,000 and the size goes up.
+ *
+ * 3.1x linear (2.2x, then 1.4x again after the side-by-side showed the
+ * reference's grain still visibly coarser) is not the 15x the areas suggest, for two stated reasons: the
+ * reference is a PHOTOGRAPH, so lens blur and JPEG merge neighbouring dots and
+ * inflate mean blob area; and the disc itself is growing 1.22x here, which
+ * spreads the same count further apart and would make the field look sparser
+ * even untouched. 2.2x compensates for the second and closes most of the first.
+ *
  * The RELATIVE ordering is untouched — every value moved by the same factor —
  * so `listening` is still the brightest, `idle` still the dimmest, and no state
  * changed its relationship to any other. That is the property item 2f depends
@@ -67,14 +97,14 @@
  *
  * The six agent states, as sphere parameters.
  *
- * The state list is IMPORTED from @zoey/protocol, never retyped. `AgentState`
+ * The state list is IMPORTED from @tessa/protocol, never retyped. `AgentState`
  * is a CLOSED set (CONTRACT §7.4): adding a value to it is a breaking change
  * requiring a PROTOCOL_VERSION bump and both surfaces updating together. The
  * `satisfies Record<AgentState, …>` below is what makes that real on this side —
  * if the enum gains a seventh state, this file stops compiling instead of
  * silently rendering nothing for it.
  *
- * The visual mapping is ZOEY_OS-spec §5.1 verbatim:
+ * The visual mapping is TESSA_CORE-spec §5.1 verbatim:
  *
  *   idle       slow breathing
  *   listening  tighten + brighten
@@ -90,7 +120,7 @@
  * this one does not, and that stillness is the signal.
  */
 
-import { AGENT_STATES, type AgentState } from '@zoey/protocol';
+import { AGENT_STATES, type AgentState } from '@tessa/protocol';
 
 export interface SphereParams {
   /** Shell radius in world units. */
@@ -125,7 +155,7 @@ export const SPHERE_STATES = {
     breathPeriodMs: 5200,
     amplitudeGain: 0.0,
     spin: 0.04,
-    pointScale: 0.0085,
+    pointScale: 0.00952,
     brightness: 1.10,
     coolMix: 0.60,
     palette: 'flame',
@@ -139,9 +169,11 @@ export const SPHERE_STATES = {
     turbulence: 0.012,
     breathDepth: 0.022,
     breathPeriodMs: 2600,
-    amplitudeGain: 0.16,
+    // Scaled with `speaking` by the same 0.476 — see the note there. Peak
+    // displacement 2.7% of the radius.
+    amplitudeGain: 0.076,
     spin: 0.06,
-    pointScale: 0.0097,
+    pointScale: 0.01079,
     brightness: 1.50,
     coolMix: 0.81,
     palette: 'flame',
@@ -176,7 +208,7 @@ export const SPHERE_STATES = {
     breathPeriodMs: 1800,
     amplitudeGain: 0.0,
     spin: 0.34,
-    pointScale: 0.0081,
+    pointScale: 0.00901,
     brightness: 1.34,
     coolMix: 0.54,
     palette: 'flame',
@@ -188,9 +220,31 @@ export const SPHERE_STATES = {
     turbulence: 0.03,
     breathDepth: 0.02,
     breathPeriodMs: 2200,
-    amplitudeGain: 0.42,
+    /**
+     * 0.42 -> 0.20, and it is the SAME fault the `thinking` turbulence had.
+     *
+     * The vertex stage adds `uAmpGain * uAmplitude * ripple * 0.35` to the
+     * radius. At 0.42, with the amplitude signal at 1 and the ripple at its
+     * peak, that is 14.7% of the radius thrown outward — and PEAK displacement
+     * governs the silhouette, not RMS. The side-by-side against reference
+     * image11 is what caught it: image11 IS a `speaking` frame and its sphere
+     * is round, while this build's was four or five large lobes. A speaking
+     * sphere that stops being a sphere is the `thinking` facets again, wearing
+     * a different parameter.
+     *
+     * 0.20 puts the peak at 7.0% of the radius, which is exactly the ceiling
+     * the `thinking` correction settled on and below the point where a point
+     * cloud stops reading as a shell. `listening` moved by the same factor so
+     * the two keep their 2.6:1 ratio and the ordering is untouched.
+     *
+     * It is still by a wide margin the most amplitude-driven state — 2.6x
+     * `listening` and infinitely more than the four states at zero — so the
+     * spec's "amplitude ripple" still reads. It reads as a ripple now rather
+     * than as a deformation.
+     */
+    amplitudeGain: 0.20,
     spin: 0.08,
-    pointScale: 0.0093,
+    pointScale: 0.01037,
     brightness: 1.46,
     coolMix: 0.72,
     palette: 'flame',
@@ -206,7 +260,7 @@ export const SPHERE_STATES = {
     breathPeriodMs: 1400,
     amplitudeGain: 0.0,
     spin: 0.13,
-    pointScale: 0.0089,
+    pointScale: 0.00995,
     brightness: 1.37,
     coolMix: 0.66,
     palette: 'flame',
@@ -220,7 +274,7 @@ export const SPHERE_STATES = {
     breathPeriodMs: 1,
     amplitudeGain: 0.0,
     spin: 0.0,
-    pointScale: 0.0097,
+    pointScale: 0.01079,
     brightness: 1.25,
     coolMix: 1.0,
     palette: 'amber',

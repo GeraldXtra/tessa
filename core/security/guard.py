@@ -26,7 +26,7 @@ if str(_GEN) not in sys.path:
     sys.path.insert(0, str(_GEN))
 
 # Generated from packages/protocol/schema/enums.json
-from zoey_protocol import Tier, TIERS  # noqa: E402,F401
+from tessa_protocol import Tier, TIERS  # noqa: E402,F401
 
 # PTY spawn actors are a strict subset of Provenance: `program` and `external`
 # can never request a shell, and every unattended trigger (fileWatch, email,
@@ -82,7 +82,7 @@ class Guard:
         True if `target` is at or under a protected root.
 
         Uses normcase + parts comparison rather than string prefixing, so
-        `C:\\dev\\zoey-other` is NOT treated as inside `C:\\dev\\zoey`.
+        `C:\\dev\\tessa-other` is NOT treated as inside `C:\\dev\\tessa`.
         """
         try:
             resolved = Path(target).resolve()

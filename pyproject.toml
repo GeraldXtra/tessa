@@ -1,7 +1,7 @@
 [project]
-name = "zoey-core"
+name = "tessa-core"
 version = "0.1.0"
-description = "ZOEY_OS Core — the Python daemon both surfaces talk to"
+description = "TESSA_CORE Core — the Python daemon both surfaces talk to"
 requires-python = ">=3.12"
 license = { text = "Proprietary — see COPYRIGHT.md" }
 authors = [{ name = "Gerald", email = "" }]
@@ -25,7 +25,7 @@ dev = [
 ]
 
 [project.scripts]
-zoey-core = "core.server:run"
+tessa-core = "core.server:run"
 
 [build-system]
 requires = ["setuptools>=69"]

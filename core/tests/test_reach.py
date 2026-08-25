@@ -111,13 +111,18 @@ check("identity collapses a .lnk and its App Paths twin",
 
 # ── 3. FILES, FOLDERS AND DRIVES ─────────────────────────────────────────────
 print("\n3. paths, folders and drives — not only applications")
+# DERIVED FROM THIS FILE, NOT WRITTEN OUT. The literal used to be `C:\dev\zoey`;
+# the rename made it `C:\dev\tessa`, which does not exist until Gerald renames
+# the folder — so this assertion would have failed for reasons having nothing to
+# do with what it tests, and passed again later for equally unrelated reasons.
+REPO = Path(__file__).resolve().parents[2]
 check("an absolute path is recognised",
-      _explicit_path(r"open C:\dev\zoey") == Path(r"C:\dev\zoey"))
+      _explicit_path(f"open {REPO}") == REPO)
 check("a bare drive is recognised",
       _explicit_path("open the D drive") == Path("D:\\"))
 check("ordinary words are NOT a path", _explicit_path("open my downloads") is None)
 
-intent, calls, speech = route(r"open C:\dev\zoey")
+intent, calls, speech = route(f"open {REPO}")
 check("an existing path opens as itself",
       calls and calls[0][0] == "app.open_folder", str(calls))
 intent, calls, speech = route(r"open C:\nope\missing")
@@ -169,8 +174,8 @@ check("'this' does not match PRESENCE's 'hi'",
 check("'hi' still matches PRESENCE", route("hi")[0] == "presence")
 
 # ── 6. THE GREETING ──────────────────────────────────────────────────────────
-print("\n6. 'Hey Zoey' alone is a greeting")
-for utt in ("Hey Zoey", "Hi Zoey", "Hello Zoey", "Zoey", "hello", "hi"):
+print("\n6. 'Hey Tessa' alone is a greeting")
+for utt in ("Hey Tessa", "Hi Tessa", "Hello Tessa", "Tessa", "hello", "hi"):
     intent, calls, speech = route(utt)
     check(f"{utt!r} greets", intent == "presence" and bool(speech),
           f"{intent} {speech[:40]}")
@@ -185,7 +190,7 @@ for when, words in TIMES:
           any(w in said for w in words), said)
 
 print("\n   a command after the phrase gets NO greeting")
-for utt in ("Hey Zoey, open my downloads", "Hey Zoey, open chrome"):
+for utt in ("Hey Tessa, open my downloads", "Hey Tessa, open chrome"):
     _i, calls, speech = route(utt)
     check(f"{utt!r} acts", bool(calls), str(calls))
     check("...with no greeting in front",

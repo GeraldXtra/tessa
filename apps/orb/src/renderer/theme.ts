@@ -1,5 +1,5 @@
 /**
- * The five themes, and the one place the accent is injected.
+ * The six themes, and the one place the accent is injected.
  *
  * ─────────────────────────────────────────────────────────────────────────────
  * READ THIS BEFORE TREATING tokens.json AS AUTHORITATIVE
@@ -12,8 +12,8 @@
  *
  * That is deliberate and it is the owner's ruling. Runtime theming cannot come
  * from a build-time CSS file: there is exactly one generated `:root` block, and
- * five palettes the owner switches between with a keystroke. The alternative —
- * five pre-generated stylesheets swapped at runtime — moves the same override
+ * six palettes the owner switches between with a keystroke. The alternative —
+ * six pre-generated stylesheets swapped at runtime — moves the same override
  * somewhere less visible without removing it.
  *
  * What this costs, stated plainly so nobody rediscovers it as a bug:
@@ -21,12 +21,12 @@
  *   • Reading `--accent` out of `dist/tokens.css` tells you the DEFAULT, not
  *     what is on screen. Read the computed style instead (design-tokens.ts).
  *   • A `--accent` value edited in tokens.json will not change the Orb's
- *     accent, because every theme — including cyan, the default — overwrites
+ *     accent, because every theme — including gold, the default — overwrites
  *     it. To retune the Orb's accent, edit `theme-<name>-body`.
  *
  * What it does NOT touch, and must never: the alarm colours. `--status-error`,
  * `--status-warn`, `--status-active` and `--status-idle` are absent from THEMED
- * by design. SENTINEL red stays red under all five themes, and CONTRACT §4.1's
+ * by design. SENTINEL red stays red under all six themes, and CONTRACT §4.1's
  * "Orb renders [blocked] amber and static" survives a theme switch — a surface
  * where the alarm hue is a preference is a surface with no alarm.
  * ─────────────────────────────────────────────────────────────────────────────
@@ -34,11 +34,49 @@
 
 import { tokenValue } from './design-tokens.ts';
 
-/** Closed set, in shortcut order. Cyan is the default and the fallback. */
-export const THEME_IDS = ['cyan', 'amber', 'violet', 'emerald', 'ember'] as const;
+/**
+ * Closed set. GOLD is the default and the fallback.
+ *
+ * ─── why gold, and why this one is NOT measured ───
+ * Every other palette in this file was fitted to something. Gold cannot be:
+ * all sixteen reference images are magenta and all sixteen are photographs, so
+ * the reference has nothing to say about it. Gold is a colour the owner named
+ * by word. So WEB GOLD is taken as GIVEN, the ladder is derived from its own
+ * hue (50.6 degrees, held through all three steps), and what is checked is the
+ * OUTPUT: contrast on the black stage, and distance from the two things he
+ * ruled out. He was explicit that it must not read orange.
+ *
+ * (Hashes are omitted below so this comment does not itself trip the
+ * no-hard-coded-colour gate. The values are in tokens.json, which is the only
+ * place a colour may live.)
+ *
+ *   step   token             contrast   dE to --accent orange   dE to metallic
+ *   core   theme-gold-core    17.10:1            39.7                 13.9
+ *   body   theme-gold-body    14.97:1            37.6                 11.4
+ *          (web gold itself, unaltered)
+ *   idle   theme-gold-idle     6.54:1            31.2                 10.9
+ *
+ * A CIEDE2000 of 2.3 is the just-noticeable difference; 30+ is a different
+ * colour by any measure. It does not read orange, and it is not the metallic
+ * gold he also rejected.
+ *
+ * ─── amber and ember are GONE, and yellow was never added ───
+ * His ruling. Amber and ember are removed outright rather than hidden, and
+ * yellow is dropped because at hue 51 it is gold — the two would have been the
+ * same palette under two names. Purple/gold is withdrawn. Six remain: gold,
+ * magenta, cyan, violet, emerald, red.
+ *
+ * ─── what happens to a stored theme that no longer exists ───
+ * `amber` and `ember` are still real strings in his config file if he ever
+ * chose them. `loadTheme` in main/theme-state.ts refuses any id not in this
+ * list, falls back to gold, and LOGS the refused value verbatim — a silent
+ * fallback would look like a chosen colour, which is exactly how a previous
+ * round lost a day to a stored `amber`.
+ */
+export const THEME_IDS = ['gold', 'magenta', 'cyan', 'violet', 'emerald', 'red'] as const;
 export type ThemeId = (typeof THEME_IDS)[number];
 
-export const DEFAULT_THEME: ThemeId = 'cyan';
+export const DEFAULT_THEME: ThemeId = 'gold';
 
 export function isThemeId(value: unknown): value is ThemeId {
   return typeof value === 'string' && (THEME_IDS as readonly string[]).includes(value);
@@ -46,19 +84,21 @@ export function isThemeId(value: unknown): value is ThemeId {
 
 /**
  * Ctrl+Shift+<letter>. Renderer-local, NOT a `globalShortcut` — these are a
- * personal display preference, and taking five OS-wide chords away from every
+ * personal display preference, and taking six OS-wide chords away from every
  * other application for that would be indefensible.
  *
- * `emerald` and `ember` collide on E. Alphabetically `ember` sorts first, so it
- * takes E and emerald takes M, its next distinctive letter. Written down here
- * because it is the kind of arbitrary choice that looks like a typo later.
+ * The collision is gone. Amber and ember are retired, so every remaining theme
+ * takes its own initial and the arbitrary "ember sorts before emerald so it
+ * gets E" rule can be deleted. G was magenta and is now gold, which is the one
+ * remapping to be aware of.
  */
 export const THEME_SHORTCUT: Readonly<Record<string, ThemeId>> = {
+  G: 'gold',
+  M: 'magenta',
   C: 'cyan',
-  A: 'amber',
   V: 'violet',
-  M: 'emerald',
-  E: 'ember',
+  E: 'emerald',
+  R: 'red',
 };
 
 /**
@@ -73,7 +113,7 @@ export const THEME_SHORTCUT: Readonly<Record<string, ThemeId>> = {
  * the foreground, and nothing happened.
  *
  * The identical trap is already documented on the Alt+1…6 cycler in App.tsx.
- * Repeating it once is careless; leaving it would make five shortcuts
+ * Repeating it once is careless; leaving it would make six shortcuts
  * unreachable for anyone not using a physical keyboard.
  *
  * `key` is uppercased because Shift is held: the character arrives as 'M', but

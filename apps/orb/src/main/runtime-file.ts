@@ -1,5 +1,5 @@
 /**
- * Discovery of the daemon: %LOCALAPPDATA%\Zoey\runtime.json.
+ * Discovery of the daemon: %LOCALAPPDATA%\Tessa\runtime.json.
  *
  * CONTRACT §1 and §2.3. Three rules from those sections are implemented here
  * rather than assumed:
@@ -24,7 +24,7 @@ import { readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 
-import { PROTOCOL_VERSION, RUNTIME_FILE_RELATIVE } from '@zoey/protocol';
+import { PROTOCOL_VERSION, RUNTIME_FILE_RELATIVE } from '@tessa/protocol';
 
 /** `secrets.token_hex(32)` — 32 bytes, 64 lowercase hex chars (CONTRACT §2.1). */
 const TOKEN_RE = /^[0-9a-f]{64}$/;

@@ -423,7 +423,7 @@ Now wiring the aura to the real health path, including the death case.
 
 ● Update(apps\orb\src\renderer\App.tsx)
 Added 8 lines, removed 1 line
-    const offConnection = window.zoey.onConnection((status) => {
+    const offConnection = window.tessa.onConnection((status) => {
       connectionStore.set(status);
       // A dropped link must not leave a frozen uptime on screen looking live.
       if (status.phase !== 'connected') healthStore.set(null);
@@ -435,7 +435,7 @@ Added 8 lines, removed 1 line
         applyAura(null);
       }
     });
-    const offHealth = window.zoey.onHealth((health) => {
+    const offHealth = window.tessa.onHealth((health) => {
       healthStore.set(health);
       pushHealthSample(health);
       applyAura(health);
@@ -730,4 +730,4 @@ All compiles. Now the measurement campaign — starting with the card, since it'
 
 ✻ Sautéed for 56m 34s
 
-※ recap: Building the Orb's approval card and theming for ZOEY_OS; the card's edit-then-approve path is wired and verified on the wire, but can't run end to end because no non-voice trigger exists to create a pending approval. Next: await your ruling on the three ambient proposals. (disable recaps in /config)
+※ recap: Building the Orb's approval card and theming for TESSA_CORE; the card's edit-then-approve path is wired and verified on the wire, but can't run end to end because no non-voice trigger exists to create a pending approval. Next: await your ruling on the three ambient proposals. (disable recaps in /config)

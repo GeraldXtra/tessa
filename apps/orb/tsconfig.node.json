@@ -30,7 +30,7 @@
     "electron.vite.config.ts"
   ],
   "$comment": [
-    "allowImportingTsExtensions is REQUIRED, not stylistic. @zoey/protocol's entry point is raw",
+    "allowImportingTsExtensions is REQUIRED, not stylistic. @tessa/protocol's entry point is raw",
     "TypeScript (packages/protocol/src/index.ts) and it imports './enums.generated.ts' with the",
     "extension spelled out. Without this flag tsc refuses to follow that import. It forces",
     "noEmit: true, which is fine — electron-vite does the emitting."

@@ -48,7 +48,7 @@ try {
 
 /* ── 2. design tokens — regenerate into a temp tree and diff ──────────────── */
 
-const tmp = mkdtempSync(join(tmpdir(), 'zoey-contract-'));
+const tmp = mkdtempSync(join(tmpdir(), 'tessa-contract-'));
 try {
   const stage = join(tmp, 'tokens');
   cpSync(join(ROOT, 'packages/tokens'), stage, {

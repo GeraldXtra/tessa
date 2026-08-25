@@ -1,12 +1,12 @@
 """
-core/brain/memory.py — what Zoey has actually done, so she can say so truthfully.
+core/brain/memory.py — what Tessa has actually done, so she can say so truthfully.
 
 THIS EXISTS FOR ONE LINE:
 
     "Done, Emperor. You opened this one yourself yesterday, by the way.
      I noticed. Ask me next time."
 
-zoey.md says she is possessive of her work and notices when he did something
+tessa.md says she is possessive of her work and notices when he did something
 himself that she could have done. It also says MEMORY IS REAL ONLY — she never
 invents a recollection to seem attentive, because a fabricated small observation
 teaches him not to trust the large ones.
@@ -32,7 +32,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
-ACTION_LOG = ROOT / "data" / "zoey-actions.jsonl"
+ACTION_LOG = ROOT / "data" / "tessa-actions.jsonl"
 RECENT_DIR = Path(os.environ.get("APPDATA", "")) / "Microsoft" / "Windows" / "Recent"
 
 #: How far back a Recent shortcut still counts as "he did this himself".
@@ -47,7 +47,7 @@ class Action:
 
 
 def record(tool: str, target: str) -> None:
-    """Append one action Zoey performed. Never raises — memory must not break a turn."""
+    """Append one action Tessa performed. Never raises — memory must not break a turn."""
     try:
         ACTION_LOG.parent.mkdir(parents=True, exist_ok=True)
         with ACTION_LOG.open("a", encoding="utf-8") as fh:

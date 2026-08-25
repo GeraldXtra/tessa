@@ -243,7 +243,7 @@ class Conversation:
 # no tool and would otherwise fall through to the model, which would cheerfully
 # say it had forgotten while forgetting nothing.
 _CLEAR_RE = __import__("re").compile(
-    r"^\s*(?:zoey[\s,]*)?(?:"
+    r"^\s*(?:tessa[\s,]*)?(?:"
     r"forget (?:that|this|it|what i said|the last (?:thing|bit)|everything)|"
     r"start (?:fresh|over|again)|"
     r"clear (?:your |the )?(?:memory|context|history|conversation)|"

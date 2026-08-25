@@ -1,5 +1,5 @@
 """
-core/server.py — Zoey Core daemon: the local WebSocket server.
+core/server.py — Tessa Core daemon: the local WebSocket server.
 
 Implements CONTRACT.md §1-§5. This is the process both surfaces talk to.
 
@@ -42,7 +42,7 @@ sys.path.insert(0, str(ROOT_DIR))
 # truth shared with TypeScript. Never hand-maintain a second copy here.
 sys.path.insert(0, str(ROOT_DIR / "packages" / "protocol" / "gen" / "python"))
 
-from zoey_protocol import (  # noqa: E402
+from tessa_protocol import (  # noqa: E402
     PROTOCOL_VERSION,
     PTY_REPORT_EVENTS,
     SURFACES,
@@ -75,7 +75,7 @@ DAEMON_VERSION = "0.1.0"
 #: CONTRACT §4.1 keys `evt.agent.state`, `evt.transcript.*` and the companion
 #: roster by `companionId`. One companion exists today; naming it explicitly now
 #: is what stops the field being invented later, per-call and inconsistently.
-DEFAULT_COMPANION_ID = "zoey"
+DEFAULT_COMPANION_ID = "tessa"
 PREFERRED_PORT = 47600
 PORT_SCAN_LIMIT = 20
 
@@ -108,7 +108,7 @@ REVOKE_CONFIRM_TIMEOUT_S = 10.0
 # releases the sphere, so a hang is legible in one minute instead of twelve.
 VOICE_TURN_STALL_S = 60.0
 WS_PATH = "/v1"
-ALLOWED_ORIGINS = frozenset({"zoey://console", "zoey://orb"})
+ALLOWED_ORIGINS = frozenset({"tessa://console", "tessa://orb"})
 HANDSHAKE_DEADLINE_S = 3.0
 MAX_FRAME_BYTES = 1024 * 1024
 
@@ -130,6 +130,10 @@ KNOWN_COMMANDS = frozenset({
     "cmd.fs.list", "cmd.fs.watch", "cmd.fs.unwatch", "cmd.fs.reveal",
     "cmd.window.spawnAt",
     "cmd.voice.mute", "cmd.voice.pushToTalk", "cmd.voice.setVoice", "cmd.scene.setMode",
+    # ADDITIVE under CONTRACT §7.2 — a new cmd.* type does not bump
+    # PROTOCOL_VERSION, because §3.2 requires unknown types to be ignored. The
+    # §8 table entry is Gerald's to add; the diff is in the report.
+    "cmd.calendar.today",
 })
 
 _ULID_ALPHABET = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
@@ -195,7 +199,12 @@ def topic_matches(subscriptions: Iterable[str], msg_type: str) -> bool:
 # ── daemon ────────────────────────────────────────────────────────────────────
 
 
-class ZoeyDaemon:
+#: The timezone today's calendar events are shown in. Lagos, UTC+1, no DST.
+#: A surface may override it per request; this is only the default.
+CALENDAR_TZ = "Africa/Lagos"
+
+
+class TessaDaemon:
     def __init__(self, *, dev: bool = False) -> None:
         self.dev = dev
         self.token = rt.new_token()
@@ -514,6 +523,8 @@ class ZoeyDaemon:
             "cmd.audit.query": self._h_audit_query,
             "cmd.permission.respond": self._h_permission_respond,
             "cmd.voice.pushToTalk": self._h_voice_push_to_talk,
+            "cmd.agent.message": self._h_agent_message,
+            "cmd.calendar.today": self._h_calendar_today,
         }.get(mtype)
 
         if handler is None:
@@ -530,6 +541,65 @@ class ZoeyDaemon:
 
     async def _h_ping(self, ws, state, payload, corr) -> None:
         await ws.send(envelope("res.pong", {}, corr=corr))
+
+    async def _h_calendar_today(self, ws, state, payload, corr) -> None:
+        """
+        Today's events for the Orb's TODAY panel. READ-ONLY, always.
+
+        THE PANEL SHOWS WHAT IS TRUE OR IT SAYS SO. Three states, and the
+        payload distinguishes all three without the surface having to guess:
+
+            connected=true,  events=[...]   -> render them
+            connected=true,  events=[]      -> "No events today" (a REAL answer)
+            connected=false, reason="..."   -> "Not connected", and why
+
+        `stale` plus `ageSeconds` cover the fourth case that is not a state:
+        connected, but these are cached events served because the network is
+        down. The panel can then say how old they are instead of implying they
+        are current.
+
+        The fetch is BLOCKING httpx and runs in a thread, because the daemon's
+        event loop also carries the PTY grant path and the voice pipeline — a
+        20-second Google timeout on the loop would stall both.
+        """
+        import asyncio
+
+        from core.gcal.google import GoogleCalendar
+
+        tz = str(payload.get("timezone") or CALENDAR_TZ)
+        cal = str(payload.get("calendarId") or "primary")
+        force = bool(payload.get("force"))
+
+        def _work() -> dict:
+            return GoogleCalendar(tz_name=tz, calendar_id=cal).today(force=force).to_payload()
+
+        try:
+            result = await asyncio.to_thread(_work)
+        except Exception as e:  # noqa: BLE001 — a panel must never see a traceback
+            log(f"calendar.today failed: {type(e).__name__}: {e}")
+            result = {
+                "connected": False, "events": [], "total": 0, "truncated": False,
+                "fetchedAt": "", "ageSeconds": 0, "stale": False, "date": "",
+                "timezone": tz, "tzSource": "", "calendarId": cal,
+                "reason": "internal", "detail": f"{type(e).__name__}: {e}", "flagged": [],
+            }
+
+        # EVENT TITLES ARE EXTERNAL CONTENT (CONTRACT §6.1). Anything the
+        # detector fired on is recorded in the audit log — reported, never
+        # obeyed. The titles themselves are not written to the log: they are his
+        # private calendar, and the audit file is not the place for them.
+        if result.get("flagged"):
+            self.audit.append(
+                actor="system", tool="calendar.today", tier="none",
+                summary=(
+                    f"{len(result['flagged'])} injection pattern(s) in today's calendar "
+                    f"titles - treated as data"
+                ),
+                detail={"patterns": result["flagged"], "calendarId": cal},
+                provenance="external",
+            )
+
+        await ws.send(envelope("res.calendar.today", result, corr=corr))
 
     async def _h_subscribe(self, ws, state, payload, corr) -> None:
         topics = payload.get("topics") or []
@@ -656,8 +726,12 @@ class ZoeyDaemon:
         self.audit.append(
             actor=actor, tool="pty.spawn", tier=decision.tier or "green",
             summary=f"Granted shell '{profile_id}' in {cwd} (ttl {self.registry.ttl_s:.0f}s)",
+            # profileId is STRUCTURED here, not only inside the summary prose.
+            # "Granted shell 'gitbash' in ..." could already answer which shell
+            # ran something, but only by regex-parsing a human sentence. A field
+            # is what makes `audit.query` able to answer it.
             detail={"grantId": grant_id, "sessionId": session_id, "cwd": cwd,
-                    "expiresAt": expires_at},
+                    "profileId": profile_id, "expiresAt": expires_at},
             provenance=actor,
         )
         await ws.send(envelope("res.pty.grant", {
@@ -1111,6 +1185,160 @@ class ZoeyDaemon:
         log(f"!! REVOKE UNSATISFIED session={session_id[:8]} - no killed report in "
             f"{REVOKE_CONFIRM_TIMEOUT_S:.0f}s (audit seq {entry['seq']})")
 
+    def _text_agent(self):
+        """
+        The Router and Executor a typed turn uses.
+
+        REUSED FROM THE VOICE LOOP WHEN ONE EXISTS, and that is the point rather
+        than an optimisation. Sharing the Executor means sharing the injection
+        fence, the confirmation holds and the confirm ledger — so a hold opened
+        by voice can be answered by keyboard, which is ruling 2 at the level
+        that actually matters.
+
+        Built standalone when the daemon runs without `--voice`, because typed
+        chat must not depend on a microphone being present.
+        """
+        if self.voice is not None:
+            return self.voice.router, self.voice.executor
+        if getattr(self, "_typed_pair", None) is None:
+            from core.brain.executor import Executor
+            from core.brain.router import Router
+            loop_ref = asyncio.get_running_loop()
+            ex = Executor(
+                session=self.session, audit=self.audit,
+                on_permission_request=lambda pl: asyncio.run_coroutine_threadsafe(
+                    self.broadcast("evt.permission.request", pl), loop_ref),
+            )
+            self._typed_pair = (
+                Router(health_sample=lambda: self.health.sample(
+                    budget_spent=self.ledger.spent_today(),
+                    budget_cap=self.budget_cap)),
+                ex,
+            )
+        return self._typed_pair
+
+    async def _h_agent_message(self, ws, state, payload, corr) -> None:
+        """
+        A TYPED TURN. CONTRACT §7.2 additive — see the report's proposed diff.
+
+        Everything a spoken turn does except the microphone and Piper:
+        the router first, the brain for what it cannot place, the same memory,
+        the same tiers, the same fence.
+
+        SPEAKER VERIFICATION IS NOT RUN, deliberately. It gates the MICROPHONE,
+        because a voice in the room is not proof of who is speaking. A keyboard
+        in an authenticated session already carries that proof — the socket
+        passed the per-launch token and the Origin check at `cmd.hello`. Running
+        it here would fail closed with no voiceprint and lock him out of his own
+        Console for a reason that does not apply.
+        """
+        text = str(payload.get("text") or "").strip()
+        if not text:
+            await ws.send(envelope("err.validation", {
+                "code": "validation", "message": "text is required", "retryable": False,
+            }, corr=corr))
+            return
+
+        # HIS LINE GOES OUT FIRST, so the pane can render it before she thinks.
+        # Broadcast rather than replied, so a spoken turn and a typed turn land
+        # on the SAME event and every subscribed surface sees one thread.
+        await self.broadcast("evt.transcript.message", {
+            "companionId": DEFAULT_COMPANION_ID,
+            "message": {"messageId": ulid(), "role": "user",
+                        "text": text, "ts": now_iso(), "via": "typed"},
+        })
+
+        router, executor = self._text_agent()
+        loop_ref = asyncio.get_running_loop()
+
+        def _state(s: str) -> None:
+            asyncio.run_coroutine_threadsafe(
+                self.broadcast("evt.agent.state",
+                               {"companionId": DEFAULT_COMPANION_ID, "state": s}),
+                loop_ref)
+
+        from core.brain.typed_turn import run_typed_turn
+
+        try:
+            turn = await asyncio.to_thread(
+                run_typed_turn, text,
+                router=router, executor=executor, brain=self.brain,
+                conversation=self.conversation, on_state=_state, log=log,
+            )
+        except Exception as exc:  # noqa: BLE001 — a pane must never see a traceback
+            log(f"!! typed turn failed: {type(exc).__name__}: {exc}")
+            self.audit.append(
+                actor="human", tool="agent.message", tier="amber",
+                summary=f"typed turn failed: {type(exc).__name__}",
+                detail={"via": "typed", "error": str(exc)[:200]}, provenance="human",
+            )
+            await self.broadcast("evt.agent.state",
+                                 {"companionId": DEFAULT_COMPANION_ID, "state": "idle"})
+            await ws.send(envelope("res.agent.message",
+                                   {"accepted": True, "ok": False}, corr=corr))
+            return
+
+        # A TYPED TURN COUNTS AS A TURN. The session's turn counter is shared
+        # with voice under ruling 2, so a conversation he continues by keyboard
+        # does not look abandoned in the closing audit line.
+        if turn.heard or turn.said:
+            self.convo.note_turn()
+
+        said = turn.said
+
+        # ── RULING 3: RED POINTS AT THE ORB, AND SAYS SO IN THE RIGHT WORDS ──
+        #
+        # The shared refusal sentence ends "I am not doing it on your voice
+        # alone", which is true for a spoken turn and simply wrong for one he
+        # typed. It is rewritten here rather than in approvals.py so the voice
+        # wording is untouched — and the honest half is the second sentence:
+        # if the Orb is not connected there is no card to approve on, and
+        # telling him to check one would send him looking for a window that is
+        # not open.
+        if turn.awaiting_approval:
+            orb_up = any(
+                (st.get("surface") == "orb") and st.get("authed")
+                for st in self.clients.values()
+            )
+            head = said.split(" I am not doing it")[0].strip()
+            if orb_up:
+                said = (f"{head} That one needs your approval, Emperor. "
+                        f"The card is on the Orb — approve it there and I will run it.")
+            else:
+                said = (f"{head} That one needs your approval, Emperor, and the Orb "
+                        f"is not open. Start it and ask me again, and the card will "
+                        f"be waiting for you.")
+
+        if said:
+            await self.broadcast("evt.transcript.message", {
+                "companionId": DEFAULT_COMPANION_ID,
+                "message": {"messageId": ulid(), "role": "assistant",
+                            "text": said, "ts": now_iso(), "via": "typed"},
+            })
+
+        # THE AUDIT ENTRY NAMES THE KEYBOARD. `via` distinguishes it from voice
+        # without a contract change: `detail` is a free-form object, the same
+        # route `profileId` took for the PTY grant.
+        self.audit.append(
+            actor="human", tool="agent.message", tier="green",
+            summary=(f"typed turn: {turn.intent}"
+                     + (f", tools {', '.join(turn.tools)}" if turn.tools else "")
+                     + (", awaiting approval on the Orb" if turn.awaiting_approval else "")),
+            detail={"via": "typed", "intent": turn.intent, "tools": turn.tools,
+                    "chars": len(turn.heard), "ms": round(turn.ms),
+                    "injectionPatterns": turn.flagged},
+            provenance="human",
+        )
+        log(f"TYPED {turn.intent} in {turn.ms:.0f} ms"
+            + (f" tools={','.join(turn.tools)}" if turn.tools else ""))
+
+        await self.broadcast("evt.agent.state",
+                             {"companionId": DEFAULT_COMPANION_ID, "state": "idle"})
+        await ws.send(envelope("res.agent.message", {
+            "accepted": True, "ok": True, "intent": turn.intent,
+            "awaitingApproval": turn.awaiting_approval,
+        }, corr=corr))
+
     async def _h_voice_push_to_talk(self, ws, state, payload, corr) -> None:
         """
         CONTRACT §5.3 `cmd.voice.pushToTalk` — Orb only, reserved, no payload
@@ -1364,7 +1592,7 @@ class ZoeyDaemon:
         acted on — but the records themselves lingered until someone connected,
         which on a headless run is never.
 
-        ZOEY_OS-spec §5 rule 5: a lapsed approval is `needsReview`, not
+        TESSA_CORE-spec §5 rule 5: a lapsed approval is `needsReview`, not
         `failed`. Nothing broke; nobody answered. So each one is audited as it
         goes rather than vanishing, and the surfaces are told so a card that can
         no longer be actioned stops being shown.
@@ -1471,7 +1699,7 @@ def find_free_port(preferred: int, limit: int) -> int:
 
 
 async def main() -> None:
-    parser = argparse.ArgumentParser(description="Zoey Core daemon")
+    parser = argparse.ArgumentParser(description="Tessa Core daemon")
     parser.add_argument("--dev", action="store_true", help="verbose dev mode")
     parser.add_argument("--port", type=int, default=None)
     parser.add_argument("--voice", action="store_true",
@@ -1499,7 +1727,7 @@ async def main() -> None:
         log(f"!! REFUSING TO START — {exc}")
         return
 
-    daemon = ZoeyDaemon(dev=args.dev)
+    daemon = TessaDaemon(dev=args.dev)
     port = args.port or find_free_port(PREFERRED_PORT, PORT_SCAN_LIMIT)
     daemon.port = port
 
@@ -1529,7 +1757,7 @@ async def main() -> None:
         log(f"memory: {daemon.conversation.describe()} loaded")
 
     _persona_ok, _persona_path = persona_loaded()
-    log(f"brain: persona zoey.md {'loaded' if _persona_ok else 'MISSING'} "
+    log(f"brain: persona tessa.md {'loaded' if _persona_ok else 'MISSING'} "
         f"({len(persona_system_prompt())} chars)")
 
     for _name, _sel, _why, _usable in describe_engines(daemon.settings):
@@ -1568,6 +1796,19 @@ async def main() -> None:
     #
     # The ACL verification stays at the front, because refusing to start on a
     # world-readable token file must not cost a 17 s model load first.
+    # ── THE RENAME MIGRATION, BEFORE ANYTHING READS THAT DIRECTORY ───────────
+    #
+    # `%LOCALAPPDATA%\Zoey` -> `%LOCALAPPDATA%\Tessa`. It must run before the
+    # ACL preflight below, before the browser tool resolves its profile root,
+    # and before anything else touches the path — a half-migrated directory is
+    # the one state that loses his logged-in X session.
+    #
+    # Logged plainly, once, whether or not it did anything: a migration that
+    # runs silently is one he cannot verify happened.
+    _moved = rt.migrate_local_appdata()
+    if _moved:
+        log(f"migration: {_moved}")
+
     rt.preflight_runtime_file()
     log("runtime file: ACL verified; advertisement deferred until the socket is bound")
     log(f"allowed origins: {', '.join(sorted(ALLOWED_ORIGINS))}")
@@ -1717,7 +1958,7 @@ async def main() -> None:
         # OFF unless settings.yaml says otherwise, and off by default there,
         # because the only model that exists says "hey jarvis" rather than her
         # name. The plumbing is complete so that swapping in a Colab-trained
-        # hey_zoey.onnx is one config line and no code change.
+        # hey_tessa.onnx is one config line and no code change.
         _wake_cfg = (daemon.settings.get("voice", {}) or {}).get("wake", {}) or {}
         if _wake_cfg.get("enabled"):
             from core.voice.wake import WakeDetector, chime as _wake_chime

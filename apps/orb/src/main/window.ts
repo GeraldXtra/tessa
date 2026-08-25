@@ -25,7 +25,7 @@ import {
 // that applies to the native window chrome too, not just CSS. Reading the value
 // from packages/tokens keeps the flash-before-first-paint the same black as the
 // page it precedes.
-import tokens from '@zoey/tokens';
+import tokens from '@tessa/tokens';
 
 const BACKGROUND = tokens.color['bg-void'].value;
 

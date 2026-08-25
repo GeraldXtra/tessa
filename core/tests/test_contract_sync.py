@@ -22,7 +22,7 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "packages" / "protocol" / "gen" / "python"))
 
-import zoey_protocol as proto  # noqa: E402
+import tessa_protocol as proto  # noqa: E402
 from core.security import audit, guard  # noqa: E402
 
 passed = 0

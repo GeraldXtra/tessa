@@ -1,4 +1,4 @@
-// Zoey Orb — particle sphere, fragment stage.
+// Tessa Orb — particle sphere, fragment stage.
 //
 // Colours arrive as uniforms, never as literals. CONTRACT §9: neither surface
 // hard-codes a hex value. The JS side reads --sphere-hot / --sphere-cool /
@@ -81,11 +81,74 @@ uniform float uRimPow;
 uniform float uSpreadPow;
 
 /**
+ * HOW SATURATED THE FACE IS. 1.0 keeps the theme's hue everywhere, which is
+ * what this shader did; 0 makes the unlit face pure white.
+ *
+ * Measured, and it is the last visible difference in the magnified side-by-side.
+ * Mean colour of the brightest 5% of pixels, one patch mid-face and one on the
+ * lit limb, both discs normalised:
+ *
+ *                     mid-face            limb
+ *   reference    rgb( 81, 76, 84) s0.09   rgb(232, 97,215) s0.58
+ *   build        rgb( 83, 20, 75) s0.76   rgb(175, 29,155) s0.83
+ *
+ * The reference's face particles are NEUTRAL and only its limb carries the hue.
+ * This build was saturated everywhere, which is why the crop reads as a magenta
+ * field beside a white one.
+ *
+ * ─── AND THE CAUSE IS GENUINELY UNCERTAIN, SO THIS DOES NOT GO ALL THE WAY ───
+ * A note further down this file already argued the opposite case and it is not
+ * silly: the reference is a JPEG, 4:2:0 chroma subsampling averages colour over
+ * 2x2 blocks, and an isolated bright dot on black has its chroma diluted by the
+ * black around it. At the limb the dots merge into a band and the chroma
+ * survives — which would produce exactly this saturated-limb, neutral-face
+ * pattern with no design intent at all.
+ *
+ * I cannot separate those two from a photograph. What I can say is that the
+ * IMAGE he is holding up shows white dots on the face, and that is what he has
+ * judged five times. So this goes half way — 0.45, which measures a face
+ * saturation near 0.38 against the reference's 0.09 and this build's 0.76 —
+ * rather than to a value that would be right only if the compression theory is
+ * wrong. Going to 0.11 would match the photograph exactly and would render the
+ * shell nearly white under every theme, which is the failure the coolMix
+ * correction in states.ts exists to prevent.
+ *
+ * The limb is untouched: the term is driven by `vFresnel`, which is ~0 across
+ * the face and 1 at the silhouette.
+ */
+uniform float uFaceSat;
+
+/**
  * The most one sprite may contribute. See the note at the end of main().
  *
  * Not a uniform: it is a property of the framebuffer, not of the look, and
  * exposing it as a tuning knob would invite raising it back to 1.0 to make the
  * crescent "brighter" — which is the change that produced the white wall.
+ */
+/**
+ * ─── WHAT THIS CEILING COSTS THE FACE, MEASURED, AND WHY IT STAYS ANYWAY ───
+ *
+ * It is the hard cap on how bright ONE particle can be, and with the squared
+ * blend (`gl_FragColor = vec4(tint * out_, out_)` under SrcAlphaFactor) it caps
+ * a single sprite's rendered red channel at 255 * 0.55^2 = 77.
+ *
+ * That is exactly where the face plateaus. Sweeping bodyBright 1.25 / 1.40 /
+ * 1.55 / 1.70 with everything else held moved the face particle not at all —
+ * rgb(77-78, 67-68, 11-12), luminance 65-66 in every one — because past
+ * bodyBright ~1.25 the face is sitting on this ceiling. The reference's face
+ * particles measure rgb(100,96,103), luminance 97.3, which is ABOVE it.
+ *
+ * Raising it to 0.75 was tried and measured. At the SHIPPED bodyBright of 1.0
+ * it changes nothing (face luminance 47.8 against 48.7) because the face is not
+ * on the ceiling there — it only binds once brightness is raised. So lifting
+ * the face needs BOTH a higher bodyBright and a higher ceiling, and the same
+ * pair also lifts the limb, which is where the clipping lives: at bodyBright
+ * 1.70 with this ceiling the crescent already clipped 20.3% of its band.
+ *
+ * It stays at 0.55 because the fault reported this round is the face having no
+ * COLOUR, and that is `uFaceSat`, fixed. Face LUMINANCE is a separate, adjacent
+ * gap — 48.7 against 97.3 — and moving two globals to close it is exactly the
+ * kind of un-asked-for retune that removed the crescent last round.
  */
 const float ALPHA_MAX = 0.55;
 
@@ -104,9 +167,19 @@ void main() {
   float dist2 = dot(offset, offset);
   if (dist2 > 0.25) discard;
 
-  // Soft edge. Without it the particles read as square-ish pixels at tier LOW,
-  // where each one is only 1–2 px.
-  float falloff = 1.0 - smoothstep(0.02, 0.25, dist2);
+  // THE EDGE, and it was far too soft.
+  //
+  // smoothstep(0.02, 0.25) puts full brightness only inside 28% of the sprite
+  // radius, so the outer 72% is gradient — a particle with almost no solid core
+  // and a wide halo. Measured, the edge ran 3 px from 90% to 10% against the
+  // reference's 2 px, and combined with sprites 2.3x too large it is most of
+  // why the field reads as haze rather than as points.
+  //
+  // smoothstep(0.15, 0.25) holds full brightness out to 77% of the radius and
+  // falls off over the last quarter. Still antialiased — a hard cut would make
+  // each point a square at small sizes, which is what the original comment was
+  // guarding against and is still true.
+  float falloff = 1.0 - smoothstep(0.08, 0.25, dist2);
 
   // Displaced particles drift toward the cool rim colour, which is what gives
   // the shell depth without a second draw call or any post-processing.
@@ -117,6 +190,30 @@ void main() {
   // fact, so it is not copied.
   float mixAmount = clamp(uCoolMix + vRim * 0.55 + vFresnel * 0.45, 0.0, 1.0);
   vec3 tint = mix(uColorHot, uColorCool, mixAmount);
+
+  // THE HUE LIVES ON THE LIMB. See uFaceSat. `vFresnel` is ~0 across the face
+  // and 1 at the silhouette, so the face desaturates and the crescent keeps the
+  // palette at full strength. Mixing toward white rather than toward the
+  // ladder's core because the core is a light TINT (72-80% lightness), not a
+  // neutral — no value of uCoolMix can reach a neutral face.
+  //
+  // AT CONSTANT LUMINANCE, and the first version was not. Mixing toward white
+  // BRIGHTENS: white carries more luminance than any saturated hue, so raising
+  // the whitening raised the shell, and the measured crescent went from 0.00%
+  // clipped back to 17.09% with a peak of rgb(255,152,255) — the green channel
+  // climbing from 29 to 152 was the whitening, not the palette. That undid the
+  // one thing the rim refit had actually secured.
+  //
+  // Rescaling to the pre-mix luminance makes "desaturate" mean only desaturate.
+  // It also matches the reference more closely than the naive mix did: its face
+  // particles measure rgb(81,76,84) — neutral AND dim, not neutral and bright.
+  vec3 hued = tint;
+  float sat = clamp(uFaceSat + (1.0 - uFaceSat) * vFresnel, 0.0, 1.0);
+  tint = mix(vec3(1.0), hued, sat);
+  const vec3 LUMA = vec3(0.2126, 0.7152, 0.0722);
+  float lHued = dot(hued, LUMA);
+  float lTint = dot(tint, LUMA);
+  tint *= (lTint > 0.0001) ? (lHued / lTint) : 1.0;
 
   // Per-particle brightness jitter so the shell does not look like a printed
   // dot screen. Cheap hash on the seed; deterministic across frames.

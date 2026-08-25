@@ -2,7 +2,7 @@
 core/telemetry/cost.py — the spend ledger behind `evt.daemon.health.budgetSpent`.
 
 CONTRACT §4.1 ships `budgetSpent` and `budgetCap` on every heartbeat, and
-ZOEY_OS-spec §6 makes the nightly cap a **hard stop, not a warning**. A hard stop
+TESSA_CORE-spec §6 makes the nightly cap a **hard stop, not a warning**. A hard stop
 can only be enforced against a real running total, so this is a persisted,
 date-keyed ledger rather than a number.
 

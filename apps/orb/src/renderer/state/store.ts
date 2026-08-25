@@ -13,7 +13,7 @@
 
 import { useSyncExternalStore } from 'react';
 
-import type { AgentState } from '@zoey/protocol';
+import type { AgentState } from '@tessa/protocol';
 
 import type {
   AuditEntry,
@@ -23,6 +23,7 @@ import type {
   OrbNotification,
   PtySession,
   SphereTier,
+  CalendarToday,
   TranscriptLine,
   TurnTiming,
 } from '../../shared/ipc-contract.ts';
@@ -106,6 +107,21 @@ export const connectionStore = createStore<ConnectionStatus>({ phase: 'offline' 
 export const healthStore = createStore<DaemonHealth | null>(null);
 
 /**
+ * EIGHT RAILS NOW, because the panels no longer live on the stage.
+ *
+ * His ruling: "I want the panel to not be visible until there's something
+ * active, then it shows, or I click them to show. I don't want it to be showing
+ * when Tessa is open." The rails are already the open-it-by-hand mechanism, so
+ * the three stage panels move behind them rather than growing a second idiom:
+ *
+ *   PULSE   the telemetry column, topology and latency trace. These were
+ *           mounted NOWHERE after the last rebuild — a loose end I named and
+ *           did not close. This closes it.
+ *   JOBS    the status card AND the jobs list. They are one question — what is
+ *           she doing — and Active/Done/Companions is the header of that list
+ *           rather than a panel of its own.
+ *   CHAT    the typed conversation's shape.
+ *
  * The rails, §R.3. Order is fixed and is the order they render.
  *
  * These replace AGENDA / JOBS / TRANSCRIPT wholesale. Those three were built
@@ -120,7 +136,16 @@ export const healthStore = createStore<DaemonHealth | null>(null);
  * the three proposals in full and for why that is a different thing from the
  * three permanently-empty rails that were cut last round.
  */
-export const RAIL_IDS = ['trace', 'sentinel', 'arsenal', 'recall', 'signal'] as const;
+export const RAIL_IDS = [
+  'trace',
+  'sentinel',
+  'pulse',
+  'jobs',
+  'chat',
+  'arsenal',
+  'recall',
+  'signal',
+] as const;
 export type RailId = (typeof RAIL_IDS)[number];
 
 /** Exactly one rail open, or none. §R.7 — one drawer at a time below 1600px. */
@@ -202,6 +227,12 @@ export const micStore = createStore<MicState>({
  * its half — the renderer draws nothing at all rather than an empty chart.
  */
 export const turnTimingStore = createStore<TurnTiming | null>(null);
+
+/**
+ * `res.calendar.today`. Null until the daemon answers — which is a FOURTH
+ * condition, distinct from all three the payload encodes, and drawn as neither.
+ */
+export const calendarStore = createStore<CalendarToday | null>(null);
 
 /** TRACE: completed transcript lines, oldest first. */
 export const transcriptStore = createStore<readonly TranscriptLine[]>([]);

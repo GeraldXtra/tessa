@@ -57,7 +57,7 @@ async def main(session_id: str) -> int:
 
     async with websockets.connect(
         f"ws://127.0.0.1:{info['port']}/v1",
-        additional_headers={"Origin": "zoey://console"},
+        additional_headers={"Origin": "tessa://console"},
         open_timeout=5,
     ) as ws:
         await ws.send(env("cmd.hello", {

@@ -31,9 +31,10 @@ import {
   type PttMode,
   type Snapshot,
   type AgentStatePush,
+  type CalendarToday,
   type TranscriptLine,
   type TurnTiming,
-  type ZoeyBridge,
+  type TessaBridge,
 } from '../shared/ipc-contract.ts';
 
 /**
@@ -53,7 +54,7 @@ function subscribe<T>(channel: string) {
   };
 }
 
-const bridge: ZoeyBridge = {
+const bridge: TessaBridge = {
   bootstrap: (): Promise<BootstrapInfo> => ipcRenderer.invoke(IPC.bootstrap),
 
   getConnection: (): Promise<ConnectionStatus> => ipcRenderer.invoke(IPC.getConnection),
@@ -73,6 +74,14 @@ const bridge: ZoeyBridge = {
     ipcRenderer.on(IPC.healthChanged, handler);
     return () => {
       ipcRenderer.off(IPC.healthChanged, handler);
+    };
+  },
+
+  onCalendarToday: (listener: (today: CalendarToday) => void): (() => void) => {
+    const handler = (_e: IpcRendererEvent, today: CalendarToday) => listener(today);
+    ipcRenderer.on(IPC.calendarToday, handler);
+    return () => {
+      ipcRenderer.off(IPC.calendarToday, handler);
     };
   },
 
@@ -169,4 +178,4 @@ const bridge: ZoeyBridge = {
   reportMetrics: (line: string): void => ipcRenderer.send(IPC.devMetrics, String(line).slice(0, 400)),
 };
 
-contextBridge.exposeInMainWorld('zoey', bridge);
+contextBridge.exposeInMainWorld('tessa', bridge);

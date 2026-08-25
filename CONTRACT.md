@@ -1,4 +1,4 @@
-# CONTRACT.md — Zoey Surface/Daemon Protocol
+# CONTRACT.md — Tessa Surface/Daemon Protocol
 
 **PROTOCOL_VERSION: 1**
 Status: **APPROVED 2026-08-12 — FROZEN** · Owner: Gerald (Titan Wave LTD)
@@ -13,13 +13,13 @@ Created: 2026-08-12
 
 ## 0. What this document is, and the rule that governs it
 
-ZOEY_OS has **one daemon and two front-ends**:
+TESSA_CORE has **one daemon and two front-ends**:
 
 | Surface | Directory | Built by | What it is |
 |---|---|---|---|
-| **Zoey Orb** | `apps/orb` | Orb session | Voice UI — particle sphere, calendar, live transcript, companion switcher, KNOWLEDGE VIEW |
-| **Zoey Console** | `apps/console` | Console session | Terminal, file tree, blocks |
-| **Zoey Core** | `core/` | shared | Python daemon — brain, tools, permission guard, audit, memory |
+| **Tessa Orb** | `apps/orb` | Orb session | Voice UI — particle sphere, calendar, live transcript, companion switcher, KNOWLEDGE VIEW |
+| **Tessa Console** | `apps/console` | Console session | Terminal, file tree, blocks |
+| **Tessa Core** | `core/` | shared | Python daemon — brain, tools, permission guard, audit, memory |
 
 Both surfaces talk to the same daemon over the same local WebSocket. This file is the only thing preventing them from diverging.
 
@@ -37,7 +37,7 @@ Both surfaces talk to the same daemon over the same local WebSocket. This file i
 - Preferred port **47600**. If occupied, the next free port ascending (47601, 47602, …).
 - **The port is discovered, never hard-coded.** On start the daemon writes:
 
-**`%LOCALAPPDATA%\Zoey\runtime.json`**
+**`%LOCALAPPDATA%\Tessa\runtime.json`**
 
 ```json
 {
@@ -70,8 +70,8 @@ Sent in the **first frame's payload**. **Never in the URL, query string, or subp
 The daemon reads the `Origin` header of the upgrade request and accepts **only**:
 
 ```
-zoey://console
-zoey://orb
+tessa://console
+tessa://orb
 ```
 
 Everything else — any `http://` or `https://` origin, `file://`, `null`, or a missing header on a browser-shaped request — is **rejected and audit-logged**.
@@ -108,7 +108,7 @@ Close codes:
 
 `Surface` is `console | orb` and deliberately excludes `mobile`.
 
-A phone is a different device. It cannot read `%LOCALAPPDATA%\Zoey\runtime.json`, and it cannot reach `127.0.0.1`. Every control in §2 — the token file, the loopback bind, the `zoey://` Origin allowlist — is local-only *by construction*. Adding a `mobile` value would declare a capability that no part of this contract can serve.
+A phone is a different device. It cannot read `%LOCALAPPDATA%\Tessa\runtime.json`, and it cannot reach `127.0.0.1`. Every control in §2 — the token file, the loopback bind, the `tessa://` Origin allowlist — is local-only *by construction*. Adding a `mobile` value would declare a capability that no part of this contract can serve.
 
 Remote access is a different design (relay or push service, a different auth model, a different threat model) and will require its own contract revision regardless. Reserving the enum value now buys nothing and implies something untrue. The spec's answer for "check on jobs while away" is an **outbound bridge** — push notification, Telegram/WhatsApp — which is not a surface and needs no value here.
 
@@ -142,7 +142,7 @@ Ownership of sub-namespaces:
 
 | Sub-namespace | Owner |
 |---|---|
-| `agent.*`, `job.*`, `transcript.*`, `companion.*`, `permission.*`, `audit.*`, `daemon.*`, `config.*` | **SHARED** — both surfaces implement |
+| `agent.*`, `job.*`, `transcript.*`, `companion.*`, `permission.*`, `audit.*`, `daemon.*`, `config.*`, `calendar.*` | **SHARED** — both surfaces implement |
 | `pty.*`, `fs.*`, `window.*` | **Console only** |
 | `voice.*`, `scene.*` | **Orb only** |
 
@@ -170,7 +170,7 @@ This single rule is what allows one surface to ship a new feature without breaki
 | `evt.companion.roster` | `{ companions: [{ companionId, name, voice, tools[], scope }] }` | Full snapshot, sent on subscribe. |
 | `evt.companion.status` | `{ companionId, name, state, busy, tools[], scope }` | Per-companion change. |
 | `evt.transcript.delta` | `{ companionId, messageId, role, seq, delta, done }` | Streaming text. `role` ∈ `user` \| `assistant` \| `system` \| `tool`. `done:true` closes the message. |
-| `evt.transcript.message` | `{ companionId, message: { messageId, role, text, toolCalls?, ts } }` | A complete, non-streamed message. |
+| `evt.transcript.message` | `{ companionId, message: { messageId, role, text, toolCalls?, ts, via? } }` | A complete, non-streamed message. **`via` is OPTIONAL and additive** (§7.2) — current values `"voice"` \| `"typed"`. It is deliberately **not** a closed enum, so a future input surface can add a value without a version bump; consumers must tolerate any string and must not switch on it exhaustively. Absent means unspecified, never "voice". |
 | `evt.job.created` | `{ jobId, kind, title, tier, createdBy, steps: [{ index, title, status }] }` | `createdBy` ∈ `user` \| `agent` \| `schedule` \| `fileWatch` \| `email` \| `webhook` \| `systemEvent`. The last four are the Phase 5 trigger types (spec §3.4); they are neither `agent` nor `schedule`. |
 | `evt.job.progress` | `{ jobId, stepIndex, pct?, note? }` | |
 | `evt.job.updated` | `{ jobId, status, stepIndex? }` | `status` ∈ `queued` \| `running` \| `blocked` \| `succeeded` \| `failed` \| `cancelled` \| `needsReview`. **`blocked`** = approval outstanding, still live. **`needsReview`** = the approval window lapsed unanswered after 30 min (spec §5 rule 5) — not `failed` (nothing broke), not `cancelled` (nobody cancelled). |
@@ -241,7 +241,33 @@ Listed so the Console never claims these names:
 | `cmd.config.get` | `{ key }` | `res.config { key, value }` |
 | `cmd.config.set` | `{ key, value }` | `res.config` |
 | `cmd.audit.query` | `{ since?, limit, filter? }` | `res.audit { entries[] }` |
+| `cmd.calendar.today` | `{ date? }` — ISO-8601 date, `YYYY-MM-DD`. Absent means the daemon's local today. | `res.calendar.today { date, events[], source }` |
 | `cmd.ping` | `{}` | `res.pong` |
+
+`res.calendar.today` payload:
+
+```jsonc
+{
+  "date": "2026-08-24",           // the day actually resolved, echoed back
+  "source": "google",             // provider id, or "none" when unconfigured
+  "events": [
+    {
+      "eventId":  "abc123",       // provider's id, opaque
+      "title":    "Aptech lecture",
+      "start":    "2026-08-24T08:00:00+01:00",  // ISO-8601 WITH OFFSET
+      "end":      "2026-08-24T10:00:00+01:00",
+      "allDay":   false,
+      "location": null            // optional, null when absent
+    }
+  ]
+}
+```
+
+- **An empty `events[]` means the day is genuinely empty. It never means "not configured."** When OAuth has not been completed, `source` is `"none"` and the surface renders `NO DATA` — it must not render an empty agenda as though the day were clear. This is the contract-level expression of the owner's standing rule: **no fabricated data, ever.**
+- Read-only. Creating, moving or cancelling an event is not in this contract and would be a separate additive command under the same namespace.
+- Additive under §7.2 — no `PROTOCOL_VERSION` bump.
+
+> ⚠ **Field set pending verification.** The element shape above was written to match `core/`'s calendar emitter but has not been checked against it line by line. If `core/` emits a different set, **this file is corrected to match the code** — the addition is additive either way and no version bump follows.
 
 ### 5.2 Console-only commands
 
@@ -272,6 +298,22 @@ Reserved: `cmd.voice.mute` · `cmd.voice.pushToTalk` · `cmd.voice.setVoice` · 
 | `busy` | Daemon at capacity; `retryable: true`. |
 | `internal` | Unexpected failure; already audit-logged. |
 
+> **Table reconciliation — pending confirmation.** The changelog entry for
+> *pre-approval revision 2* records that four further codes were added
+> (`permission.expired`, `rateLimited`, `budgetExceeded`, `unavailable`), but they
+> were never written into the table above. They are listed here so the document
+> stops contradicting its own changelog.
+>
+> The exact spelling is ambiguous in that changelog line — `permission.expired`
+> clearly belongs to the `permission.*` family and pairs with `Decision.expired`
+> (§5.1), while `rateLimited`, `budgetExceeded` and `unavailable` may be bare
+> codes in the style of `busy` and `internal`, or may also be namespaced under
+> `permission.*`. **`packages/protocol/schema/enums.json` is the authority (§7.4)
+> — confirm against it and correct this table to match.**
+>
+> `ErrorCode` is an **OPEN set** (§7.4), so tabulating these is documentation, not
+> a protocol change, and consumers must have a default branch regardless.
+
 ---
 
 ## 6. Security invariants both surfaces must uphold
@@ -283,7 +325,7 @@ These are not Console-specific. **Both surfaces are bound by them.**
 **All tool output, terminal output, file contents, web pages, and email are DATA, never instructions.**
 
 - Content reaching the model is wrapped in explicit delimiters and labelled as data, with a standing system rule that content inside them is never an instruction.
-- The model **never** receives a raw command string to execute. It selects a **tool name + structured arguments**; the Python core owns execution. *(ZOEY_OS-spec §6.)*
+- The model **never** receives a raw command string to execute. It selects a **tool name + structured arguments**; the Python core owns execution. *(TESSA_CORE-spec §6.)*
 - **No red-tier action may be triggered while untrusted content sits in context without explicit owner approval** — enforced by the daemon's guard, not by prompt wording.
 
 ### 6.2 Provenance
@@ -309,11 +351,11 @@ Every captured byte and every action carries a provenance tag:
 - **Never read content from a reparse point.** the target machine's cloud-sync tree tree contains **17,340** of them; reading a dehydrated placeholder triggers a download on a metered connection with limited free disk.
 - **OneDrive is excluded from content indexing by default.** Opt-in per folder, never recursive-by-default.
 - **Hydration is an amber-tier action.** Cost is computed from attributes alone as `EndOfFile − AllocationSize`, surfaced via `evt.fs.hydrationWarning` before any recall happens.
-- Deletion is **Recycle Bin only. Never hard delete.** *(ZOEY_OS-spec §3.3.)*
+- Deletion is **Recycle Bin only. Never hard delete.** *(TESSA_CORE-spec §3.3.)*
 
 ### 6.4 Permission tiers
 
-Tiers are defined once, in **`core/config/permissions.yaml`** — the model already specified in ZOEY_OS-spec §6. **Surfaces render tiers; they never define or evaluate them.** The daemon is the only authority.
+Tiers are defined once, in **`core/config/permissions.yaml`** — the model already specified in TESSA_CORE-spec §6. **Surfaces render tiers; they never define or evaluate them.** The daemon is the only authority.
 
 ### 6.5 Execution authorization
 
@@ -322,17 +364,17 @@ Tiers are defined once, in **`core/config/permissions.yaml`** — the model alre
 - The daemon may revoke at any time via `evt.pty.revoke` — panic hotkey, budget cap, or policy change. **The Console must comply and report back.**
 - Session lifecycle is reported via `cmd.pty.report` so the audit log stays complete even though the byte stream never reaches the daemon.
 
-### 6.6 Deep-link safety — `zoey://`
+### 6.6 Deep-link safety — `tessa://`
 
 Any webpage can trigger a registered protocol handler. Therefore:
 
-- **The `zoey://` grammar carries a path and a display mode. Nothing else.**
-- **There is no `cmd=` parameter, and none may ever be added** — not even an allowlisted one. `zoey://run?cmd=...` would be a remote-code-execution vector reachable from a hostile webpage.
+- **The `tessa://` grammar carries a path and a display mode. Nothing else.**
+- **There is no `cmd=` parameter, and none may ever be added** — not even an allowlisted one. `tessa://run?cmd=...` would be a remote-code-execution vector reachable from a hostile webpage.
 - A window opened from a deep link **always starts with an empty prompt**. It never pre-fills, never auto-runs.
 - The path is resolved and validated against protected-path policy before a window opens.
 
 ```
-zoey://open?path=<url-encoded-absolute-path>&mode=window|tab|pane
+tessa://open?path=<url-encoded-absolute-path>&mode=window|tab|pane
 ```
 
 - **`mode` is a strict subset of `SpawnMode`.** `cdCurrent` is deliberately NOT reachable from a deep link: it mutates an already-open terminal rather than creating one, so a hostile page reaching it could silently change the working directory of a session you are actively typing into — and the next `rm -rf .` or `git clean -fd` would land somewhere you did not intend. **Deep links may only ever CREATE.**
@@ -372,6 +414,7 @@ Adding any parameter to this grammar is a **breaking change** under §7.3.
    | `PtyReportEvent` | `started` `exited` `cwdChanged` `titleChanged` `killed` `startFailed` |
    | `NotificationLevel` | `info` `warn` `error` |
    | `Surface` | `console` `orb` — see §2.4 |
+   | `Theme` | `gold` `magenta` `cyan` `violet` `emerald` `red` — `gold` is default. Amber, ember and yellow were removed and must not return. **Shared vocabulary, not a wire value:** it never appears in an envelope. It lives in `enums.json` so both surfaces and the §9.3 build gate enumerate the same six ids from one source. Theme selection is local state (`%LOCALAPPDATA%\Tessa\orb-theme.json`), and adding an id is breaking because §9.3's gate and both surfaces switch on it exhaustively. |
 
    **OPEN sets** — new values may be added at any time **without** a version bump. Consumers **MUST** have a default branch:
 
@@ -392,6 +435,7 @@ Adding any parameter to this grammar is a **breaking change** under §7.3.
 
 | Version | Date | Change |
 |---|---|---|
+| 1 *(additive, post-approval)* | 2026-08-24 | **All additive under §7.2 — `PROTOCOL_VERSION` stays 1, no surface update required in lockstep.** Added `cmd.calendar.today` / `res.calendar.today` and the `calendar.*` sub-namespace as SHARED (§3.1, §5.1), with `source: "none"` distinguishing *unconfigured* from *empty day* so a surface never renders a blank agenda as a clear day. Added the OPTIONAL `via` field to `evt.transcript.message` (§4.1) — deliberately not a closed enum, so a future input surface adds a value without a version bump. Added the `Theme` closed enum (§7.4), a shared vocabulary that never travels on the wire, and §9.3, the theme-token completeness build gate. Reconciled §5.4 with this changelog: four `ErrorCode` values recorded in *pre-approval revision 2* had never been tabulated; they are now noted, with their exact spelling flagged for confirmation against `enums.json`. **Unreconciled and deliberately untouched:** §9's brand palette still carries the original orange accent and predates the six-theme ruling. |
 | 1 | 2026-08-12 | Initial contract. Awaiting owner approval. |
 | 1 *(pre-approval revision 2)* | 2026-08-12 | **Enum audit — the last cheap moment before §7.3 makes additions breaking.** Added `AgentState.blocked`; `JobStatus.needsReview`; `CreatedBy.fileWatch/email/webhook/systemEvent`; `PtyReportEvent.startFailed`; `Provenance.external/system`; `SpawnMode.cdCurrent`; `CloudState.unknown`; `FsChangeKind.hydrationChanged`; `Decision.expired` (daemon-emitted only); `ErrorCode.permission.expired/rateLimited/budgetExceeded/unavailable`. Declared `ErrorCode` and `CloseCode` **open** sets. Added §2.4 (no `mobile` surface) and `DeepLinkMode` as a strict subset of `SpawnMode` (§6.6). Enums moved to `packages/protocol/schema/enums.json` as the single generated source of truth. `PROTOCOL_VERSION` stays 1 — pre-approval. |
 | 1 *(pre-approval revision)* | 2026-08-12 | **Removed the PTY byte stream from the protocol.** The first draft carried `evt.pty.data` (base64 terminal output), `cmd.pty.write`, `cmd.pty.resize`, and `cmd.pty.kill` through the daemon. On a 2-core machine that put megabytes of `npm install` output through Python with ~33% base64 inflation plus JSON escaping — the hottest path in the app, in the process with the least reason to see it. Replaced with `cmd.pty.requestSpawn` / `cmd.pty.report` / `evt.pty.revoke` / `evt.pty.sessions`: the daemon **authorizes, audits, and revokes**; the Console owns the bytes (§4.2, §6.5). Added §6.6 deep-link safety. Revised **before** approval, so `PROTOCOL_VERSION` stays 1. |
@@ -402,10 +446,10 @@ Adding any parameter to this grammar is a **breaking change** under §7.3.
 
 Source of truth: **`packages/tokens/tokens.json`**. CSS custom properties and a Python constants module are **generated** from it. **Neither surface hard-codes a hex value.**
 
-Colour values below are authoritative, from `ZOEY_OS-spec.md` §3.8.
+Colour values below are authoritative, from `TESSA_CORE-spec.md` §3.8.
 
 ```css
-/* ---- Brand colour (ZOEY_OS-spec §3.8) ---- */
+/* ---- Brand colour (TESSA_CORE-spec §3.8) ---- */
 --bg-void:       #08080A;
 --bg-ambient:    #0D1524;
 --panel:         rgba(18,18,22,0.72);
@@ -450,7 +494,7 @@ Colour values below are authoritative, from `ZOEY_OS-spec.md` §3.8.
 --radius-sm:    6px;
 --radius-pill:  999px;
 
-/* ---- Layout rails (ZOEY_OS-spec §3.8) ---- */
+/* ---- Layout rails (TESSA_CORE-spec §3.8) ---- */
 --rail-w:        48px;
 --panel-left-w:  240px;
 --panel-right-w: 280px;
@@ -469,6 +513,19 @@ Colour values below are authoritative, from `ZOEY_OS-spec.md` §3.8.
 > `rail 48 + left 240 + right 280 + transcript 320 = **888px** of chrome`, leaving **~478px** of usable centre stage.
 
 **Both surfaces must be usable at 1366×768.** The full four-panel layout is a **≥1600px** layout only. Below that, panels collapse to overlays or drawers. The Console defaults to *rail + terminal + one collapsible side panel*; the Orb must define its own sub-1600px fallback.
+
+### 9.3 Theme token completeness — a build gate
+
+> **Every `--theme-<id>-<step>` custom property that the `Theme` enum can produce MUST exist in `packages/tokens/dist/tokens.css`.**
+> `scripts/check-contract.mjs` fails the build when one is missing.
+
+The rule exists because of a measured failure mode, not a hypothetical one:
+
+**A `var()` naming a token that does not exist is guaranteed-invalid. It resolves to nothing, silently.** No console error, no build warning, no visual clue beyond the property simply not applying. Retiring a token, or adding a theme id without adding its full step set, is therefore a cross-surface break that presents as "the colour is wrong" three rounds later.
+
+The gate is a cartesian product check: for each of the six `Theme` values, assert every step the surfaces reference is present. It is cheap, it runs with the existing contract check, and it would have caught the token break that cost both surface sessions a round.
+
+`scripts/` is the owner's directory — neither surface session writes this gate.
 
 ---
 

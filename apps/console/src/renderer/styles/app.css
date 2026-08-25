@@ -3,7 +3,66 @@
  * apps/orb also consumes. No hex value may appear in this file or any other
  * file under src/renderer: scripts/check-contract.mjs fails the build on one.
  */
-@import '@zoey/tokens/dist/tokens.css';
+@import '@tessa/tokens/dist/tokens.css';
+
+/* ── THE COMPANION THEME ────────────────────────────────────────────────────
+   The Console takes the Orb's colour. `data-theme` is set on <html> from the
+   value the Orb persists; each block rebinds only --accent, so every rule that
+   already used var(--accent) themes for free.
+
+   THESE NAMES WERE WRONG AND IT BROKE EVERYTHING ACCENT-COLOURED.
+   This file aliased gold to --theme-amber-core and red to --theme-ember-core,
+   because those were the nearest hues that existed when it was written. Session
+   2 has since published real gold and red tokens and RENAMED amber and ember
+   out of existence. A `var()` naming a token that does not exist makes the
+   custom property GUARANTEED-INVALID, so --accent resolved to nothing and every
+   rule using it fell back silently: the watermark lost its colour, the focused
+   pane lost its border, the active tab lost its bar. Measured at runtime as
+   `accent=` — an empty string.
+
+   The `-body` step is the accent: Session 2's own token comments say so in as
+   many words ("this is --accent under gold"). `-core` is the brighter sphere
+   step and is not what chrome should use. */
+:root[data-theme='gold']    { --accent: var(--theme-gold-body); }
+:root[data-theme='magenta'] { --accent: var(--theme-magenta-body); }
+:root[data-theme='cyan']    { --accent: var(--theme-cyan-body); }
+:root[data-theme='violet']  { --accent: var(--theme-violet-body); }
+:root[data-theme='emerald'] { --accent: var(--theme-emerald-body); }
+:root[data-theme='red']     { --accent: var(--theme-red-body); }
+
+/* THE WATERMARK USES THE BRIGHTER `-core` STEP, deliberately and only here.
+   At 0.11 opacity the accent step is too dark to read as a mark on the void —
+   violet's accent is 4.46:1 against 7.72:1 for its core — and this is the one
+   element whose job is to be seen at very low alpha. Chrome stays on --accent. */
+:root[data-theme='gold']    { --mark: var(--theme-gold-core); }
+:root[data-theme='magenta'] { --mark: var(--theme-magenta-core); }
+:root[data-theme='cyan']    { --mark: var(--theme-cyan-core); }
+:root[data-theme='violet']  { --mark: var(--theme-violet-core); }
+:root[data-theme='emerald'] { --mark: var(--theme-emerald-core); }
+:root[data-theme='red']     { --mark: var(--theme-red-core); }
+
+/* A BASE VALUE, so an unknown data-theme still paints a mark rather than
+   silently unstyling the stage — the failure mode that cost this round. */
+:root { --mark: var(--theme-gold-core); }
+
+/* ── THREE TIERS, BY WEIGHT ────────────────────────────────────────────────
+   His complaint was exact: everything sits at one weight and nothing leads.
+   The fix is less, not more — the chrome recedes so the terminal is the only
+   thing that reads as primary.
+
+     PRIMARY    terminal text           --text      16.35:1  measured
+     SECONDARY  tabs, focused identity  --tier-2     7.35:1  accent, worst theme
+     RECESSIVE  title, status, buttons  --tier-3     3.78:1  deliberately low
+
+   Recessive is BELOW AA on purpose: these are labels and controls, not
+   information. Anything he must READ — output, errors, the paste warning — is
+   primary or an alarm colour, never tier 3. */
+:root {
+  --tier-3: var(--text-muted);
+  --tier-2: var(--accent);
+  --chrome-size: 10px;
+  --chrome-tracking: 0.14em;
+}
 
 * {
   box-sizing: border-box;
@@ -140,4 +199,642 @@ b[data-state='failed'] {
   color: var(--text);
   white-space: pre;
   user-select: text;
+}
+
+/* ── PANES ─────────────────────────────────────────────────────────────────
+   The stage is the whole remaining height; the tree fills it recursively.
+   Every colour here is a token — check-contract.mjs fails the build on a hex,
+   and it has already caught one of mine. */
+
+/* A SIZE CONTAINER, so the watermark can be sized in `cqw` — a fraction of the
+   TERMINAL AREA rather than of the window. With `vw` the mark stayed 1105px
+   wide when the file tree narrowed the stage to ~910px, overflowed it, and
+   `place-items: center` then aligned it to the start instead of the centre:
+   measured at centre 822 against a stage centre of 812, fits=false. */
+.pane-stage {
+  container-type: size;
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 0;
+  min-width: 0;
+}
+
+/* Each pane is placed from the computed layout rather than nested, so that a
+   split never changes a terminal's position in the React tree. See App. */
+.pane-frame {
+  position: absolute;
+  display: flex;
+  overflow: hidden;
+}
+
+.pane-divider {
+  position: absolute;
+  z-index: 2;
+  background: var(--panel-border);
+  transition: background 120ms ease;
+}
+
+.pane-divider[data-dir='row'] {
+  cursor: col-resize;
+}
+
+.pane-divider[data-dir='col'] {
+  cursor: row-resize;
+}
+
+.pane-divider:hover {
+  background: var(--accent);
+}
+
+/* ── THE FOCUSED PANE MUST BE OBVIOUS AT A GLANCE ──────────────────────────
+   TWO signals, not one. A border alone is easy to miss on a dark theme at
+   1366px, and typing into the wrong shell is a silent failure — he would not
+   find out until the command ran somewhere he did not mean. So the focused
+   pane keeps an accent border AND full brightness; the others recede. */
+.pane {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  border: 1px solid var(--panel-border);
+  border-radius: var(--radius-sm);
+  padding: var(--sp-1);
+  gap: var(--sp-1);
+}
+
+.pane[data-focused='yes'] {
+  border-color: var(--accent);
+  opacity: 1;
+}
+
+/*
+   THE UNFOCUSED PANE IS NO LONGER DIMMED AS A WHOLE.
+   It was `opacity: 0.62`, and that had two costs. It dimmed his terminal
+   OUTPUT, which nobody asked for — an unfocused pane is still a pane he is
+   reading. And it made the watermark bleed through the unfocused pane at 38%
+   while the focused pane hid it completely, which is precisely the "TES and
+   part of an S, clipped by the right pane" he photographed: the mark was
+   showing through the LEFT pane because it was unfocused, and stopping dead at
+   the focused one.
+
+   Two signals remain and neither touches the terminal: the accent border, and
+   the pane's meta line changing colour. */
+.pane[data-focused='no'] {
+  border-color: transparent;
+}
+
+.pane-meta {
+  display: flex;
+  flex: 0 0 auto;
+  gap: var(--sp-2);
+  font-size: var(--fs-label);
+  text-transform: var(--label-transform);
+  letter-spacing: var(--label-tracking);
+  color: var(--text-muted);
+}
+
+.pane[data-focused='yes'] .pane-meta {
+  color: var(--accent);
+}
+
+.pane-pid,
+.pane-rung {
+  color: var(--text-muted);
+}
+
+.pane-notice {
+  flex: 0 0 auto;
+  padding: var(--sp-1) var(--sp-3);
+  font-size: var(--fs-label);
+  color: var(--status-warn);
+  border: 1px solid var(--panel-border);
+  border-radius: var(--radius-sm);
+  background: var(--panel);
+}
+
+.bar-sep {
+  flex: 1 1 auto;
+}
+
+/* ── TABS ──────────────────────────────────────────────────────────────────
+   Every tab stays mounted. Only the active one is visible, and it is hidden
+   with `visibility` rather than `display` so a hidden pane keeps its box — and
+   therefore its column count. See the note in App. */
+
+.tab-strip {
+  display: flex;
+  align-items: stretch;
+  flex: 0 0 auto;
+  gap: var(--sp-1);
+  overflow-x: auto;
+}
+
+.tab {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: var(--sp-1) var(--sp-2);
+  max-width: 22ch;
+  border: 1px solid var(--panel-border);
+  border-radius: var(--radius-sm);
+  background: var(--panel);
+  color: var(--text-muted);
+  font-size: var(--fs-label);
+  letter-spacing: var(--label-tracking);
+  cursor: pointer;
+  user-select: none;
+}
+
+.tab[data-active='yes'] {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.tab-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tab-x,
+.tab-add {
+  font-family: var(--font-mono);
+  font-size: var(--fs-label);
+  line-height: 1;
+  color: var(--text-muted);
+  background: none;
+  border: none;
+  padding: 0 var(--sp-1);
+  cursor: pointer;
+}
+
+.tab-add {
+  border: 1px solid var(--panel-border);
+  border-radius: var(--radius-sm);
+  background: var(--panel);
+}
+
+.tab-x:hover,
+.tab-add:hover {
+  color: var(--accent);
+}
+
+/* Each tab's page fills the stage and stacks on the others. */
+.tab-page {
+  position: absolute;
+  inset: 0;
+}
+
+.tab-page[data-active='no'] {
+  visibility: hidden;
+  pointer-events: none;
+}
+
+
+/* ══ HIERARCHY PASS ════════════════════════════════════════════════════════
+   Everything below overrides earlier rules deliberately: the chrome drops to
+   tier 3 and shrinks, the tab strip becomes unmistakable, and the watermark
+   appears behind every pane. */
+
+/* RECESSIVE — the title, the status line, the buttons. Controls and labels. */
+.top {
+  align-items: baseline;
+}
+
+.brand {
+  font-size: var(--chrome-size);
+  font-weight: 400;
+  letter-spacing: var(--chrome-tracking);
+  text-transform: uppercase;
+  color: var(--tier-3);
+}
+
+.phase {
+  font-size: var(--chrome-size);
+  letter-spacing: var(--chrome-tracking);
+  color: var(--tier-3);
+}
+
+/* The one exception in tier 3: a BROKEN connection is an alarm, not a label. */
+.phase b[data-state='failed'] {
+  color: var(--status-error);
+}
+
+.phase b[data-state='ok'] {
+  color: var(--tier-3);
+  font-weight: 400;
+}
+
+.term-bar {
+  font-size: var(--chrome-size);
+  letter-spacing: var(--chrome-tracking);
+  color: var(--tier-3);
+  gap: var(--sp-1);
+}
+
+.term-bar button {
+  font-size: var(--chrome-size);
+  letter-spacing: var(--chrome-tracking);
+  color: var(--tier-3);
+  background: transparent;
+  border: 1px solid transparent;
+}
+
+.term-bar button:hover:not(:disabled) {
+  color: var(--accent);
+  border-color: var(--panel-border);
+}
+
+.term-meta {
+  color: var(--tier-3);
+}
+
+/* SECONDARY — the tab strip. The active tab must not need reading to find. */
+.tab {
+  border: 1px solid transparent;
+  border-bottom: none;
+  border-radius: var(--radius-sm) var(--radius-sm) 0 0;
+  background: transparent;
+  color: var(--tier-3);
+  font-size: var(--chrome-size);
+  letter-spacing: var(--chrome-tracking);
+  padding: var(--sp-1) var(--sp-3);
+  position: relative;
+}
+
+/* THREE signals at once, because one was not enough at 1366px on a dark theme:
+   a filled ground, a full-strength label, and a 2px accent bar along the top.
+   The bar is what carries at a glance — fill alone reads as noise on a panel
+   that is already dark. */
+.tab[data-active='yes'] {
+  background: var(--panel);
+  color: var(--text);
+  border-color: var(--panel-border);
+}
+
+.tab[data-active='yes']::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 0;
+  height: 2px;
+  background: var(--accent);
+  border-radius: var(--radius-sm) var(--radius-sm) 0 0;
+}
+
+.tab[data-active='no']:hover {
+  color: var(--text);
+}
+
+/* The focused pane's own identity is secondary, not recessive. */
+.pane[data-focused='yes'] .pane-meta {
+  color: var(--tier-2);
+}
+
+.pane-meta {
+  font-size: var(--chrome-size);
+  letter-spacing: var(--chrome-tracking);
+  color: var(--tier-3);
+}
+
+/* ── THE WATERMARK ─────────────────────────────────────────────────────────
+   His own idea, and the right one: empty space that reads as intentional
+   rather than empty.
+
+   IT SITS ON THE STAGE, BEHIND EVERY PANE — not inside one. Splitting cannot
+   give him two marks or cut one at a divider, because there is exactly one
+   element and the panes are painted over it.
+
+   OPACITY 0.11 of the accent. It was 0.04, which measured beautifully and was
+   INVISIBLE ON HIS PANEL — he relaunched, looked, and said it was not showing.
+   At 1.036:1 that was correct behaviour and the instruction was the thing that
+   was wrong: no non-zero opacity clears "not measurably different".
+
+   Measured on --bg-void across all six themes at 0.11:
+
+     mark's own contrast   1.126:1 (violet) to 1.233:1 (cyan)
+     terminal text over it 14.525:1 (violet) to 13.259:1 (cyan)
+     over bare void        16.353:1
+     worst delta           -3.094
+
+   So the worst case leaves terminal text at 13.26:1 — still THREE TIMES the
+   4.5:1 AA threshold, and above AAA's 7:1. The mark itself stays far below AA
+   in every theme, which is Session 2's ornament rule; it carries no numeral,
+   which is the other half, for free.
+
+   `pointer-events: none` so it can never eat a click meant for a terminal. */
+/* ── THE MARK IS COMPOSITED OVER THE TERMINALS, NOT BEHIND THEM ────────────
+   Behind was the intent and it does not work. xterm paints its own background
+   across the whole screen element, and MEASURED, neither `allowTransparency`
+   with a transparent theme background nor forcing the DOM renderer made that
+   background translucent — a one-pane window sampled at exactly the void
+   colour, 8.14 luminance, with no mark anywhere. The only place the mark ever
+   showed was the 27px gap between two panes, which is precisely the "TES and
+   part of an S" he photographed.
+
+   So it goes ON TOP, with `mix-blend-mode: screen`. Screen is the operation
+   that makes this safe: over the near-black void it is effectively additive, so
+   the mark appears; over a bright glyph it can only lighten something already
+   near white, so text does not lose contrast. `pointer-events: none` keeps it
+   incapable of eating a click, and z-index 3 puts it above the pane frames (1)
+   and xterm's own link layer (2) so nothing can clip or cover it. */
+.watermark {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  pointer-events: none;
+  user-select: none;
+  z-index: 3;
+  mix-blend-mode: screen;
+  overflow: hidden;
+}
+
+.watermark span {
+  font-family: var(--font-mono);
+  font-weight: 700;
+  /* Sized to the stage, not to a fixed pixel count, so it stays proportionate
+     when the tree takes width or the window resizes. */
+  /* 17cqw of the stage. At 1160px that is ~197px; with the tree open the stage
+     is ~910px and the mark scales with it instead of overflowing. */
+  font-size: clamp(40px, 17cqw, 240px);
+  letter-spacing: 0.22em;
+  /* The trailing letter-spacing pushes the text off-centre by half a space;
+     this pulls it back so the mark is optically centred, not merely centred. */
+  text-indent: 0.22em;
+  color: var(--mark);
+  /* 0.22, NOT the 0.11 measured under the old "behind the panes" model.
+     That number was chosen for a mark compositing directly onto the void; this
+     one screens over whatever the terminal painted, which costs some of the
+     effect. Measured at 0.11 the mark peaked at luminance 15.6 against a void
+     of 8.1 — about 1.04:1, which is the same order as the version he looked at
+     twice and could not see. `screen` is what makes the higher value safe:
+     it can only lighten, and lightening a near-white glyph changes nothing. */
+  opacity: 0.22;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+/* Panes paint over the mark. They have no background of their own, so the mark
+   shows through the gaps and is simply invisible behind glyphs — it never
+   competes with output because output is drawn on top of it. */
+.pane-frame,
+.tab-page {
+  z-index: 1;
+}
+
+/* The pid is situational: present when he needs it, silent when he does not. */
+.term-pid {
+  opacity: 0.55;
+}
+
+/* ── THE FILE TREE ─────────────────────────────────────────────────────────
+   LEFT, because every tool he already uses puts it there — Explorer, VS Code,
+   the Orb's own left rail — and because terminal output is left-aligned, so a
+   right-hand rail would sit against the ragged edge of every line.
+
+   It is chrome, so it lives at tier 3 and never competes with output. */
+
+.stage-row {
+  display: flex;
+  flex: 1 1 auto;
+  min-height: 0;
+  min-width: 0;
+  gap: var(--sp-2);
+}
+
+.tree {
+  display: flex;
+  flex-direction: column;
+  flex: 0 0 250px;
+  min-width: 0;
+  border: 1px solid var(--panel-border);
+  border-radius: var(--radius-sm);
+  background: var(--panel);
+  overflow: hidden;
+}
+
+.tree-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex: 0 0 auto;
+  padding: var(--sp-1) var(--sp-2);
+  border-bottom: 1px solid var(--panel-border);
+  font-size: var(--chrome-size);
+  letter-spacing: var(--chrome-tracking);
+  text-transform: uppercase;
+  color: var(--tier-3);
+}
+
+.tree-root {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--tier-2);
+}
+
+.tree-refresh {
+  font-family: var(--font-mono);
+  color: var(--tier-3);
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 0 var(--sp-1);
+}
+
+.tree-refresh:hover {
+  color: var(--accent);
+}
+
+.tree-body {
+  flex: 1 1 auto;
+  overflow: auto;
+  padding-bottom: var(--sp-2);
+}
+
+.tree-row {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-1);
+  padding: 1px var(--sp-2) 1px 0;
+  font-size: var(--fs-sm);
+  color: var(--text-muted);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.tree-row:hover {
+  color: var(--text);
+  background: var(--panel-border);
+}
+
+.tree-row[data-kind='dir'] {
+  color: var(--tier-3);
+}
+
+.tree-caret {
+  width: 1ch;
+  flex: 0 0 auto;
+  color: var(--tier-3);
+}
+
+.tree-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* A reparse point is MARKED, never followed. It is a fact about the entry, not
+   an alarm, so it sits at tier 3 rather than in an alarm colour. */
+.tree-cloud {
+  flex: 0 0 auto;
+  color: var(--tier-3);
+  opacity: 0.7;
+}
+
+.tree-size {
+  margin-left: auto;
+  flex: 0 0 auto;
+  font-size: var(--chrome-size);
+  color: var(--tier-3);
+  opacity: 0.6;
+}
+
+.tree-note {
+  padding: 2px var(--sp-2);
+  font-size: var(--chrome-size);
+  color: var(--tier-3);
+  font-style: italic;
+}
+
+/* An unreadable folder is a REAL failure and gets an alarm colour, because the
+   difference between "empty" and "I could not look" matters. */
+.tree-error {
+  padding: 2px var(--sp-2);
+  font-size: var(--chrome-size);
+  color: var(--status-warn);
+}
+
+/* ── THE CHAT PANE ─────────────────────────────────────────────────────────
+   A pane that hosts her rather than a shell. It inherits `.pane` entirely —
+   the focus border, the meta row, the sizing — because it IS a pane and the
+   layout must not care what is inside it. */
+
+.pane.chat {
+  overflow: hidden;
+}
+
+.chat-state {
+  margin-left: auto;
+  color: var(--tier-3);
+}
+
+.chat-state[data-busy='yes'] {
+  color: var(--accent);
+}
+
+.chat-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  padding: var(--sp-2) var(--sp-1);
+  /* LONG ANSWERS WRAP. A pane has room, so there is no excerpt and no word
+     count — the Orb needs those because it has one line. */
+  overflow-wrap: anywhere;
+  user-select: text;
+  cursor: auto;
+}
+
+.chat-empty {
+  color: var(--tier-3);
+  font-size: var(--fs-sm);
+  font-style: italic;
+}
+
+.chat-line {
+  display: flex;
+  gap: var(--sp-2);
+  align-items: stretch;
+}
+
+/* ── THE PROVENANCE GUTTER ─────────────────────────────────────────────────
+   The security model, drawn. Four sources and four colours, straight from the
+   shared tokens so the Console and the Orb say the same thing with the same
+   hue. `external` is the one that earns its place: content she fetched is
+   neither his speech nor hers, and typing is exactly where he would paste
+   something out of a web page without thinking. */
+.chat-gutter {
+  flex: 0 0 2px;
+  border-radius: 1px;
+  background: var(--prov-program);
+}
+
+.chat-gutter[data-prov='human'] {
+  background: var(--prov-human);
+}
+
+.chat-gutter[data-prov='agent'] {
+  background: var(--prov-agent);
+}
+
+.chat-gutter[data-prov='external'] {
+  background: var(--status-warn);
+}
+
+.chat-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  color: var(--text);
+  white-space: pre-wrap;
+}
+
+.chat-who {
+  display: block;
+  font-size: var(--chrome-size);
+  letter-spacing: var(--chrome-tracking);
+  text-transform: uppercase;
+  color: var(--tier-3);
+  margin-bottom: 2px;
+}
+
+.chat-working {
+  color: var(--tier-3);
+  font-style: italic;
+}
+
+.chat-input {
+  flex: 0 0 auto;
+  resize: none;
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+  color: var(--text);
+  background: var(--panel);
+  border: 1px solid var(--panel-border);
+  border-radius: var(--radius-sm);
+  padding: var(--sp-2);
+  outline: none;
+  user-select: text;
+}
+
+.chat-input:focus {
+  border-color: var(--accent);
+}
+
+.chat-input:disabled {
+  color: var(--tier-3);
+  cursor: not-allowed;
+}
+
+/* A pane hidden by ZOOM keeps its box and its shell — see layoutOf in App.
+   `visibility` rather than `display`, for the same reason a hidden tab uses it:
+   an element with no box makes xterm report zero columns. */
+.pane-frame[data-hidden='yes'] {
+  visibility: hidden;
+  pointer-events: none;
 }

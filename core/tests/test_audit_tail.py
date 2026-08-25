@@ -36,7 +36,7 @@ def check(name: str, cond: bool, detail: str = "") -> None:
 
 
 def fresh(name: str) -> Path:
-    return Path(tempfile.mkdtemp(prefix=f"zoey-tail-{name}-")) / "audit.log"
+    return Path(tempfile.mkdtemp(prefix=f"tessa-tail-{name}-")) / "audit.log"
 
 
 def seeded(path: Path, n: int) -> AuditLog:

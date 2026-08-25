@@ -1,6 +1,6 @@
 # core/config/settings.yaml
 #
-# Runtime settings for the Zoey Core daemon.
+# Runtime settings for the Tessa Core daemon.
 #
 # Distinct from permissions.yaml on purpose: that file answers "may this
 # happen?" and is the security authority. This one answers "how should the
@@ -9,7 +9,7 @@
 version: 1
 
 # ── Budget ────────────────────────────────────────────────────────────────────
-# ZOEY_OS-spec §6: a nightly budget cap is a HARD STOP, not a warning.
+# TESSA_CORE-spec §6: a nightly budget cap is a HARD STOP, not a warning.
 # `budgetCap` and `budgetSpent` ship on every evt.daemon.health frame
 # (CONTRACT §4.1).
 #
@@ -170,9 +170,9 @@ voice:
   # ── wake phrase ─────────────────────────────────────────────────────────────
   #
   # THE SWAP IS ONE LINE. `model` is the only thing that changes when Gerald
-  # brings a Colab-trained hey_zoey.onnx back — no code, no rebuild.
+  # brings a Colab-trained hey_tessa.onnx back — no code, no rebuild.
   #
-  # WHY IT SHIPS AGAINST hey_jarvis: openWakeWord has no "Hey Zoey" model and one
+  # WHY IT SHIPS AGAINST hey_jarvis: openWakeWord has no "Hey Tessa" model and one
   # cannot be trained here. The full set is alexa, hey_jarvis, hey_mycroft,
   # hey_rhasspy plus two command models. Training needs the `full` extra (torch +
   # tensorflow-cpu 2.8.1 + datasets) and GB-scale negative corpora on 2 cores
@@ -188,7 +188,7 @@ voice:
     enabled: false
 
     # Absolute path or repo-relative path to a .onnx. Empty = the bundled
-    # hey_jarvis proxy. Put his Colab output at data/models/wake/hey_zoey.onnx
+    # hey_jarvis proxy. Put his Colab output at data/models/wake/hey_tessa.onnx
     # and name it here.
     model: ""
 

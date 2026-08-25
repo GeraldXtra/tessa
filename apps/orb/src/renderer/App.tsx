@@ -3,10 +3,15 @@
  *
  *   ┌──────────────────────────────────────────────────────────┐
  *   │ status bar                                          28px │
- *   ├────┬───────────────────────────────┬─────────────────────┤
- *   │rail│         sphere stage          │  drawer (overlay)   │
- *   │ 48 │      floats over the void     │        320          │
- *   └────┴───────────────────────────────┴─────────────────────┘
+ *   ├───────────────────────────────┬─────────────────────┬────┤
+ *   │         sphere stage          │  drawer (overlay)   │rail│
+ *   │      floats over the void     │        320          │ 48 │
+ *   └───────────────────────────────┴─────────────────────┴────┘
+ *
+ * THE RAIL AND ITS DRAWER ARE ON THE RIGHT. They were on the left and opened
+ * rightward, which put PULSE's drawer over the calendar — the one permanent
+ * panel, docked bottom-left. Rail, drawer and approval card now share one
+ * right-hand column and the calendar has the left side to itself.
  *
  * At 1366×768 with a drawer open that is 368px of chrome and ~998px of stage.
  * The four-panel arrangement would leave 478px, which spec §8.1 calls "not a
@@ -16,7 +21,7 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 
-import { AGENT_STATES, type AgentState } from '@zoey/protocol';
+import { AGENT_STATES, type AgentState } from '@tessa/protocol';
 
 import type { BootstrapInfo, SphereTier } from '../shared/ipc-contract.ts';
 import { parseDevScript, runDevScript } from './dev-drive.ts';
@@ -33,10 +38,10 @@ import {
 import { StateDwell } from './state/state-dwell.ts';
 import { ApprovalStack } from './layout/ApprovalCard.tsx';
 import { Calendar } from './layout/Calendar.tsx';
-import { Column } from './layout/Column.tsx';
+import { Clock } from './layout/Clock.tsx';
+import { CompanionSwitcher } from './layout/CompanionSwitcher.tsx';
+import { Today } from './layout/Today.tsx';
 import { Drawer } from './layout/Drawer.tsx';
-import { EdgeDetail } from './layout/EdgeDetail.tsx';
-import { TimeAxis } from './layout/TimeAxis.tsx';
 import { startTick } from './state/tick.ts';
 import { DevOverlay } from './layout/DevOverlay.tsx';
 import { LastLine } from './layout/LastLine.tsx';
@@ -44,7 +49,6 @@ import { NotificationStack } from './layout/NotificationStack.tsx';
 import { Rail } from './layout/Rail.tsx';
 import { StateChip } from './layout/StateChip.tsx';
 import { StatusBar } from './layout/StatusBar.tsx';
-import { Wordmark } from './layout/Wordmark.tsx';
 import { railById } from './rails/rails.tsx';
 import { DomSphere } from './scene/DomSphere.tsx';
 import { Sphere } from './scene/Sphere.tsx';
@@ -80,26 +84,10 @@ import {
  * These fractions are of the WINDOW, not of the stage, because the composition
  * is a property of what he sees rather than of an internal box.
  */
-const SPHERE_X_FRACTION = 0.34;
-/** Where it sits with no right panel to make room for. See `xFraction`. */
-const SPHERE_X_FRACTION_BARE = 0.44;
-/** 0.47, not 0.5: vertical centring reads as LOW in a frame with a heavy
- *  bottom edge, and this layout has an axis along the bottom. */
-const SPHERE_Y_FRACTION = 0.47;
 
 /** Status bar height. The column's own width lives in CSS (`--col-w`). */
 const STATUS_H = 28;
 
-/**
- * Collapse thresholds. Measured against the WINDOW width.
- *
- * Order, first to go: sparklines fall back to their bare numbers (inside
- * Sparkline), then the axis shortens its window, then the axis goes, then the
- * column goes. Edge detailing is last because it costs nothing and is the final
- * thing still saying "built".
- */
-const AXIS_MIN_W = 1100;
-const AXIS_SHORT_W = 1200;
 
 /**
  * Widths of the two floating panels, and the window widths they need.
@@ -115,8 +103,6 @@ const AXIS_SHORT_W = 1200;
  * Two panels need far more room than the one column did, so they collapse in a
  * stated order rather than all at once. See LAYOUT_STEPS in the report.
  */
-const PANEL_BOTH_W = 1180;
-const PANEL_RIGHT_W = 980;
 
 /**
  * The largest fraction of the stage's SHORT side the sphere's diameter may
@@ -128,7 +114,67 @@ const PANEL_RIGHT_W = 980;
  * leaves a margin wide enough that breath and turbulence, which push the shell
  * a few percent beyond its nominal radius, cannot reach the edge either.
  */
-const SPHERE_FILL = 0.74;
+/**
+ * The bands the sphere may not enter, in px.
+ *
+ * TOP_ROW_H is the state chip and the clock; BOTTOM_CONTROLS_H is the arrows,
+ * the wordmark, the indicator and the pill. Both are measured off the rendered
+ * elements rather than guessed, and both are subtracted from the height the
+ * sphere is fitted into — leaving them out is precisely how it came to be
+ * clipped top and bottom.
+ */
+const TOP_ROW_H = 52;
+/**
+ * 104 -> 68, AND THE 36 px COMES FROM THE REFERENCE'S OWN COMPOSITION.
+ *
+ * 104 was not padding: measured off a capture, the bottom controls occupy
+ * y=624..696 of a 720 px window, which is 72 px of real content plus a 24 px
+ * margin, and the sphere's lower edge sat at 613 against a boundary of 616.
+ * There were eight pixels of slack in the whole band. So the sphere could not
+ * grow by leaving the controls alone, and reporting "37.6% is the honest
+ * ceiling" was true only under an assumption nobody had checked.
+ *
+ * The assumption is that the controls sit BELOW the sphere. The reference does
+ * not do that. In image11 the wordmark and the two arrows sit INSIDE the disc's
+ * lower region — the sphere's bottom edge is at y=1012 and the wordmark's ink
+ * is at y=945..965, about 7% of the diameter inboard — and that overlap is
+ * exactly where its extra size comes from.
+ *
+ * 68 is solved for, not chosen: it is the value that puts the disc at 549 px of
+ * 1366, which is the reference's measured 40.2%. The switcher then overlaps the
+ * disc's lower edge by ~16 px, which is less overlap than the reference has.
+ */
+const BOTTOM_CONTROLS_H = 68;
+
+/**
+ * The largest fraction of the stage's short side the sphere's diameter may take.
+ *
+ * 0.74 -> 0.96, MEASURED not chosen, and it still does not reach the reference.
+ *
+ * The reference's sphere is 549 window-px of 1366, i.e. 40.2% of the width. On
+ * this stage the binding constraint is the HEIGHT, not the width: the clear
+ * vertical band is 692 - 52 (top row) - 104 (bottom controls) = 536 px, so the
+ * largest disc that fits is 536 px = 39.2% — and that one touches both bands.
+ * 0.96 gives 514 px = 37.6%, which clears them with the breath and turbulence
+ * overhang included.
+ *
+ * AND THEN 40.2% TURNED OUT TO BE REACHABLE AFTER ALL, which corrects the
+ * paragraph that used to stand here. It read: "40.2% is not reachable at
+ * 1366x720... on a 720 px work area the same proportion would put the sphere
+ * through the wordmark." The second half is true and is not an obstacle — the
+ * reference PUTS the sphere through its own wordmark, which is where its size
+ * comes from. See BOTTOM_CONTROLS_H, now 68 rather than 104. At that band the
+ * same 0.96 gives 549 px = 40.2%, the reference's figure exactly, and the
+ * fill fraction does not move.
+ *
+ * A CORRECTION TO THE BRIEF, which read the reference as "nearer two thirds".
+ * It is not: two thirds of 1366 is 911 px, which does not fit a 692 px stage in
+ * any arrangement.
+ *
+ * It still may not exceed the natural projected size, so this is a ceiling
+ * raise rather than a licence to inflate.
+ */
+const SPHERE_FILL = 0.96;
 const PANEL_CLEARANCE = 28;
 
 /**
@@ -219,7 +265,7 @@ export function App() {
   useEffect(() => {
     let alive = true;
 
-    void window.zoey.bootstrap().then((info) => {
+    void window.tessa.bootstrap().then((info) => {
       if (!alive) return;
       setBootstrap(info);
 
@@ -239,7 +285,7 @@ export function App() {
 
       const wanted: ThemeId = isThemeId(info.theme) ? info.theme : 'cyan';
       const steps = applyTheme(wanted);
-      window.zoey.reportMetrics(
+      window.tessa.reportMetrics(
         `THEME applied=${wanted} core=${steps.core} body=${steps.body} idle=${steps.idle} ` +
           `reason="${info.themeReason}"${isThemeId(info.theme) ? '' : ` FALLBACK from ${JSON.stringify(info.theme)}`}`,
       );
@@ -261,7 +307,7 @@ export function App() {
     // res.audit in milliseconds, while this bundle is still parsing. Main
     // logged "audit history → renderer: 100 entries" and SENTINEL still showed
     // NO DATA, because nothing was listening yet.
-    void window.zoey.getSnapshot().then((snap) => {
+    void window.tessa.getSnapshot().then((snap) => {
       if (!alive) return;
       connectionStore.set(snap.connection);
       if (snap.health) {
@@ -278,7 +324,7 @@ export function App() {
       // this bundle was parsing must not be left with no card.
       for (const request of snap.approvals) approvalArrived(request);
     });
-    const offConnection = window.zoey.onConnection((status) => {
+    const offConnection = window.tessa.onConnection((status) => {
       connectionStore.set(status);
       // A dropped link must not leave a frozen uptime on screen looking live.
       // The aura goes out with it, for the same reason and by the same rule the
@@ -289,7 +335,7 @@ export function App() {
         applyAura(null);
       }
     });
-    const offHealth = window.zoey.onHealth((health) => {
+    const offHealth = window.tessa.onHealth((health) => {
       healthStore.set(health);
       pushHealthSample(health);
       applyAura(health);
@@ -298,39 +344,39 @@ export function App() {
     // SENTINEL's two real sources. History seeds the list; the live stream
     // prepends onto it, newest first, bounded so a long-running surface cannot
     // grow without limit.
-    const offAuditHistory = window.zoey.onAuditHistory((entries) =>
+    const offAuditHistory = window.tessa.onAuditHistory((entries) =>
       auditStore.set([...entries].reverse().slice(0, AUDIT_MAX)),
     );
-    const offAuditAppended = window.zoey.onAuditAppended((entry) =>
+    const offAuditAppended = window.tessa.onAuditAppended((entry) =>
       auditStore.set([entry, ...auditStore.get()].slice(0, AUDIT_MAX)),
     );
-    const offPty = window.zoey.onPtySessions((sessions) => ptySessionsStore.set(sessions));
-    const offMic = window.zoey.onMicState((state) => micStore.set(state));
-    const offNote = window.zoey.onNotification((note) => pushNotification(note));
-    const offApproval = window.zoey.onApprovalRequested((request) => approvalArrived(request));
-    const offApprovalCleared = window.zoey.onApprovalCleared((cleared) =>
+    const offPty = window.tessa.onPtySessions((sessions) => ptySessionsStore.set(sessions));
+    const offMic = window.tessa.onMicState((state) => micStore.set(state));
+    const offNote = window.tessa.onNotification((note) => pushNotification(note));
+    const offApproval = window.tessa.onApprovalRequested((request) => approvalArrived(request));
+    const offApprovalCleared = window.tessa.onApprovalCleared((cleared) =>
       approvalCleared(cleared.requestId, cleared.reason, cleared.decision),
     );
-    const offApprovalRefused = window.zoey.onApprovalRefused((refusal) => {
+    const offApprovalRefused = window.tessa.onApprovalRefused((refusal) => {
       approvalRefused(
         refusal.requestId,
         refusal.code,
         refusal.message,
         refusal.requestStillPending,
       );
-      window.zoey.reportMetrics(
+      window.tessa.reportMetrics(
         `APPROVAL-REFUSED ${refusal.requestId} code=${refusal.code} ` +
           `stillPending=${refusal.requestStillPending}`,
       );
     });
-    const offTranscript = window.zoey.onTranscriptLine((line) =>
+    const offTranscript = window.tessa.onTranscriptLine((line) =>
       transcriptStore.set([...transcriptStore.get(), line].slice(-TRANSCRIPT_MAX)),
     );
 
     // Main has already validated this against AGENT_STATES before sending.
     // Through the dwell, never straight to the store. See state-dwell.ts.
     const dwell = new StateDwell({
-      report: (line) => window.zoey.reportMetrics(line),
+      report: (line) => window.tessa.reportMetrics(line),
       release: ({ state, arrivedAt, queuedMs }) => {
         // TWO stamps, deliberately. `arrivedAt` is when the daemon's frame
         // landed; `releasedAt` is when the dwell let it through. The engine
@@ -344,11 +390,11 @@ export function App() {
       },
     });
 
-    const offAgentState = window.zoey.onAgentState(({ state, detail }) => {
+    const offAgentState = window.tessa.onAgentState(({ state, detail }) => {
       const at = performance.now();
       const repeat = state === lastArrivedState.current;
       lastArrivedState.current = state;
-      window.zoey.reportMetrics(
+      window.tessa.reportMetrics(
         `STATE-ARRIVED state=${state} t=${at.toFixed(1)} repeat=${repeat} depth=${dwell.depth}`,
       );
       // The detail is set BEFORE the state. The chip renders both from one
@@ -362,7 +408,7 @@ export function App() {
     // Item 9 — the latency trace. Nothing emits `evt.turn.timing` yet, so this
     // is live wiring behind a dark renderer rather than a stub: the moment
     // Session 1 ships its half, the trace appears with no change here.
-    const offTiming = window.zoey.onTurnTiming((timing) => {
+    const offTiming = window.tessa.onTurnTiming((timing) => {
       turnTimingStore.set(timing);
     });
 
@@ -436,8 +482,8 @@ export function App() {
       // Display first, persistence second, and they are separate concerns: the
       // renderer owns what is on screen, main owns what survives a restart, and
       // main refuses to write on an instrumented launch.
-      window.zoey.setTheme(next);
-      window.zoey.reportMetrics(
+      window.tessa.setTheme(next);
+      window.tessa.reportMetrics(
         `THEME switched=${next} core=${steps.core} body=${steps.body} idle=${steps.idle}`,
       );
       // The sphere's colours are uniforms resolved once at construction, not
@@ -460,14 +506,14 @@ export function App() {
     const id = window.setInterval(() => {
       const expired = approvalsSweepExpired();
       for (const requestId of expired) {
-        window.zoey.reportMetrics(
+        window.tessa.reportMetrics(
           `APPROVAL-EXPIRED ${requestId} — invalidated locally, nothing sent (CONTRACT §5.1)`,
         );
       }
       // One timer, not two. The aura goes flat if the beats stop while the
       // socket stays up — a held value would be the frozen-instrument lie.
       if (auraSweep()) {
-        window.zoey.reportMetrics('AURA-STALE no heartbeat in 15s — aura flattened');
+        window.tessa.reportMetrics('AURA-STALE no heartbeat in 15s — aura flattened');
       }
     }, 1000);
     return () => window.clearInterval(id);
@@ -484,11 +530,11 @@ export function App() {
   useEffect(() => {
     if (!isDev || !devScript) return;
     const steps = parseDevScript(devScript);
-    window.zoey.reportMetrics(`DEV-DRIVE parsed ${steps.length} step(s)`);
+    window.tessa.reportMetrics(`DEV-DRIVE parsed ${steps.length} step(s)`);
     const id = window.setTimeout(() => {
       void runDevScript(
         steps,
-        (line) => window.zoey.reportMetrics(line),
+        (line) => window.tessa.reportMetrics(line),
         // Validated against the closed set, same as the socket path. A typo in
         // a dev script must report REJECTED rather than quietly leaving the
         // sphere on the previous state and being read as "no visible change".
@@ -522,7 +568,7 @@ export function App() {
   useEffect(() => {
     if (!holdMode) return;
     let held = false;
-    if (isDev) window.zoey.reportMetrics('PTT-KEY hold-mode listener attached');
+    if (isDev) window.tessa.reportMetrics('PTT-KEY hold-mode listener attached');
 
     const isSpace = (e: KeyboardEvent): boolean => e.code === 'Space' || e.key === ' ';
 
@@ -536,7 +582,7 @@ export function App() {
       // reach the process log in a preview build, so it goes through the
       // metrics channel.
       if (isDev && (event.ctrlKey || event.altKey)) {
-        window.zoey.reportMetrics(
+        window.tessa.reportMetrics(
           `PTT-KEY code=${event.code || '(none)'} key=${JSON.stringify(event.key)} ` +
             `ctrl=${event.ctrlKey} alt=${event.altKey} shift=${event.shiftKey} ` +
             `repeat=${event.repeat} focus=${document.hasFocus()} match=${match}`,
@@ -545,14 +591,14 @@ export function App() {
       if (!match) return;
       held = true;
       event.preventDefault();
-      window.zoey.pushToTalkEdge('down');
+      window.tessa.pushToTalkEdge('down');
     }
 
     function onUp(event: KeyboardEvent) {
       if (!held) return;
       if (!isSpace(event) && event.key !== 'Control' && event.key !== 'Alt') return;
       held = false;
-      window.zoey.pushToTalkEdge('up');
+      window.tessa.pushToTalkEdge('up');
     }
 
     window.addEventListener('keydown', onDown);
@@ -562,7 +608,7 @@ export function App() {
       window.removeEventListener('keyup', onUp);
       // Unmounting mid-hold would otherwise strand the claim with no keyup
       // listener left to end it.
-      if (held) window.zoey.pushToTalkEdge('up');
+      if (held) window.tessa.pushToTalkEdge('up');
     };
   }, [holdMode, isDev]);
 
@@ -616,8 +662,9 @@ export function App() {
     const id = window.setInterval(() => {
       const s = readStats();
       if (s.publishedAt === 0) return;
-      window.zoey.reportMetrics(
-        `tier=${s.tier} pts=${s.particles} focused=${s.focused} n=${s.samples} ` +
+      window.tessa.reportMetrics(
+        `tier=${s.tier} pts=${s.particles} pgain=${s.paletteGain.toFixed(3)} ` +
+          `focused=${s.focused} n=${s.samples} ` +
           `cost=${s.cost.p50.toFixed(2)}/${s.cost.p95.toFixed(2)} ` +
           `raf=${s.raf.p50.toFixed(1)}/${s.raf.p95.toFixed(1)} ` +
           `shown=${s.present.p50.toFixed(1)}/${s.present.p95.toFixed(1)} ` +
@@ -646,7 +693,7 @@ export function App() {
     if (!isDev || geometryMs <= 0 || !engine) return;
     const id = window.setInterval(() => {
       const r = engine.probeFrame('full');
-      if (r) window.zoey.reportMetrics(`PROBE-GEO ${describeProbe(r)}`);
+      if (r) window.tessa.reportMetrics(`PROBE-GEO ${describeProbe(r)}`);
     }, geometryMs);
     return () => window.clearInterval(id);
   }, [isDev, geometryMs, engine]);
@@ -666,7 +713,7 @@ export function App() {
     const id = window.setInterval(() => {
       const r = engine.probeFrame('column');
       if (!r) return;
-      window.zoey.reportMetrics(
+      window.tessa.reportMetrics(
         `PROBE-PULSE t=${performance.now().toFixed(0)} uPulse=${r.uPulse.toFixed(4)} ` +
           `sum=${r.sum} dpx=${Number.isFinite(r.pixelDelta) ? r.pixelDelta.toFixed(3) : 'na'} ` +
           `lit=${r.lit} col=${r.x0}..${r.x1} h=${r.bufH} ` +
@@ -699,7 +746,7 @@ export function App() {
     const id = window.setInterval(() => {
       const r = engine.probeFrame(limbMode ? 'limb' : 'centre');
       if (!r) return;
-      window.zoey.reportMetrics(
+      window.tessa.reportMetrics(
         `PROBE-${limbMode ? 'LIMB' : 'CENTRE'} t=${performance.now().toFixed(0)} ` +
           `dpx=${Number.isFinite(r.pixelDelta) ? r.pixelDelta.toFixed(4) : 'na'} ` +
           `sum=${r.sum} lit=${r.lit} rect=${r.x0}..${r.x1} ` +
@@ -737,104 +784,192 @@ export function App() {
   const rightPanelW = tokenPx('--panel-right-w', 280);
 
   /**
-   * The column yields to BOTH the drawer and the approval card.
+   * BOTH COLUMNS TOGETHER, OR NEITHER.
    *
-   * The card is anchored top-right and is opaque, which is where the column
-   * lives — and when a red-tier action is waiting, ambient telemetry is not
-   * what he should be reading. The column is ambient; the drawer and the card
-   * are deliberate, and deliberate wins.
+   * The old build dropped the left panel first and kept the right, which let
+   * the sphere slide sideways into the gap and put the calendar over it — his
+   * second complaint. In the reference the two columns are a symmetric frame
+   * with the sphere clear between them, so they are one decision now: there is
+   * room for the pair, or the stage is bare and the sphere takes the middle.
+   *
+   * They yield to the drawer and to the approval card for the reasons they
+   * always did — both are deliberate where a column is ambient, and the card
+   * is opaque.
    */
   const cardPresent = useStore(approvalsStore).length > 0;
-  const showRight = viewport.w >= PANEL_RIGHT_W && rail === null && !cardPresent;
-  /**
-   * The LEFT panel goes first, and it is the right one to lose.
-   *
-   * It carries the month grid, which is a date — a fact the owner can also get
-   * from the clock in his own taskbar. The right panel carries uptime, spend,
-   * CPU and the audit count, which exist nowhere else on this machine. When
-   * only one panel fits, the one that is the sole source of its information
-   * stays. The left panel also sits on the side the sphere is offset TOWARD,
-   * so it is the one that would squeeze the sphere first.
-   */
-  const showLeft = viewport.w >= PANEL_BOTH_W && showRight;
-  const showAxis = viewport.w >= AXIS_MIN_W;
-  const axisWindowMs = viewport.w >= AXIS_SHORT_W ? 3 * 60_000 : 60_000;
 
   /**
-   * THE SPHERE MUST NOT OVERFLOW — item 2e, and it is a geometry problem, not a
-   * styling one.
+   * AN APPROVAL CARD CLOSES ANY OPEN DRAWER. His ruling: one thing on the right
+   * at a time, and with the rail moved to the right edge the card, the drawer
+   * and the rail are literally the same column.
    *
-   * Three constraints, and the sphere obeys the tightest:
-   *   1. the stage's height, so it never clips against the inset border;
-   *   2. the clear width between whichever panels are showing;
-   *   3. its natural projected size, which it may never EXCEED — the fit factor
-   *      only ever shrinks, so a very tall window does not inflate the sphere
-   *      into something the crescent was not measured at.
-   *
-   * Computed against the WINDOW rather than against a resize observer on the
-   * canvas: the canvas is `inset: 0` on the stage, so this arithmetic and the
-   * engine's own `setSize` are driven by the same number and cannot disagree.
+   * It closes on the card's ARRIVAL only. When the card is answered the drawer
+   * STAYS CLOSED — he reopens it — so there is deliberately no restore here and
+   * no memory of what was open. Restoring would put a panel back on screen at
+   * the exact moment he has just made a decision and is looking at the result.
    */
+  const hadCard = useRef(false);
+  useEffect(() => {
+    if (cardPresent && !hadCard.current) railStore.set(null);
+    hadCard.current = cardPresent;
+  }, [cardPresent]);
+
+  /**
+   * THE STAGE IS BARE BY DEFAULT. His ruling, and it changes the whole view.
+   *
+   * The only permanent panel is the calendar, docked bottom-left. Everything
+   * else lives behind a rail. So the sphere's clear space is the whole stage
+   * minus three things, each of which it must actually avoid:
+   *
+   *   the calendar dock, bottom-left and always there;
+   *   the drawer, when a rail is open;
+   *   the approval card, which is opaque and must never cover the sphere —
+   *     a red-tier approval is exactly when he most needs to read her state.
+   */
+  const calDockW = leftPanelW;
+  const calDockH = 300;
+
+  /**
+   * THE RAIL IS ON THE RIGHT NOW, and every x in this function moved with it.
+   *
+   * His ruling, and it settles a collision rather than a preference: the rails
+   * used to sit on the LEFT and open rightward, so PULSE's drawer rendered over
+   * the calendar — the one permanent panel, docked bottom-left. Moving the rail
+   * to the far right puts the rail, its drawer and the approval card into ONE
+   * right-hand column and leaves the whole left side to the calendar.
+   *
+   * Three things had to move together and any one left behind is a bug:
+   *   the stage now starts at x = 0 and ends at viewport.w - railW, so every
+   *     `railW + …` that meant "the left inside edge" became a bare clearance
+   *     and every right-hand bound gained a `- railW`;
+   *   the drawer shift REVERSED — the sphere used to dodge right, away from a
+   *     left drawer, and must now dodge LEFT;
+   *   the canvas origin moved, so `--sphere-cx` and `offsetPx` no longer
+   *     subtract railW.
+   */
+
   const naturalR = canvasH * SPHERE_NATURAL_R;
+
+  /**
+   * THE SPHERE IS BUILT TO A MEASURED SIZE, not to a guess.
+   *
+   * Measured off reference/v2/image7 with a perspective correction the
+   * measurement validates itself against: the reference's left panel comes out
+   * at 240 window-px and its right panel at ~280, which are exactly this
+   * build's `--panel-left-w` and `--panel-right-w`. Two independent landmarks
+   * landing on known values is what makes the third trustworthy —
+   *
+   *   reference sphere   549 window-px of 1366  =  40.2%
+   *   previous build     396 window-px          =  29.0%
+   *
+   * A CORRECTION TO THE BRIEF, which read the reference as "nearer two thirds".
+   * It is not: two thirds of 1366 is 911 px, which would not fit the 692 px
+   * stage at all. 40% is what the pixels say, and the pixels win.
+   */
+  /**
+   * The approval card SHRINKS the sphere as well as shifting it.
+   *
+   * Shifting alone left 14 px between the two — measured — because the sphere
+   * is now 30% larger than when that arithmetic was written and it simply ran
+   * out of room to move into. A red-tier approval is the one moment he most
+   * needs to read her state, so the sphere gives up size for it rather than
+   * crowding the card.
+   */
+  const cardW = Math.min(460, viewport.w - 32);
   const clearW =
-    canvasW -
-    (showLeft ? leftPanelW + PANEL_CLEARANCE : 0) -
-    (showRight ? rightPanelW + PANEL_CLEARANCE : 0);
+    canvasW - 2 * PANEL_CLEARANCE - (cardPresent ? cardW + PANEL_CLEARANCE : 0);
+  const clearH = canvasH - TOP_ROW_H - BOTTOM_CONTROLS_H;
   const allowedR = Math.min(
-    (canvasH * SPHERE_FILL) / 2,
-    (Math.max(120, clearW) * SPHERE_FILL) / 2,
+    (clearH * SPHERE_FILL) / 2,
+    (Math.max(140, clearW) * SPHERE_FILL) / 2,
     naturalR,
   );
   const fit = allowedR / naturalR;
   const sphereR = allowedR;
 
   /**
-   * With a drawer open the sphere must clear its right edge, or an opaque panel
-   * slides over the one thing that carries state. Otherwise it sits at the
-   * composition's fraction.
+   * The vertical placement, computed before the horizontal one because the
+   * dock test needs it and it does not depend on x.
    */
-  /**
-   * The sphere sits at 34% of the width WHEN THERE IS SOMETHING AT 66%.
-   *
-   * Item 6.1 asks for the sphere off the bullseye, and it is right — a circle
-   * centred in a rectangle with equal emptiness on all four sides is the least
-   * dynamic arrangement available. But asymmetry is a relationship, not a
-   * number: with both panels gone at 900x600 the same 0.34 left an entire empty
-   * right half and read as a mistake rather than as a composition. Measured off
-   * the capture: the sphere ended at x=513 in a 900px frame with nothing after
-   * it.
-   *
-   * So the fraction follows what is actually beside it. Still off centre in
-   * every case — 0.44 is not 0.5 — but the emptiness is a margin rather than a
-   * missing panel.
-   */
-  const xFraction = showRight ? SPHERE_X_FRACTION : SPHERE_X_FRACTION_BARE;
-  const wantCx = rail
-    ? Math.max(xFraction * viewport.w, railW + drawerWidth + sphereR + 24)
-    : xFraction * viewport.w;
+  const targetCyPre = Math.max(
+    STATUS_H + TOP_ROW_H + sphereR,
+    Math.min(
+      STATUS_H + TOP_ROW_H + clearH / 2,
+      viewport.h - BOTTOM_CONTROLS_H - sphereR,
+    ),
+  );
 
   /**
-   * Fitting the sphere is only half of not overflowing. It must also be PLACED
-   * so that the disc lands inside the stage: a correctly-sized sphere pushed to
-   * 34% of a narrow window still hangs off the left edge.
+   * The sphere centres in what is actually free.
    *
-   * Clamped in window coordinates against the stage's own bounds, with the
-   * left bound at the rail rather than at zero. `Math.max` runs last so that if
-   * the two bounds ever cross — a window narrower than the sphere, which the
-   * fit above should prevent — the sphere is pinned inside the left edge rather
-   * than sliding off the right one.
+   * With the columns gone it has the whole frame — which is the view he will
+   * look at most and the one to get right. The calendar dock is bottom-left and
+   * the sphere sits above and right of it rather than being pushed off centre
+   * by it; only the card and the drawer move it horizontally.
    */
+  /**
+   * THE CALENDAR DOCK IS A LEFT-SIDE OCCUPANT WHENEVER THE SPHERE REACHES IT.
+   *
+   * At 1366x720 the sphere's lower edge stops above the dock's band and the two
+   * never meet, so the sphere keeps the whole width. At 900x600 they do meet —
+   * measured, `dockClash=true` — and the sphere sat over the calendar, which is
+   * the exact fault he reported in the previous build ("the calendar is
+   * blocking it") arriving from the other direction.
+   *
+   * Not circular: the test uses `targetCy` and `sphereR`, neither of which
+   * depends on the horizontal placement being computed here.
+   */
+  const dockRight = PANEL_CLEARANCE + calDockW;
+  const dockTop = viewport.h - PANEL_CLEARANCE - calDockH;
+  // Where the sphere WOULD sit with the dock ignored…
+  const bareLeft = PANEL_CLEARANCE;
+  const bareRight =
+    viewport.w - railW - (cardPresent ? cardW + PANEL_CLEARANCE : PANEL_CLEARANCE);
+  const cxIfCentred = (bareLeft + bareRight) / 2;
+  // …and whether that actually overlaps the dock's box, in BOTH axes. Testing
+  // only the vertical band pushed the sphere right at 1366x720, where the two
+  // are nowhere near each other.
+  const dockReached =
+    cxIfCentred - sphereR < dockRight && targetCyPre + sphereR > dockTop;
+  const clearLeft = dockReached ? dockRight + PANEL_CLEARANCE : bareLeft;
+  const clearRight = bareRight;
+  /**
+   * THE DRAWER SHIFT FLIPPED WITH THE RAIL — Math.max became Math.min.
+   *
+   * The old line pushed the sphere RIGHT until it cleared a LEFT-hand drawer.
+   * The drawer is on the right now, so the same intent is the mirror: pull the
+   * sphere LEFT until its right edge clears the drawer's left edge. Leaving the
+   * max in place would have shoved the sphere straight into the panel it is
+   * supposed to be avoiding, and it would have looked like the drawer was
+   * "pushing" correctly right up until someone measured the overlap.
+   */
+  const wantCx = rail
+    ? Math.min(
+        (clearLeft + clearRight) / 2,
+        viewport.w - railW - drawerWidth - sphereR - PANEL_CLEARANCE,
+      )
+    : (clearLeft + clearRight) / 2;
   const targetCx = Math.max(
-    railW + sphereR + PANEL_CLEARANCE,
-    Math.min(wantCx, viewport.w - sphereR - PANEL_CLEARANCE),
+    sphereR + PANEL_CLEARANCE,
+    Math.min(wantCx, viewport.w - railW - sphereR - PANEL_CLEARANCE),
   );
-  const targetCy = Math.max(
-    STATUS_H + sphereR + PANEL_CLEARANCE,
-    Math.min(SPHERE_Y_FRACTION * viewport.h, viewport.h - sphereR - PANEL_CLEARANCE),
-  );
+  /**
+   * Vertically the sphere sits in the band between the top row and the bottom
+   * controls. The calendar dock does NOT push it up: the dock is bottom-LEFT
+   * and the sphere is centred, so at the sizes this runs at they clear each
+   * other in x. `calDockW`/`calDockH` exist so the no-clip proof can state that
+   * rather than leave it to be noticed later.
+   */
+  const targetCy = targetCyPre;
+  /** Does the disc reach into the calendar dock's box? Reported, not assumed. */
+  const dockClash =
+    targetCx - sphereR < PANEL_CLEARANCE + calDockW &&
+    targetCy + sphereR > viewport.h - PANEL_CLEARANCE - calDockH;
 
   // Engine convention: positive x moves LEFT by x/2, positive y moves UP by y/2.
-  const offsetPx = -2 * (targetCx - railW - canvasW / 2);
+  // The canvas starts at x = 0 now that the rail is on the right, so there is
+  // no railW to subtract.
+  const offsetPx = -2 * (targetCx - canvasW / 2);
   const offsetYPx = -2 * (targetCy - STATUS_H - canvasH / 2);
 
   /**
@@ -850,7 +985,7 @@ export function App() {
    * standing on it rather than leaving a stripe behind.
    */
   const stageVars = {
-    '--sphere-cx': `${(targetCx - railW).toFixed(1)}px`,
+    '--sphere-cx': `${targetCx.toFixed(1)}px`,
     '--sphere-cy': `${(targetCy - STATUS_H).toFixed(1)}px`,
     '--sphere-r': `${sphereR.toFixed(1)}px`,
   } as React.CSSProperties;
@@ -871,7 +1006,120 @@ export function App() {
   // this app can do (see the note on the depthFar prop).
   useEffect(() => {
     engine?.setFit(fit);
-  }, [engine, fit]);
+    // The layout's own numbers, reported so a disagreement between what this
+    // computes and what the sphere renders is visible in a log rather than
+    // inferred from a screenshot. It was inferred once and the inference was
+    // wrong by 50 px.
+    if (isDev) {
+      window.tessa.reportMetrics(
+        `LAYOUT canvas=${canvasW}x${canvasH} rail=${rail ?? 'none'} card=${cardPresent} ` +
+          `left=${leftPanelW} right=${rightPanelW} clearW=${clearW.toFixed(0)} ` +
+          `clearH=${clearH.toFixed(0)} naturalR=${naturalR.toFixed(1)} ` +
+          `allowedR=${allowedR.toFixed(1)} fit=${fit.toFixed(3)} ` +
+          `cx=${targetCx.toFixed(0)} cy=${targetCy.toFixed(0)} dockClash=${dockClash}`,
+      );
+    }
+  }, [
+    engine,
+    fit,
+    canvasW,
+    canvasH,
+    rail,
+    cardPresent,
+    leftPanelW,
+    rightPanelW,
+    clearW,
+    clearH,
+    naturalR,
+    allowedR,
+    targetCx,
+    targetCy,
+    dockClash,
+  ]);
+
+  /**
+   * The two background companions, placed in the top corners BEHIND the panels.
+   *
+   * ─── what putting them behind the panels costs, measured before, not now ───
+   * The approval-card round measured a transparent panel over a bright sphere
+   * and found it unreadable; these panels carry text he must read. Three things
+   * keep that from repeating, and none of them is luck:
+   *
+   *   the companions are DIM by construction (uBrightness 0.46 against the main
+   *   sphere's 1.10) — see companions.ts;
+   *   the panel fill measured off the reference is within four levels of the
+   *   void — very nearly opaque black — and the panels use --panel, which
+   *   composites to the same neighbourhood;
+   *   they are placed so their CENTRES sit in the gap between the rail and the
+   *   column, so it is their dim outer edge that goes under the panel, never
+   *   their lit limb.
+   *
+   * Fractions of the CANVAS, which is what the engine expects. Recomputed on
+   * every layout change so a resize or a drawer moves them with everything else.
+   */
+  /**
+   * JOBS AND CHAT OPEN THEMSELVES WHEN THERE IS SOMETHING IN THEM.
+   *
+   * His ruling: a panel appears when it becomes active, and stays until he
+   * dismisses it — no timeout, no auto-close. The trigger is built; NOTHING
+   * FIRES IT TODAY. Jobs waits on a Phase 5 queue that does not exist, and
+   * typed chat waits on Session 1 wiring the agent loop to a surface. Both
+   * conditions below are permanently false right now, and that is the honest
+   * state rather than a stub that opens on nothing.
+   *
+   * One-shot per transition, not per render: `openedFor` remembers what it has
+   * already opened for, so dismissing a panel does not have it spring back on
+   * the next tick. That is the difference between "opens when it becomes
+   * active" and "cannot be closed while active".
+   */
+  const openedFor = useRef<{ jobs: boolean; chat: boolean }>({ jobs: false, chat: false });
+  const jobsActive = false; // no producer: evt.job.* is never emitted
+  const chatActive = false; // no producer: typed chat is not wired
+  useEffect(() => {
+    if (jobsActive && !openedFor.current.jobs) {
+      openedFor.current.jobs = true;
+      railStore.set('jobs');
+    }
+    if (!jobsActive) openedFor.current.jobs = false;
+    if (chatActive && !openedFor.current.chat) {
+      openedFor.current.chat = true;
+      railStore.set('chat');
+    }
+    if (!chatActive) openedFor.current.chat = false;
+  }, [jobsActive, chatActive]);
+
+  useEffect(() => {
+    if (!engine) return;
+    /**
+     * A QUARTER of the main sphere's diameter, measured off image7: the left
+     * companion spans ~110 photo-px and the right ~135 against the main's 480,
+     * i.e. 0.23 and 0.28. They read unmistakably as spheres there and as
+     * slivers here, which was his complaint.
+     *
+     * Expressed against `sphereR` so they grow with it — a fixed world radius
+     * would have them shrink relative to the main sphere every time it grew.
+     *
+     * 0.42 first, which MEASURED at 0.42-0.48 of the main diameter against the
+     * reference's 0.23-0.28 — overshot by nearly two. 0.23 is the corrected
+     * coefficient, and the measurement is why it is not a guess in either
+     * direction.
+     */
+    /**
+     * THE TWO ARE NOT THE SAME SIZE, and in the reference they never were.
+     * Measured on image7, where both are fully in shot: the left companion is
+     * 0.244 of the main disc and the right is 0.320. One shared coefficient was
+     * an averaging error, not a simplification — two identical balls either
+     * side of the sphere read as a symmetrical ornament, which is the opposite
+     * of three companions with their own identities.
+     */
+    const fit = sphereR / Math.max(1, naturalR);
+    const left = Math.max(0.14, Math.min(0.42, fit * 0.24));
+    const right = Math.max(0.14, Math.min(0.42, fit * 0.30));
+    engine.setCompanions([
+      { side: 'left', fx: rail ? 0.34 : 0.17, fy: 0.21, scale: left },
+      { side: 'right', fx: cardPresent ? 0.62 : 0.85, fy: 0.2, scale: right },
+    ]);
+  }, [engine, rail, cardPresent, sphereR, naturalR]);
 
   /**
    * Spec §4: "sphere state change → visible, p95 80 ms, hard fail 200 ms".
@@ -893,7 +1141,7 @@ export function App() {
     // only one comparable to the pre-dwell figures; `queued` is the deliberate
     // wait; `total` is what the owner actually experiences. Reported apart so
     // nobody can read the sum as a rendering result.
-    window.zoey.reportMetrics(
+    window.tessa.reportMetrics(
       `STATE-VISIBLE state=${state} ` +
         `queuedMs=${pending.queuedMs.toFixed(2)} ` +
         `drawnMs=${(at - pending.at).toFixed(2)} ` +
@@ -906,26 +1154,18 @@ export function App() {
       <StatusBar />
 
       <div className="app__body">
-        <Rail />
-
-        <main className="stage" style={stageVars} data-column={showRight}>
-          {/* Item 6.2 — THE FLOOR, and the real one rather than the contact
-              ellipse he rejected.
-
-              A horizon plus a receding grid, in CSS, behind the canvas. Not in
-              the WebGL scene and not as 1px lines, both deliberately: the
-              renderer runs with `antialias: false`, so hairlines converging
-              toward a vanishing point would land on fractional pixels and
-              crawl on an HD 620 every time the sphere breathes. Gradient bands
-              are filtered rather than sampled, they are STATIC — nothing here
-              animates, so there is nothing to crawl — and the plane fades out
-              well before the bands get close enough to moiré. */}
-          <div className="floor" aria-hidden="true" />
+        <main className="stage" style={stageVars} data-bare={rail === null && !cardPresent}>
           {/* Nothing is drawn until bootstrap resolves and the tier is known.
               Rendering <Sphere> on the default 'med' first would create a WebGL
               context and allocate particle buffers, only to tear both down a
               frame later when the probe answers 'dom' — the exact machine where
-              that answer is likeliest is the one least able to afford it. */}
+              that answer is likeliest is the one least able to afford it.
+
+              THE FLOOR AND THE EDGE DETAIL ARE GONE, and the time axis with
+              them. None appears in any of the sixteen reference images, and the
+              axis's "-3m -2m -1m" ruler plus its second rule across the bottom
+              cut the composition in half — his words. The telemetry those
+              served now lives in the PULSE rail. */}
           {!bootstrap ? null : tier === 'dom' ? (
             <DomSphere offsetPx={offsetPx} offsetYPx={offsetYPx} />
           ) : (
@@ -937,55 +1177,46 @@ export function App() {
               onStateRendered={onStateRendered}
               depthFar={bootstrap.forcedDepth}
               rim={bootstrap.forcedSphere}
+              counts={bootstrap.forcedCount}
+              faceSat={bootstrap.forcedFaceSat}
+              paletteGain={bootstrap.forcedPaletteGain}
               offsetYPx={offsetYPx}
             />
           )}
 
-
-          {/* Ornament. Asserts nothing, below AA by construction, no numerals. */}
-          <EdgeDetail />
-
-          {/* Item 4g. Top centre, over the stage — see StateChip for what this
-              did to the status bar and why the bar could not simply move. */}
+          {/* Top row, as the reference has it: the state centre, the clock
+              right. The CALM pill beside the clock is NOT built — nothing in
+              core/ maps to it. See the report. */}
           <StateChip />
+          <Clock />
 
-          {/* Item 4d. Under the sphere, tracking it: `--sphere-cx` and
-              `--sphere-r` are the same values the engine is positioned from, so
-              the name cannot drift away from the thing it names. */}
-          <Wordmark />
+          {/* Bottom centre: the arrows he kept pointing at, her name, the
+              indicator, and the pill. See CompanionSwitcher for why the arrows
+              are present-but-disabled rather than absent or fake. */}
+          <CompanionSwitcher />
 
           {/* §R.2 — the HUD sits over the stage, never inside a drawer.
-              All three render nothing until they have something true to show.
-
-              The approval stack is FIRST and sits above the others: it is the
-              only one of the three that is interrupting rather than ambient,
-              and a notification toast must never overlap the buttons of a red
-              action. */}
+              The approval stack is FIRST and above the others: it interrupts
+              where they are ambient, and a toast must never cover the buttons
+              of a red action. */}
           <ApprovalStack />
           <NotificationStack />
           <LastLine />
 
-          {/* The right column. Hidden while a drawer is open — the column is
-              ambient and the drawer is deliberate — and below 1040px, where it
-              would start squeezing the sphere rather than sitting beside it. */}
-          {/* The two floating panels. Left is the month grid, right is the
-              telemetry. Both render nothing rather than an empty frame when
-              they do not fit — see showLeft / showRight for the order they go
-              in and why the left one goes first. */}
-          {showLeft ? (
-            <aside className="panel panel--left">
-              <Calendar />
-            </aside>
-          ) : null}
-          {showRight ? (
-            <aside className="panel panel--right">
-              <Column />
-            </aside>
-          ) : null}
+          {/* THE CALENDAR IS THE ONLY PERMANENT PANEL, bottom-left.
+              His ruling: nothing else shows until it has something to say or he
+              opens it. Everything that used to sit on the stage — the status
+              card, the jobs list, the chat, the telemetry column — is behind a
+              rail now, which is the mechanism that already existed for exactly
+              this. See RAIL_IDS.
 
-          {/* The time axis. Renders nothing when no audit entry falls in the
-              window, ruler included: a ruler over nothing is an empty box. */}
-          {showAxis ? <TimeAxis windowMs={axisWindowMs} /> : null}
+              It is the one panel always on screen because the month with today
+              marked is true without a producer, and because a glanceable
+              always-on surface at 2am should say the date. */}
+          <aside className="cal-dock">
+            <Calendar />
+            <Today />
+          </aside>
         </main>
 
         <Drawer
@@ -995,6 +1226,11 @@ export function App() {
         >
           {railById(lastRail.current).render()}
         </Drawer>
+
+        {/* LAST, so grid auto-placement puts it in the second column. The rail
+            is a grid item; the drawer above it is absolutely positioned and so
+            takes no track. */}
+        <Rail blocked={cardPresent} />
       </div>
 
       {/* Dev-only AND off by default. `isDev` alone was the wrong gate: the

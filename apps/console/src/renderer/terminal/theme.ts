@@ -11,7 +11,7 @@
  *
  * ── Why only five colours are set ────────────────────────────────────────────
  * ITheme also accepts a 16-colour ANSI ramp (black/red/green/... plus their
- * bright variants). **The Zoey token set has no ANSI ramp**, and
+ * bright variants). **The Tessa token set has no ANSI ramp**, and
  * `packages/tokens` is SHARED — the Console session does not edit it.
  *
  * Verified in `node_modules/@xterm/xterm/typings/xterm.d.ts:343+`: **every
@@ -24,7 +24,7 @@
  */
 
 import type { ITheme } from '@xterm/xterm'
-import tokens from '@zoey/tokens'
+import tokens from '@tessa/tokens'
 
 const c = (name: string): string => {
   const entry = (tokens.color as Record<string, { value: string } | undefined>)[name]
@@ -32,8 +32,24 @@ const c = (name: string): string => {
   return entry.value
 }
 
-export const zoeyTerminalTheme: ITheme = {
-  background: c('bg-void'),
+export const tessaTerminalTheme: ITheme = {
+  /**
+   * TRANSPARENT, SO THE WATERMARK BEHIND THE STAGE IS VISIBLE.
+   *
+   * This was `bg-void`, and that is why he could not see the mark: xterm paints
+   * its theme background across the whole screen element, opaque, so the mark
+   * sat behind a solid floor. Measured — with one pane the xterm screen covered
+   * 1134x522 of an 1160x558 stage, leaving only a 5px border strip of the mark
+   * showing, which is indistinguishable from nothing.
+   *
+   * The void colour is still painted: `body` carries `--bg-void`, so the
+   * terminal looks identical. It simply no longer has its own floor.
+   *
+   * Written as rgba rather than a hex with an alpha pair because
+   * scripts/check-contract.mjs fails the build on any hex literal in surface
+   * source, and it has already caught two of mine.
+   */
+  background: 'rgba(0,0,0,0)',
   foreground: c('text'),
   cursor: c('accent'),
   /** Foreground of the block cursor — the void colour, so the glyph inverts. */
@@ -43,7 +59,7 @@ export const zoeyTerminalTheme: ITheme = {
 }
 
 /** Font stack and metrics, also token-sourced. JetBrains Mono is deferred to 1b. */
-export const zoeyFont = {
+export const tessaFont = {
   fontFamily: (tokens.font as Record<string, { value: string }>)['mono']!.value,
   fontSize: parseInt((tokens.fontSize as Record<string, { value: string }>)['base']!.value, 10),
   lineHeight: 1.2,

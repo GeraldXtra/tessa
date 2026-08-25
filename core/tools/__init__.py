@@ -56,7 +56,7 @@ _FILES = [
     ),
     _spec(
         name="fs.search", tier="green", capability="fs.search", handler=files.search,
-        phrasings=("find a file called invoice", "search for zoey",
+        phrasings=("find a file called invoice", "search for tessa",
                    "where is my resume", "find anything named budget"),
         success="{things}, Emperor. {first}, in {where}.",
         failure="I found none, sir. {reason} {alternative}",
@@ -66,7 +66,7 @@ _FILES = [
     _spec(
         name="fs.read", tier="green", capability="fs.read", handler=files.read_text,
         phrasings=("read me that file", "what's in the readme",
-                   "read C:\\dev\\zoey\\plan.md"),
+                   "read C:\\dev\\tessa\\plan.md"),
         success="{things}, Emperor. {chars} characters.",
         audit="read {path}",
         note="Refuses a OneDrive placeholder BEFORE reading it — invariant 5.",
@@ -346,7 +346,7 @@ _BROWSER = [
         phrasings=("open github dot com", "go to bbc.co.uk", "open x.com in the browser"),
         success="Open, Emperor. {title}.",
         audit="browse {url}",
-        note="Launches Chrome LAZILY on first use, in Zoey's own profile — never his.",
+        note="Launches Chrome LAZILY on first use, in Tessa's own profile — never his.",
     ),
     _spec(
         name="web.search", tier="green", capability="browser.search",

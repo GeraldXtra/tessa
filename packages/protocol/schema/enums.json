@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://zoey.local/schema/enums.json",
-  "title": "Zoey closed enums — SINGLE SOURCE OF TRUTH",
+  "$id": "https://tessa.local/schema/enums.json",
+  "title": "Tessa closed enums — SINGLE SOURCE OF TRUTH",
   "description": "CONTRACT.md §7.4. These were previously hand-maintained in four places (CONTRACT.md, index.ts, core/*.py, tests) and would have drifted. TypeScript and Python are now GENERATED from this file by build-enums.mjs. Adding a value to any set marked closed:true is a BREAKING change requiring a PROTOCOL_VERSION bump.",
 
   "meta": {

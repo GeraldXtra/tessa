@@ -122,7 +122,7 @@ check("resolve_edit never reads a tier from the frame",
       'edited["tier"]' not in src and 'edited.get("tier"' not in src)
 
 # ── 3. EXECUTION — the edited version runs, the original does not ───────────
-tmp = Path(os.environ["TEMP"]) / "zoey-approval-tests"
+tmp = Path(os.environ["TEMP"]) / "tessa-approval-tests"
 tmp.mkdir(exist_ok=True)
 wrong = tmp / "WRONG.txt"
 right = tmp / "RIGHT.txt"
@@ -216,7 +216,7 @@ check("...removing it from the gate too", b.request_id not in g.pending)
 # BOTH EXECUTE. On `x.post` that is the same tweet published twice.
 import threading  # noqa: E402
 
-tmp2 = Path(os.environ["TEMP"]) / "zoey-approval-tests"
+tmp2 = Path(os.environ["TEMP"]) / "tessa-approval-tests"
 tmp2.mkdir(exist_ok=True)
 victim = tmp2 / "race.txt"
 victim.write_text("x", encoding="utf-8")

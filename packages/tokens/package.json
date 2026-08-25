@@ -1,8 +1,8 @@
 {
-  "name": "@zoey/tokens",
+  "name": "@tessa/tokens",
   "version": "1.0.0",
   "private": true,
-  "description": "Design tokens shared by Zoey Console and Zoey Orb. SHARED — see CONTRACT.md §7 before editing.",
+  "description": "Design tokens shared by Tessa Console and Tessa Orb. SHARED — see CONTRACT.md §7 before editing.",
   "type": "module",
   "main": "./tokens.json",
   "exports": {

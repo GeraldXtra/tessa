@@ -26,6 +26,10 @@
 import type { ReactNode } from 'react';
 
 import type { RailId } from '../state/store.ts';
+import { ChatPanel } from '../layout/ChatPanel.tsx';
+import { Column } from '../layout/Column.tsx';
+import { JobsPanel } from '../layout/JobsPanel.tsx';
+import { StatusCard } from '../layout/StatusCard.tsx';
 import { DarkPanel } from './DarkPanel.tsx';
 import { SentinelPanel } from './SentinelPanel.tsx';
 import { TracePanel } from './TracePanel.tsx';
@@ -42,6 +46,21 @@ export interface RailDef {
 export const RAILS: readonly RailDef[] = [
   { id: 'trace', label: 'Trace', answers: 'What did we say?', render: () => <TracePanel /> },
   { id: 'sentinel', label: 'Sentinel', answers: 'Is it safe?', render: () => <SentinelPanel /> },
+  // PULSE, JOBS and CHAT are the three that came off the stage. See the note on
+  // RAIL_IDS for why they are rails rather than a second kind of panel.
+  { id: 'pulse', label: 'Pulse', answers: 'How is it running?', render: () => <Column /> },
+  {
+    id: 'jobs',
+    label: 'Jobs',
+    answers: 'What is she doing?',
+    render: () => (
+      <>
+        <StatusCard />
+        <JobsPanel />
+      </>
+    ),
+  },
+  { id: 'chat', label: 'Chat', answers: 'What did I type?', render: () => <ChatPanel /> },
   // Built and dark. Each renders its own missing command; see DarkPanel.tsx.
   { id: 'arsenal', label: 'Arsenal', answers: 'What can she do?', render: () => <DarkPanel id="arsenal" /> },
   { id: 'recall', label: 'Recall', answers: 'What does she remember?', render: () => <DarkPanel id="recall" /> },

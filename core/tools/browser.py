@@ -3,7 +3,7 @@ core/tools/browser.py — a real browser, driven by Playwright.
 
 THE PROFILE DECISION, RESTATED BECAUSE IT IS THE WHOLE SECURITY POSTURE
 
-A DEDICATED `user_data_dir` under `%LOCALAPPDATA%\\Zoey\\browser-profiles\\`.
+A DEDICATED `user_data_dir` under `%LOCALAPPDATA%\\Tessa\\browser-profiles\\`.
 NEVER his main Chrome profile, for two independent reasons, either of which
 would be sufficient:
 
@@ -50,7 +50,7 @@ from typing import Any
 
 from .base import ToolError, ToolHold
 
-PROFILE_ROOT = Path(os.environ.get("LOCALAPPDATA", "")) / "Zoey" / "browser-profiles"
+PROFILE_ROOT = Path(os.environ.get("LOCALAPPDATA", "")) / "Tessa" / "browser-profiles"
 DEFAULT_PROFILE = PROFILE_ROOT / "default"
 
 #: Where the live Chrome's PID is recorded, so a daemon that was force-killed
@@ -212,7 +212,7 @@ class BrowserSession:
                         self.close(reason="idle")
                         return
 
-        self._reaper = threading.Thread(target=run, name="zoey-browser-idle", daemon=True)
+        self._reaper = threading.Thread(target=run, name="tessa-browser-idle", daemon=True)
         self._reaper.start()
 
     # ── teardown ─────────────────────────────────────────────────────────────
@@ -286,7 +286,7 @@ def reap_orphan() -> str:
         # `safeproc.owns()` asks "does this process descend from one I started".
         # An orphan by definition outlived the daemon that launched it, so its
         # parent chain is broken and the answer is always no. What IS provable
-        # is that this chrome.exe was launched against ZOEY'S OWN profile
+        # is that this chrome.exe was launched against TESSA'S OWN profile
         # directory — a path no Chrome of his will ever carry, because he has
         # never opened that folder. That is a stronger claim than image name and
         # it is the one that actually holds for an orphan.
@@ -558,7 +558,7 @@ def read_page(url: str | None = None) -> dict[str, Any]:
 def screenshot(path: str | None = None) -> dict[str, Any]:
     page = SESSION.page()
     target = Path(path) if path else (
-        Path(os.environ.get("LOCALAPPDATA", ".")) / "Zoey" / "screenshots"
+        Path(os.environ.get("LOCALAPPDATA", ".")) / "Tessa" / "screenshots"
         / f"shot-{int(time.time())}.png")
     target.parent.mkdir(parents=True, exist_ok=True)
     page.screenshot(path=str(target), full_page=False)

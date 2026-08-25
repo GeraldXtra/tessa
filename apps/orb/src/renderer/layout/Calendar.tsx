@@ -11,7 +11,7 @@
  * A month grid is a different kind of statement. "August 2026 has 31 days, the
  * 16th is a Sunday, and today is the 16th" is derived entirely from the clock,
  * which this process already owns and which is true without anybody asserting
- * it. It needs no producer because it makes no claim about Zoey — it is the
+ * it. It needs no producer because it makes no claim about Tessa — it is the
  * same category of fact as the uptime counter beside it.
  *
  * ─── what it is FOR, which is the honest part ───

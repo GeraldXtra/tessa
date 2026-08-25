@@ -12,7 +12,7 @@
 
 import { useEffect, useRef } from 'react';
 
-import type { AgentState } from '@zoey/protocol';
+import type { AgentState } from '@tessa/protocol';
 
 import type { SphereTier } from '../../shared/ipc-contract.ts';
 import { agentStateStore } from '../state/store.ts';
@@ -49,6 +49,12 @@ interface SphereProps {
   depthFar?: number | null;
   /** DEV ONLY. `--force-sphere=`; null uses the engine's measured defaults. */
   rim?: SphereEngineOptions['rim'] | null;
+  /** DEV ONLY. `--force-count=`; null uses PARTICLE_COUNT for the tier. */
+  counts?: SphereEngineOptions['counts'] | null;
+  /** DEV ONLY. `--force-facesat=<0..1>`; 1 disables the desaturation. */
+  faceSat?: number | null;
+  /** DEV ONLY. `--force-pgain=<0|1>`; false disables palette normalisation. */
+  paletteGain?: boolean | null;
 }
 
 export function Sphere({
@@ -60,6 +66,9 @@ export function Sphere({
   onStateRendered,
   depthFar,
   rim,
+  counts,
+  faceSat,
+  paletteGain,
 }: SphereProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const engineRef = useRef<SphereEngine | null>(null);
@@ -89,6 +98,9 @@ export function Sphere({
       // relaunch, which is exactly how the before/after is taken anyway.
       ...(typeof depthFar === 'number' ? { depthFar } : {}),
       ...(rim ? { rim } : {}),
+      ...(counts ? { counts } : {}),
+      ...(typeof faceSat === 'number' ? { faceSat } : {}),
+      ...(typeof paletteGain === 'boolean' ? { paletteGain } : {}),
       onTierChange: (next, reason) => onTierChangeRef.current(next, reason),
       onStateRendered: (state, at) => onStateRenderedRef.current?.(state, at),
     });
@@ -97,7 +109,7 @@ export function Sphere({
 
     // §R.8 item 8 — a display change can move us to a panel with a different
     // refresh rate, which changes the correct frame divider.
-    const offDisplay = window.zoey.onDisplayChanged(() => {
+    const offDisplay = window.tessa.onDisplayChanged(() => {
       console.log('[orb] display changed — re-probing refresh rate');
       engine.reprobeRefresh();
     });
@@ -105,7 +117,7 @@ export function Sphere({
     // §R.1 — the equatorial pulse rides the real heartbeat. Subscribed here
     // rather than in App so it never passes through a React render: the pulse
     // must fire on arrival, not on the next reconciliation.
-    const offBeat = window.zoey.onHealth((health) => {
+    const offBeat = window.tessa.onHealth((health) => {
       engine.beat();
 
       /**
