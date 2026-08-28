@@ -840,7 +840,7 @@ export const UV_ALPHA_MAX = 1.0;
  * state is scaled by the same number) and the companions, which build their own
  * uniforms, are untouched.
  */
-export const UV_BRIGHT_MUL = 1.45;
+export const UV_BRIGHT_MUL = 1.35;
 
 /**
  * ─── THE DOTS WERE SINGLE PIXELS, AND EVEN LIGHTING IS WHY ───
@@ -882,7 +882,7 @@ export const UV_POINT_SCALE_MUL = 4.0;
  * and neighbours at ~8 px spacing overlap two-deep.
  */
 export const UV_CORE_TIGHT = 6.7;
-export const UV_GLOW_GAIN = 0.3;
+export const UV_GLOW_GAIN = 0.2;
 
 function buildGeometry(count: number, latticeJitter: number): BufferGeometry {
   // Ring plan first, so the buffers are allocated to the EXACT produced count and

@@ -58,10 +58,14 @@ Thumbs.db
 desktop.ini
 
 # folder
-sessions/
 *sessions/
-resume.session.txt
-reference/
+*resume.session.txt
 *reference/
-Legacy/
 *Legacy/
+*docs/
+*env.example
+*CLAUDE.md
+*CONTRACT.md
+*docs-reconciliation.md
+*HANDOFF.md
+*plan.md
