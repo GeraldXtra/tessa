@@ -1046,8 +1046,34 @@ ol {
      IT IS THEME-DEPENDENT and that is stated rather than hidden: the accent's
      own luminance sets it, so gold lands near 4.2 and red near 1.8 against
      magenta's 2.0. Normalising it would need a per-theme constant, which is a
-     bigger change than the finding justifies. */
-  background: color-mix(in srgb, var(--bg-ambient) 10%, transparent);
+     bigger change than the finding justifies.
+
+     ─── 10% -> 6.5%. IT WAS TUNED IN MAGENTA AND HIS DEFAULT THEME IS GOLD ───
+
+     Measured with the floor in place, medians over 9-10 frames per theme,
+     against the reference photograph's own dot-to-floor 13.5-18.3 and dot-to-gap
+     modulation 0.862-0.896:
+
+         theme     floor   dot peak   modulation   dot/floor
+         magenta   2.139     36.23      0.888        16.93     inside both
+         red       1.923     33.56      0.889        17.05     inside both
+         gold      3.924     39.03      0.813         9.71     OUTSIDE BOTH
+
+     Gold is his default theme and it was the one theme never measured. The
+     accents' luminances differ by 2.4x — gold 208, magenta 99.8, red 87.3 — and
+     the floor is the accent at 2%, so gold's floor came out 1.8x magenta's and
+     took a third of the face's contrast with it.
+
+     6.5% is the one number that brings gold inside: floor ~2.55, dot/floor 15.3,
+     modulation 0.874. It puts magenta near 1.39 and red near 1.25, i.e. dot/floor
+     around 26 — ABOVE the reference's band, which is the benign direction: more
+     contrast than the photograph shows, where they had infinite contrast before
+     this floor existed at all.
+
+     A per-theme mix (magenta 11.0%, gold 6.5%, red 11.4%) would put all three on
+     the reference's median of 15.4. That is still the per-theme constant flagged
+     above as a bigger change than the finding justifies, and it is not taken. */
+  background: color-mix(in srgb, var(--bg-ambient) 6.5%, transparent);
 }
 
 /* The ambient glow behind the sphere. CONTRACT §9.1: no card background on the

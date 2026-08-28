@@ -9,8 +9,8 @@
  */
 
 import { execFile } from 'node:child_process'
-import { join } from 'node:path'
-import { MessageChannelMain, utilityProcess, type BrowserWindow, type UtilityProcess } from 'electron'
+import { join, sep } from 'node:path'
+import { app, MessageChannelMain, utilityProcess, type BrowserWindow, type UtilityProcess } from 'electron'
 import type { HostToMain, MainToHost, PtyHostKind } from '../shared/pty-ipc.ts'
 import { PTY_PORT_CHANNEL } from '../shared/pty-ipc.ts'
 
@@ -340,10 +340,48 @@ export async function shutdownPtyHost(): Promise<void> {
  * Resolves with the child and the verdict. The child is NOT killed on a failed
  * probe — main decides what to do, and killing here would race that decision.
  */
+/**
+ * The utilityProcess entry script, resolved for BOTH layouts.
+ *
+ * In development `__dirname` is `apps/console/out/main` and `pty-host.js` sits
+ * beside `index.js`, exactly as the second rollup input puts it. In a packaged
+ * build `__dirname` is `...\resources\app.asar\out\main` — and this host cannot
+ * run from there. TWO separate reasons, and both have to hold:
+ *
+ *   1. `pty-host.js` does `require('@lydell/node-pty')`, and a native `.node`
+ *      binary cannot be loaded out of an asar archive at all. electron-builder
+ *      therefore unpacks the addon to
+ *      `resources\app.asar.unpacked\node_modules\@lydell\...`.
+ *
+ *   2. Node resolves that `require` by walking up from the DIRECTORY OF THE
+ *      SCRIPT. A host running from inside `app.asar\out\main` walks
+ *      `app.asar\node_modules` and finds the PACKED copy — the one that cannot
+ *      load. Only a host running from `app.asar.unpacked\out\main` walks
+ *      `app.asar.unpacked\node_modules` and reaches the unpacked one.
+ *
+ * Point 2 is the part that is easy to miss: unpacking the addon is necessary
+ * and NOT sufficient. So `out/main/pty-host.js` is itself listed in
+ * `asarUnpack` (see electron-builder.yml) and the path is rewritten to match.
+ *
+ * The rewrite is a plain string swap because that is precisely what
+ * electron-builder guarantees: `app.asar.unpacked` is a sibling directory whose
+ * internal shape is identical to the archive's. `sep` is used rather than a
+ * literal so the match cannot accidentally fire on a path fragment.
+ *
+ * WHY NOT JUST `asar: false`. Turning the archive off entirely would work and
+ * would also unpack ~1,900 renderer and source files onto disk as loose files,
+ * slowing first launch and making the install directory trivially editable.
+ * Two unpack entries are the smaller, more honest change.
+ */
+function ptyHostEntry(): string {
+  const entry = join(__dirname, 'pty-host.js')
+  if (!app.isPackaged) return entry
+  return entry.replace(`app.asar${sep}`, `app.asar.unpacked${sep}`)
+}
+
 function forkAndProbe(): Promise<{ child: UtilityProcess; probe: Extract<HostToMain, { t: 'probe' }> }> {
   return new Promise((resolve, reject) => {
-    // Built as a second input on the main config, so it lands beside index.js.
-    const entry = join(__dirname, 'pty-host.js')
+    const entry = ptyHostEntry()
 
     const child = utilityProcess.fork(entry, [], {
       serviceName: 'tessa-pty-host',

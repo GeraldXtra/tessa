@@ -75,7 +75,29 @@ export const MIN_PANE_PX = 220
  * At two on 1366px each pane is about 683px, which is roughly 95 columns —
  * wider than the 80 that almost everything is written for.
  */
-export const MAX_PANES_PER_TAB = 2
+/**
+ * ── THE TWO-PANE CAP IS LIFTED ────────────────────────────────────────────
+ *
+ * This was 2, from his own ruling after seven panes on 1366x768 gave terminals
+ * of roughly 450x290 and he said "This is not it. It will be hard to read any
+ * logs." That reading was right at the time.
+ *
+ * HE HAS OVERRIDDEN IT. He now wants Windows Terminal's splitting, and the cap
+ * is gone rather than raised — there is no number that is correct for every
+ * window size, which is exactly why the GEOMETRIC guard below is the right
+ * gate and a count never was.
+ *
+ * NOTHING IS UNGUARDED. `canSplit` still refuses a split that would leave
+ * either half under MIN_PANE_PX (horizontally) or MIN_PANE_PX_V (vertically),
+ * and it still says so with the measured numbers. On 1366px that permits four
+ * columns and stops at five, which is the same protection the cap was reaching
+ * for, applied to the pane he is actually splitting instead of to a total.
+ *
+ * The constant is kept, exported and unused by the cap so the reasoning above
+ * has somewhere to live. It is the ceiling of last resort: a runaway loop
+ * cannot fill the tree, but nothing he does by hand will ever reach it.
+ */
+export const MAX_PANES_PER_TAB = 64
 
 /** Same reasoning vertically: below this there is no room for output at all. */
 export const MIN_PANE_PX_V = 90
@@ -181,12 +203,13 @@ export function canSplit(
   // THE CAP IS CHECKED FIRST, because its message is the useful one. Telling him
   // "this pane is too narrow" when the real answer is "open a tab" would send
   // him to resize a window that was never the problem.
+  // THE COUNT IS NO LONGER THE GATE — GEOMETRY IS. This used to refuse at two
+  // panes and send him to a new tab. He has lifted that; the only refusal left
+  // is the one that can be justified in pixels, below.
   if (countLeaves(node) >= MAX_PANES_PER_TAB) {
     return {
       ok: false,
-      reason:
-        `this tab already has ${MAX_PANES_PER_TAB} panes — press Ctrl+Shift+T for a new tab, ` +
-        `which is where more than two terminals belong`,
+      reason: `this tab already has ${MAX_PANES_PER_TAB} panes, which is the structural ceiling`,
     }
   }
   if (dir === 'row') {

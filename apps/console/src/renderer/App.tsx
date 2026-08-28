@@ -8,7 +8,6 @@ import { MIN_PANE_PX } from './panes/tree.ts'
 import {
   canSplit,
   closePane,
-  MAX_PANES_PER_TAB,
   countLeaves,
   describe,
   dividers,
@@ -46,9 +45,9 @@ interface Tab {
 const TREE_WIDTH_PX = 250
 
 let nextTabId = 0
-function newTab(): Tab {
+function newTab(shellId?: string): Tab {
   nextTabId += 1
-  const leaf = newLeaf()
+  const leaf = newLeaf(shellId)
   return { id: `tab-${nextTabId}`, tree: leaf, focusedPaneId: leaf.id, zoomed: false }
 }
 
@@ -58,9 +57,12 @@ function newTab(): Tab {
  * PANES FOR TWO THINGS SIDE BY SIDE; TABS FOR MANY TERMINALS.
  *
  * Seven panes filled 1366x768 with terminals of roughly 450x290, and his
- * reaction was "This is not it. It will be hard to read any logs." He was
- * right. Seven terminals is a real need; seven panes is the wrong shape for it.
- * Panes are capped at MAX_PANES_PER_TAB (two); tabs are uncapped.
+ * reaction was "This is not it. It will be hard to read any logs." That capped
+ * panes at two for several rounds.
+ *
+ * HE HAS LIFTED THAT CAP. Panes are now unlimited, as Windows Terminal has
+ * them; the only refusal left is geometric, in `canSplit`, and it is stated in
+ * measured pixels. Tabs remain uncapped as they always were.
  *
  * WHAT LIVES HERE, AND WHY
  *
@@ -83,6 +85,10 @@ export default function App(): React.JSX.Element {
   const [keymap, setKeymap] = useState<Record<string, KeyAction>>({ ...FALLBACK_KEYMAP })
   const [prefs, setPrefs] = useState({ rightClickPastes: true, copyOnSelect: false, scrollback: 8000 })
   const [shells, setShells] = useState<{ id: string; label: string; available: boolean; how: string }[]>([])
+  /** Read inside callbacks, so `addTab` does not need `shells` as a dependency. */
+  const shellsRef = useRef<{ id: string; label: string; available: boolean; how: string }[]>([])
+  /** Whether the tab strip's shell dropdown is open. */
+  const [shellMenuOpen, setShellMenuOpen] = useState(false)
   const [meta, setMeta] = useState<Record<string, PaneMeta>>({})
   const [notice, setNotice] = useState('')
   const [stageSize, setStageSize] = useState({ w: 0, h: 0 })
@@ -161,7 +167,10 @@ export default function App(): React.JSX.Element {
     void window.tessa
       .getShells()
       .then((r) => {
-        if (!cancelled) setShells(r.shells)
+        if (!cancelled) {
+          setShells(r.shells)
+          shellsRef.current = r.shells
+        }
       })
       .catch((err: unknown) =>
         console.log(`SETTINGS PROBLEM could not list shells: ${(err as Error).message}`),
@@ -334,12 +343,25 @@ export default function App(): React.JSX.Element {
    * an afternoon in Git Bash every new tab had silently stopped being
    * PowerShell.
    */
-  const addTab = useCallback(() => {
-    const t = newTab()
-    setTabs((ts) => [...ts, t])
-    setActiveTabId(t.id)
-    say(`new tab — ${tabsRef.current.length + 1} open`)
-  }, [say])
+  /**
+   * A new tab, optionally in a named shell.
+   *
+   * The argument is what the `∨` dropdown adds over the bare `+`: the `+`
+   * passes nothing and the pane resolves the default shell exactly as it always
+   * has, while a dropdown pick names one. There is no second shell registry —
+   * `shellId` is threaded to the same `newLeaf(shellId)` a split already uses,
+   * and main resolves it through `resolveShells()` like every other spawn.
+   */
+  const addTab = useCallback(
+    (shellId?: string) => {
+      const t = newTab(shellId)
+      setTabs((ts) => [...ts, t])
+      setActiveTabId(t.id)
+      const label = shellId ? shellsRef.current.find((s) => s.id === shellId)?.label : undefined
+      say(`new tab${label ? ` — ${label}` : ''} — ${tabsRef.current.length + 1} open`)
+    },
+    [say],
+  )
 
   const cycleTab = useCallback((delta: number) => {
     const ts = tabsRef.current
@@ -435,7 +457,9 @@ export default function App(): React.JSX.Element {
           : n
         : { ...n, children: [toChat(n.children[0], id), toChat(n.children[1], id)] }
 
-    if (countLeaves(tab.tree) < MAX_PANES_PER_TAB) {
+    // No count test any more — `canSplit` answers in geometry, and it is the
+    // only thing that can tell a splittable pane from an unsplittable one.
+    {
       const rect = { x: 0, y: 0, w: stageSizeRef.current.w, h: stageSizeRef.current.h }
       const verdict = canSplit(tab.tree, tab.focusedPaneId, 'row', rect)
       if (verdict.ok) {
@@ -538,6 +562,21 @@ export default function App(): React.JSX.Element {
     ])
     const off = window.tessa.onMenu?.((cmd: string) => {
       if (cmd.startsWith('shell:')) return openShellInFocused(cmd.slice(6))
+      /*
+        DEV HARNESS: click a chrome control by CSS selector.
+        `devkey:` and `devtype:` can drive the terminal, and `menu:` can drive a
+        named action — but neither can press a BUTTON, and the tab strip's `+`
+        and shell dropdown are buttons. Without this the only proof that the
+        dropdown opens would be "I read the code", which is not a proof.
+        Absent from every normal launch: nothing sends `devclick:` but a script.
+      */
+      if (cmd.startsWith('devclick:')) {
+        const sel = cmd.slice(9)
+        const el = document.querySelector<HTMLElement>(sel)
+        console.log(`DEVCLICK ${sel} found=${Boolean(el)}`)
+        el?.click()
+        return
+      }
       const tab = tabsRef.current.find((t) => t.id === activeRef.current)
       const id = tab?.focusedPaneId ?? ''
       if (cmd === 'openChat') {
@@ -706,6 +745,7 @@ export default function App(): React.JSX.Element {
       </header>
 
       {/* THE TAB STRIP, as his screenshot shows: a name, an X, and a +. */}
+      <div className="tab-row">
       <div className="tab-strip" role="tablist">
         {tabs.map((t) => (
           <div
@@ -730,9 +770,55 @@ export default function App(): React.JSX.Element {
             </button>
           </div>
         ))}
-        <button className="tab-add" onClick={addTab} title="New tab — Ctrl+Shift+T">
-          +
-        </button>
+        </div>
+        {/*
+          THE `+` AND THE `▾`, as his Windows Terminal screenshot shows.
+
+          `+` opens a tab in the DEFAULT shell — it passes no id, so the pane
+          resolves `settings.defaultShell` exactly as it always did. On this
+          machine that is PowerShell. `∨` names one instead.
+
+          This is clickable chrome that an earlier ruling of his ("type only,
+          no icon rail") forbade; he has overridden that ruling deliberately.
+          Both still have keyboard equivalents — nothing became mouse-only.
+        */}
+        <div className="tab-new">
+          <button className="tab-add" onClick={() => addTab()} title="New tab — Ctrl+Shift+T">
+            +
+          </button>
+          <button
+            className="tab-menu"
+            title="New tab in a specific shell"
+            aria-haspopup="menu"
+            aria-expanded={shellMenuOpen}
+            onClick={() => setShellMenuOpen((v) => !v)}
+          >
+            ▾
+          </button>
+          {shellMenuOpen ? (
+            <>
+              {/* Below the popup, above everything else: one click anywhere
+                  dismisses it without the popup's own buttons losing theirs. */}
+              <div className="tab-menu-scrim" onMouseDown={() => setShellMenuOpen(false)} />
+              <div className="tab-menu-pop" role="menu">
+                {shells.map((sh) => (
+                  <button
+                    key={sh.id}
+                    role="menuitem"
+                    disabled={!sh.available}
+                    title={sh.available ? sh.how : `not found — ${sh.how}`}
+                    onClick={() => {
+                      setShellMenuOpen(false)
+                      addTab(sh.id)
+                    }}
+                  >
+                    {sh.label}
+                  </button>
+                ))}
+              </div>
+            </>
+          ) : null}
+        </div>
       </div>
 
       <div className="term-bar">
@@ -808,13 +894,11 @@ export default function App(): React.JSX.Element {
         ) : null}
       <div className="pane-stage" ref={stageRef}>
         {/*
-          ONE mark, on the stage, behind every pane — never inside one. A split
-          cannot duplicate it and a divider cannot cut it, because the panes are
-          painted over it rather than containing it.
+          THE "TESSA" WATERMARK USED TO BE HERE AND IS GONE — "remove the Tessa
+          Background there ... doesn't look good there". An empty terminal is
+          what Windows Terminal shows and what he pointed at. Nothing replaced
+          it: inventing decorative artwork is not something to do unasked.
         */}
-        <div className="watermark" aria-hidden="true">
-          <span>TESSA</span>
-        </div>
         {tabs.map((t) => {
           const placed = layoutOf(t)
           const bars =
@@ -822,8 +906,17 @@ export default function App(): React.JSX.Element {
               ? []
               : dividers(t.tree, { x: 0, y: 0, w: stageSize.w, h: stageSize.h })
           const active = t.id === activeTabId
+          // `data-panes` drives ONE css rule: a single-pane tab paints no focus
+          // border, because with one pane that border is a rectangle around the
+          // whole Console rather than a pane affordance.
+          const visible = placed.filter((r) => !r.hidden).length
           return (
-            <div key={t.id} className="tab-page" data-active={active ? 'yes' : 'no'}>
+            <div
+              key={t.id}
+              className="tab-page"
+              data-active={active ? 'yes' : 'no'}
+              data-panes={visible}
+            >
               {placed.map((r) => {
                 const leaf = findLeaf(t.tree, r.id)
                 const isChat = leaf?.content === 'chat'

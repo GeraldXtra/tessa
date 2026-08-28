@@ -100,7 +100,7 @@ LOG_DIR = REPO / "data" / "logs"
 LAUNCHER = REPO / "scripts" / "start-tessa.cmd"
 
 
-def _write_launcher(voice: bool, stt_model: str) -> Path:
+def _write_launcher(voice: bool, stt_model: str, delay: int = 20) -> Path:
     """
     A .cmd wrapper, so the shortcut points at something readable.
 
@@ -118,10 +118,25 @@ REM Delete the shortcut in shell:startup to stop Tessa starting at login,
 REM or turn it off in Task Manager > Startup.
 cd /d "{REPO}"
 set "LOGDIR={LOG_DIR}"
+
+REM -- WAIT FOR THE AUDIO STACK ------------------------------------------
+REM A Startup-folder shortcut fires as soon as the shell is up, which can be
+REM BEFORE the audio endpoints have finished enumerating. With --voice that
+REM means opening a microphone that is not there yet: she either comes up deaf
+REM or dies, in a minimised window nobody is watching. A Scheduled Task has a
+REM built-in delay and a Startup shortcut does not, so the wait lives here.
+REM Change the number or delete these two lines if it is not wanted.
+timeout /t {delay} /nobreak > nul
 if not exist "%LOGDIR%" mkdir "%LOGDIR%"
 for /f "tokens=1-3 delims=/-. " %%a in ("%DATE%") do set "STAMP=%%c-%%b-%%a"
 echo. >> "%LOGDIR%\\daemon-%STAMP%.log"
 echo ==== started %DATE% %TIME% ==== >> "%LOGDIR%\\daemon-%STAMP%.log"
+REM -- THE DOUBLE-START GUARD --------------------------------------------
+REM Exit 3 means a daemon is already live, so this login must not start a
+REM second one. Two overlapping daemons forked the audit chain once already.
+"{sys.executable}" scripts\\autostart.py --check >> "%LOGDIR%\\daemon-%STAMP%.log" 2>&1
+if errorlevel 3 goto :alreadyrunning
+
 "{sys.executable}" core\\server.py {args} >> "%LOGDIR%\\daemon-%STAMP%.log" 2>&1
 echo ==== exited with %ERRORLEVEL% at %TIME% ==== >> "%LOGDIR%\\daemon-%STAMP%.log"
 REM A non-zero exit leaves this window open so a failed start is VISIBLE.
@@ -131,6 +146,13 @@ if not "%ERRORLEVEL%"=="0" (
   echo   %LOGDIR%\\daemon-%STAMP%.log
   pause
 )
+exit /b 0
+
+:alreadyrunning
+REM Not an error, and deliberately quiet: a daemon is already up and doing its
+REM job. Recorded in the log so "why did nothing start at login" is answerable.
+echo ==== skipped: a daemon was already running ==== >> "%LOGDIR%\\daemon-%STAMP%.log"
+exit /b 0
 """
     LAUNCHER.write_text(body, encoding="utf-8")
     return LAUNCHER
@@ -155,8 +177,61 @@ $lnk.Save()
     return True, str(SHORTCUT)
 
 
-def install(voice: bool, stt_model: str) -> int:
-    launcher = _write_launcher(voice, stt_model)
+EXIT_ALREADY_RUNNING = 3
+
+
+def check_running() -> int:
+    """
+    THE DOUBLE-START GUARD. Exit 0 = safe to start. Exit 3 = one is already up.
+
+    ────────────────────────────────────────────────────────────────────────────
+    WHY THIS EXISTS, IN ONE SENTENCE
+
+    Two overlapping daemons are what FORKED HIS AUDIT CHAIN at line 71 on
+    2026-08-12 — a `daemon.start` at 14:00:56 and a `daemon.stop` at 14:00:58
+    both claiming seq 69. That break cannot be repaired and is still there.
+
+    Login is precisely when it would happen again: he leaves a daemon running in
+    a PowerShell window, the machine sleeps rather than shuts down, and the next
+    logon fires the Startup shortcut into a session that already has one.
+
+    ────────────────────────────────────────────────────────────────────────────
+    IT ASKS THE ONE FUNCTION THAT ALREADY KNOWS
+
+    `rt.read_runtime_file()` implements CONTRACT §1 already: it reads
+    runtime.json and returns None when the recorded pid is NOT alive, so a stale
+    file left by a power cut is ignored rather than trusted. Re-deriving that
+    here would be a second, drifting copy of a rule with exactly one correct
+    implementation.
+
+    ────────────────────────────────────────────────────────────────────────────
+    WHICH WAY IT FAILS, AND WHY THAT DIRECTION
+
+    An unreadable file, or a `core` that will not import, returns 0 — SAFE TO
+    START. Failing the other way would let one broken file permanently stop her
+    starting at login, with no window and no message to say why. A spurious
+    second daemon is loud and fixable; a silent never-starts is neither.
+    """
+    sys.path.insert(0, str(REPO))
+    try:
+        from core.security import runtime as rt
+
+        info = rt.read_runtime_file()
+    except Exception as exc:  # noqa: BLE001
+        print(f"guard: cannot tell ({type(exc).__name__}: {exc}) — starting anyway")
+        return 0
+
+    if info:
+        print(f"guard: a daemon is ALREADY RUNNING — pid {info['pid']} on port "
+              f"{info['port']} since {info['startedAt']}. Not starting a second one.")
+        return EXIT_ALREADY_RUNNING
+
+    print("guard: no live daemon found — safe to start")
+    return 0
+
+
+def install(voice: bool, stt_model: str, delay: int = 20) -> int:
+    launcher = _write_launcher(voice, stt_model, delay)
     ok, detail = _make_shortcut(launcher)
     if not ok:
         print(f"could not install: {detail}")
@@ -166,6 +241,7 @@ def install(voice: bool, stt_model: str) -> int:
     print(f"  launcher : {launcher}")
     print(f"  logs     : {LOG_DIR}")
     print(f"  voice    : {'ON - the microphone opens at login' if voice else 'off'}")
+    print(f"  delay    : {delay}s after logon, so the audio stack is ready")
     print()
     print("To turn it off, either:")
     print("  python scripts/autostart.py --remove")
@@ -224,13 +300,19 @@ if __name__ == "__main__":
     ap.add_argument("--install", action="store_true")
     ap.add_argument("--remove", action="store_true")
     ap.add_argument("--status", action="store_true")
+    ap.add_argument("--check", action="store_true",
+                    help="exit 3 if a daemon is already live (the double-start guard)")
     ap.add_argument("--voice", action="store_true",
                     help="open the microphone at login (opt-in, not the default)")
     ap.add_argument("--stt-model", default="base")
+    ap.add_argument("--delay", type=int, default=20,
+                    help="seconds to wait after logon before starting (audio readiness)")
     a = ap.parse_args()
 
+    if a.check:
+        raise SystemExit(check_running())
     if a.remove:
         raise SystemExit(remove())
     if a.install:
-        raise SystemExit(install(a.voice, a.stt_model))
+        raise SystemExit(install(a.voice, a.stt_model, a.delay))
     raise SystemExit(status())

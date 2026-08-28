@@ -244,6 +244,44 @@ export function createCompanion(
     // note there. These carry their own fixed identities and must not be
     // washed either.
     uFaceSat: { value: 1.0 },
+    /**
+     * ─── THIS LINE IS LOAD-BEARING. WITHOUT IT THE COMPANIONS LOSE THEIR CRESCENT ───
+     *
+     * `uEvenLight` belongs to the MAIN sphere, which is a UV grid and is lit
+     * evenly. The companions are not, and must keep their directional shading.
+     *
+     * It would be tempting to leave it undeclared and trust WebGL's zero
+     * initialisation. THAT IS WRONG HERE AND IT WAS MEASURED WRONG. three.js
+     * caches one compiled WebGLProgram per unique shader source, and both spheres
+     * use the same source — so they SHARE the program, and uniform values live on
+     * the program, not on the material. A uniform a material does not declare is
+     * simply not uploaded, so it keeps whatever the previous draw left there. The
+     * main sphere draws first with uEvenLight = 1, and the companions inherited it.
+     *
+     * Caught by direct box photometry rather than by reading the code: covered
+     * area in the companion boxes fell from 32.87% / 32.66% to 18.29% / 12.40%
+     * and their peak brightness rose 19.45 -> 26.58 and 25.52 -> 42.83 — smaller,
+     * hotter sprites, which is exactly what losing the rim's point growth and its
+     * energy-spread divisor does. Declaring it explicitly pins it back to 0.
+     */
+    uEvenLight: { value: 0 },
+    /**
+     * ALPHA_MAX became a uniform so the main sphere could raise its ceiling.
+     * 0.55 is the value the companions were fitted with and it is pinned here
+     * for the same reason uEvenLight is: three.js shares one compiled program
+     * between the two sphere kinds, and a uniform this material does not declare
+     * keeps whatever the previous draw call left on it.
+     */
+    uAlphaMax: { value: 0.55 },
+    /**
+     * NO GLOW ON THE COMPANIONS. With gain 0 and tight 1 the compound falloff
+     * reduces to sqrt(sharp^2) = sharp — bit-identical to what they had. Pinned
+     * for the same reason uEvenLight and uAlphaMax are: three.js shares one
+     * compiled program between the two sphere kinds, and an undeclared uniform
+     * keeps whatever the previous draw left on it.
+     */
+    uGlowGain: { value: 0 },
+    uCoreTight: { value: 1 },
     // The SAME light as the main sphere, flipped to the left with it. Three
     // objects in one scene lit from two directions would read as three
     // different rooms. See LIGHT_DIR in sphere-engine.ts for the count across

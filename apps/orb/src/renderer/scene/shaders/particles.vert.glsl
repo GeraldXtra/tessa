@@ -70,6 +70,19 @@ uniform vec3 uLightDir;
 /** Peak-to-peak radial jitter as a fraction of the radius. Breaks the lattice. */
 uniform float uJitter;
 
+/**
+ * EVEN LIGHTING, 1 = on. The MAIN sphere sets it; the companions never declare
+ * it, so WebGL leaves it at 0 and they keep the directional shading they were
+ * fitted with. That is why this is a uniform and not a constant.
+ *
+ * reference/main-orb.png has no bright side and no crescent — measured, its left
+ * half and right half differ by a factor of 1.114 where a directionally lit
+ * sphere differs by several — so the rim's POINT GROWTH has to go with the rim's
+ * brightness. Leaving the growth on would keep 3x sprites on one limb of an
+ * otherwise evenly lit ball.
+ */
+uniform float uEvenLight;
+
 varying float vRim;
 varying float vSeed;
 varying float vPulse;
@@ -255,7 +268,7 @@ void main() {
   float face = smoothstep(-0.15, 0.85, vLight);
   float grow = pow(vFresnel, uRimPow);
   float base = uPointScale * uSizeScale / max(-viewPos.z, 0.001);
-  float want = base * (1.0 + uRimSize * grow * face);
+  float want = base * (1.0 + uRimSize * grow * face * (1.0 - uEvenLight));
   float got  = clamp(want, 1.0, POINT_SIZE_MAX);
   gl_PointSize = got;
 

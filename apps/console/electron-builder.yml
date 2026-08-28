@@ -1,0 +1,172 @@
+# apps/console/electron-builder.yml — how Tessa Console becomes a Windows app.
+#
+# Kept in its own file rather than a `build` key in package.json because that
+# file already carries a long `$comment` block explaining externalization, and
+# two unrelated build systems arguing inside one JSON object is how packaging
+# config quietly gets edited by the wrong person.
+
+appId: com.tessa.console
+productName: Tessa Console
+
+# ─────────────────────────────────────────────────────────────────────────────
+# appId IS EFFECTIVELY ONE-WAY.
+#
+# Windows keys the uninstall entry, the per-user install location and — through
+# `app.requestSingleInstanceLock()` — the single-instance identity off this
+# string. Change it later and Windows treats the result as a DIFFERENT
+# application: the old install orphans in Programs and Features with no
+# uninstaller reachable from the new one, and a dev build stops recognising an
+# installed build as itself. Chosen once, with room beside it: the Orb becomes
+# com.tessa.orb, and neither collides.
+#
+# `executableName` is set so the binary is TessaConsole.exe rather than
+# "Tessa Console.exe". The display name keeps the space; the file name does not,
+# because a space in an executable name is a quoting bug waiting for the first
+# script that forgets it — including the ancestry checks in scripts/safeproc.py.
+executableName: TessaConsole
+
+directories:
+  # `out/` is electron-vite's. Sharing it would mean electron-builder packing
+  # its own previous output. `release/` is already covered by .gitignore.
+  output: release
+  buildResources: build
+
+# ─────────────────────────────────────────────────────────────────────────────
+# WHAT GOES IN THE ARCHIVE
+#
+# `out/**` is the whole compiled surface: main, preload, and the Vite renderer
+# bundle. `package.json` must be present — Electron reads its `main` field to
+# find the entry point.
+#
+# The four exclusions are renderer-only dependencies that Vite has ALREADY
+# inlined into out/renderer/assets. They sit in `dependencies` because that is
+# where npm needs them, and electron-builder packs `dependencies` by default —
+# so without these lines the archive carries a second, unreferenced copy of
+# React and xterm that nothing can ever require.
+files:
+  - out/**/*
+  - package.json
+  - node_modules/**/*
+  - '!**/*.map'
+  - '!node_modules/react/**'
+  - '!node_modules/react-dom/**'
+  - '!node_modules/scheduler/**'
+  - '!node_modules/@xterm/**'
+
+# ─────────────────────────────────────────────────────────────────────────────
+# THE ENTRY THAT DECIDES WHETHER ANY SHELL EVER SPAWNS
+#
+# A native `.node` binary CANNOT be loaded from inside an asar archive. Without
+# these lines the app installs cleanly, launches cleanly, draws the entire
+# interface — and every terminal fails to spawn, with a failure that looks
+# exactly like the CONTRACT §6.5 grant gate misbehaving.
+#
+#   @lydell/node-pty              the JS wrapper. It resolves its binary through
+#                                 a runtime dynamic require plus an on-disk
+#                                 package.json read; both need real files.
+#   @lydell/node-pty-win32-x64    conpty.node and conpty_console_list.node —
+#                                 the two actual binaries. (Verified: those are
+#                                 the only non-JS files the package ships; there
+#                                 is no OpenConsole.exe or conpty.dll here,
+#                                 because in-box ConPTY is what this uses.)
+#   out/main/pty-host.js          NOT optional, and the part that is easy to
+#                                 miss. Node resolves `require('@lydell/node-pty')`
+#                                 by walking up from the directory of the SCRIPT
+#                                 doing the requiring. A host running inside
+#                                 app.asar/out/main walks app.asar/node_modules
+#                                 and finds the packed copy — the one that
+#                                 cannot load. Only a host running from
+#                                 app.asar.unpacked/out/main reaches the
+#                                 unpacked one. See ptyHostEntry() in
+#                                 src/main/pty-host.ts, which rewrites the fork
+#                                 path to match.
+asarUnpack:
+  - node_modules/@lydell/node-pty/**
+  - node_modules/@lydell/node-pty-win32-x64/**
+  - out/main/pty-host.js
+
+# ─────────────────────────────────────────────────────────────────────────────
+# NO NATIVE REBUILD.
+#
+# electron-builder defaults to rebuilding native modules against Electron's ABI.
+# MSVC IS installed on this machine, so that rebuild would SUCCEED — quietly
+# costing minutes and disk on a machine with neither to spare, and replacing a
+# tested binary with an untested one.
+#
+# It is also unnecessary. @lydell/node-pty 1.1.0 builds on node-addon-api ^7,
+# i.e. Node-API, which is ABI-stable across Node AND Electron — the whole reason
+# it can ship ONE prebuilt conpty.node with no per-ABI directories. That is not
+# theory here: the same binary already loads in this project's Electron 43
+# utilityProcess in development.
+npmRebuild: false
+
+# ─────────────────────────────────────────────────────────────────────────────
+# tcli — SHIPPED BY THE INSTALLER, SO THE UNINSTALLER TAKES IT AWAY
+#
+# `extraResources` places the file beside the app rather than inside app.asar,
+# which is what lets a shell run it. It lands at
+#     %LOCALAPPDATA%\Programs\TessaConsole\resources\tcli.cmd
+# and NSIS records it, so uninstalling removes it. A copy dropped somewhere on
+# PATH by hand would outlive the app and sit there answering `tcli` with a path
+# to an executable that no longer exists.
+extraResources:
+  - from: resources/tcli.cmd
+    to: tcli.cmd
+
+win:
+  target:
+    - nsis
+  # Generated by scripts/make-icon.mjs from the palette in
+  # packages/tokens/tokens.json. A PLACEHOLDER: background fill plus a letter T
+  # made of two rectangles. The repo has no application artwork and none was
+  # invented for it.
+  icon: build/icon.ico
+
+nsis:
+  # PER-USER, NO ADMIN PROMPT. Three settings, and all three are required:
+  #   oneClick: false        an assisted installer with a visible UI. The
+  #                          default (true) is a one-click installer that gives
+  #                          no choice of anything.
+  #   perMachine: false      installs to %LOCALAPPDATA%\Programs\, which the
+  #                          user already owns. This is THE setting that decides
+  #                          per-user vs Program Files.
+  #   allowElevation: false  refuses the UAC prompt outright rather than
+  #                          offering it. With perMachine already false this is
+  #                          belt-and-braces, and it makes an accidental
+  #                          machine-wide install impossible.
+  oneClick: false
+  perMachine: false
+  allowElevation: false
+  allowToChangeInstallationDirectory: true
+
+  createStartMenuShortcut: true
+  # Not asked for, so not created. One line to change if that is wrong.
+  createDesktopShortcut: false
+  shortcutName: Tessa Console
+  # No "Tessa Console" folder in the Start Menu — the shortcut goes straight
+  # into Programs, which is where a single-app product belongs.
+  menuCategory: false
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # UNINSTALL MUST NOT TAKE HIS DATA.
+  #
+  # %LOCALAPPDATA%\Tessa holds console-settings.json (his 23 key bindings),
+  # orb-theme.json, runtime.json, and owner.json.bak — the backup of his
+  # VOICEPRINT. None of it is recoverable from a reinstall.
+  #
+  # Two facts, both worth stating because the flag's name overpromises:
+  #   1. `deleteAppDataOnUninstall` only ever targets electron-builder's own
+  #      convention — %APPDATA%\<productName> and the updater cache. It has no
+  #      knowledge of %LOCALAPPDATA%\Tessa and could not delete it if set true.
+  #   2. It is set false anyway, explicitly, so that nothing this installer does
+  #      removes user data under any name.
+  deleteAppDataOnUninstall: false
+
+  # The installer does not launch the app. Launching is a decision, and after a
+  # silent reinstall the previous instance may still be running.
+  runAfterFinish: false
+
+  # A stable file name, deliberately without the version: this installer is
+  # rebuilt after every Console change and the reinstall command should not need
+  # editing each time.
+  artifactName: TessaConsoleSetup.${ext}

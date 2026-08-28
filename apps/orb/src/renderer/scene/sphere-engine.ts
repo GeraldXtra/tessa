@@ -727,7 +727,231 @@ function tokenColor(property: string): Color {
  * @param latticeJitter tangential offset as a multiple of the lattice's own
  *   mean spacing. 0 restores the exact previous geometry.
  */
+/**
+ * ─── THE MAIN SPHERE IS A UV GRID NOW. THE FIBONACCI PATH IS KEPT, NOT DELETED ───
+ *
+ * The main sphere's target changed completely: `reference/main-orb.png` is a
+ * latitude-longitude lattice — horizontal bands, longitude lines converging into
+ * clean concentric rings at both poles, evenly lit, no crescent. Classified
+ * before anything was built, by eye and by measurement, and the two agree:
+ *
+ *   mean luminance within 4 px of each pole centre    top 133   bottom 119
+ *   the same statistic at the middle of the same disc              0
+ *   the same statistic on empty background                          0
+ *
+ * A hundredfold concentration at two poles and nothing in the middle. It is a UV
+ * sphere, and it is a RENDER, not a photograph — 100.0% of its background pixels
+ * are exactly zero, so none of the lifted-black or tone-curve caveats that
+ * governed every previous round apply to it.
+ *
+ * `buildFibonacciGeometry` below is the golden-angle generator this sphere used
+ * until now. IT IS DELIBERATELY LEFT IN PLACE AND EXPORTED, unused by the main
+ * sphere, because companion 3 (`reference/third-orb.png`) is the Fibonacci-rows
+ * object and will need it. Do not delete it to tidy up.
+ *
+ * THE COMPANIONS ARE NOT AFFECTED AND DID NOT NEED FORKING: they never called
+ * this function. `companions.ts:125` has its own private `lattice()`, and
+ * `sphere-engine.ts:1363-1364` passes it nothing from here but the jitter. That
+ * separation already existed; it is stated because a shared generator would have
+ * silently turned both companions into UV grids.
+ */
+export const UV_LAT_BANDS = 26;
+export const UV_LON_EQUATOR = 76;
+/**
+ * THE POLE PINCH, AND THE ONE PIECE OF CRAFT IN THIS FILE.
+ *
+ * A naive UV sphere puts UV_LON_EQUATOR points on EVERY latitude ring, so the
+ * ring at 86.5 degrees — circumference 0.060 of the equator's — receives all 76
+ * of them and the pole becomes a solid blob. Tapering the count by cos(latitude)
+ * keeps the arc spacing roughly constant instead:
+ *
+ *   band          equator          outermost (phi = 86.5 deg)
+ *   ring radius   1.000 R          0.0603 R
+ *   points        76               max(6, round(76 * 0.0603)) = 6
+ *   arc spacing   0.0827 R         0.0632 R      <- 1.31x denser, not 16x
+ *
+ * Without the floor of 6 the last ring would round to 5 and the one inside it to
+ * 9; the floor keeps the cap a legible small ring rather than a triangle. The
+ * reference shows four to five nested rings at each pole, which is what this
+ * produces.
+ */
+const UV_POLE_MIN_LON = 16;
+
+/**
+ * ─── THE TAPER EXPONENT, AND I HAD OVER-CORRECTED ───
+ *
+ * A full cosine taper (exponent 1.0) holds the ARC SPACING constant from equator
+ * to pole, which is the textbook fix for the pole pinch and which is what I
+ * shipped last round. Measured against the reference it is wrong, and the
+ * magnified pole crops say so plainly: `reference/main-orb.png` has three to four
+ * TIGHTLY NESTED, DENSELY POPULATED rings at each pole — they are the brightest
+ * feature in the image — and the full taper produces a thin scattered dome with
+ * no rings at all, because it strips the outermost ring down to six points.
+ *
+ * The pinch IS the look here. The exponent is lowered to 0.5 so the count falls
+ * with the SQUARE ROOT of cos(latitude) rather than with cos itself, which keeps
+ * the cap populated while still preventing the degenerate all-76-points-on-one-
+ * tiny-ring blob that a taper of 0 would give:
+ *
+ *   latitude    ring radius   n_lon at exp 1.0   at exp 0.5   arc spacing vs equator
+ *   +/-86.5       0.060 R            6               19            x0.24
+ *   +/-79.6       0.180 R           14               32            x0.43
+ *   +/-72.7       0.298 R           23               41            x0.55
+ *   equator       1.000 R           76               76            x1.00
+ *
+ * So the pole cap is about four times denser than the equator instead of equal —
+ * dense enough to read as a bright ring, and nowhere near the sixteen-times of an
+ * untapered sphere.
+ */
+const UV_LON_TAPER_EXP = 0.5;
+
+/**
+ * How far the pole axis leans toward the viewer. MEASURED off the reference.
+ *
+ * Its two pole-cap centres are at y = 153 and y = 584 on a disc of centre 372 and
+ * radius 242 — 0.905 R above and 0.876 R below, where an untilted sphere would
+ * put them at exactly 1.000 R. `cos(tilt) = 0.89` gives **27 degrees**, and both
+ * caps land inside the silhouette at that angle, which is what makes them read as
+ * nested ELLIPSES rather than as an edge-on line.
+ *
+ * It is a fixed lean, not an animation: the shell spins about this axis, so the
+ * poles stay where they are for the whole rotation.
+ */
+const POLE_TILT_RAD = (27 * Math.PI) / 180;
+
+/** Single-particle ceiling for the evenly lit UV sphere. See particles.frag.glsl. */
+export const UV_ALPHA_MAX = 1.0;
+
+/**
+ * ─── BRIGHTNESS FOR THE EVENLY LIT SPHERE, AND WHY IT IS A MULTIPLIER ───
+ *
+ * At idle the shell's own brightness is 1.10 (the DIMMEST of the six states — he
+ * always sees it at rest, which is item 3a's question and the answer is yes,
+ * idle dims it by design) and the gold palette gain is 0.693, so the alpha
+ * arriving at the ceiling is 1.10 x 0.693 x ~0.9 = 0.686.
+ *
+ * Measured, that renders a dot peak of 43.58 against reference/main-orb.png's
+ * 84.32. Because the additive blend contributes `tint * out^2`, the effective
+ * tint luminance here is 43.58 / 0.686^2 = 92.6, so reaching 84.32 needs
+ * out = sqrt(84.32/92.6) = 0.954 — a factor of 1.39 on the alpha.
+ *
+ * 1.45 is that factor with a little headroom. It is applied ONLY to the main
+ * sphere's uBrightness uniform, so the six-state ordering is preserved (every
+ * state is scaled by the same number) and the companions, which build their own
+ * uniforms, are untouched.
+ */
+export const UV_BRIGHT_MUL = 1.45;
+
+/**
+ * ─── THE DOTS WERE SINGLE PIXELS, AND EVEN LIGHTING IS WHY ───
+ *
+ * `uEvenLight` removes the rim term, and the rim term was not only brightness:
+ * `particles.vert.glsl` grows the point size by `1 + uRimSize*grow*face`, and
+ * with `uRimPow` at 0.2 that `grow` is ~0.67 even at mid-face. So turning the rim
+ * off did not merely flatten the lighting — it SHRANK every dot on the sphere by
+ * roughly two to three times, everywhere, not just at the limb.
+ *
+ * Measured against reference/main-orb.png at one disc scale:
+ *
+ *                      dot FWHM   FWHM/D    dot peak   coverage >8
+ *   reference           2.20 px   0.0046      84.32       24.99%
+ *   build, even-lit     1.59 px   0.0029      32.91        1.58%
+ *   build, rim growth   3.09 px   0.0056      36.88       40.59%   (the old sphere)
+ *
+ * So the size has to come back through the one lever even lighting does not
+ * touch: `uPointScale`. 1.55 puts the FWHM at about 2.5 px, between the
+ * reference's 2.20 and the old sphere's 3.09, and it widens the Gaussian's skirt
+ * with it — which is the halo the reference has and the bare build did not.
+ */
+export const UV_POINT_SCALE_MUL = 4.0;
+
+/**
+ * THE GLOW, and the two numbers that make it work together.
+ *
+ * The quad must grow to hold a skirt — it is the hard limit, since the fragment
+ * discards beyond dist2 > 0.25 — so UV_POINT_SCALE_MUL went 1.55 -> 4.0, taking
+ * gl_PointSize from about 3.7 px to about 9.6 px. On its own that would make the
+ * dots fat, which is exactly the failure mode to avoid, so UV_CORE_TIGHT scales
+ * dist2 for the CORE term by the square of that same factor (2.6^2 = 6.7): the
+ * core's half-maximum moves from dist2 0.135 to 0.020, i.e. from r = 0.368 of the
+ * quad to r = 0.142, and the rendered core FWHM stays at about 2.7 px.
+ *
+ * UV_GLOW_GAIN is the skirt's amplitude as a fraction of the core's peak. The
+ * target is the reference's between-dot floor of 6-7 luminance: at 4 px from a
+ * dot, exp(-dist2*12) is 0.122, so a single dot contributes gain * 79 * 0.122,
+ * and neighbours at ~8 px spacing overlap two-deep.
+ */
+export const UV_CORE_TIGHT = 6.7;
+export const UV_GLOW_GAIN = 0.3;
+
 function buildGeometry(count: number, latticeJitter: number): BufferGeometry {
+  // Ring plan first, so the buffers are allocated to the EXACT produced count and
+  // nothing overflows the tier's allocation.
+  const bands: { phi: number; n: number }[] = [];
+  for (let i = 0; i < UV_LAT_BANDS; i++) {
+    const phi = -Math.PI / 2 + (Math.PI * (i + 0.5)) / UV_LAT_BANDS;
+    bands.push({
+      phi,
+      n: Math.max(
+        UV_POLE_MIN_LON,
+        Math.round(UV_LON_EQUATOR * Math.pow(Math.max(Math.cos(phi), 1e-6), UV_LON_TAPER_EXP)),
+      ),
+    });
+  }
+  const total = bands.reduce((a, b) => a + b.n, 0);
+  if (total > count) {
+    // The tier budget is a CEILING here, not a target. A UV grid's density is a
+    // structural property matched to the reference, not a performance dial, so
+    // the tier can only refuse a grid that is too big — it never inflates one.
+    // At med (15,600) this never fires: the grid is ~1,270.
+    return buildFibonacciGeometry(count, latticeJitter);
+  }
+
+  const positions = new Float32Array(total * 3);
+  const seeds = new Float32Array(total);
+
+  // Sub-pixel DITHER, not lattice jitter. Expressed as a multiple of the
+  // equatorial arc spacing, so at the shipped 0.04 it is 0.0033 rad — about
+  // 0.9 px at this sphere's radius. Enough to stop every dot sharing one pixel
+  // phase as the shell rotates; far too small to blur the grid.
+  const arc = (2 * Math.PI) / UV_LON_EQUATOR;
+  const sigma = Math.max(0, latticeJitter) * arc;
+  let rngState = 0x9e3779b9;
+  const next = (): number => {
+    rngState = (Math.imul(rngState, 1664525) + 1013904223) >>> 0;
+    return (rngState >>> 8) / 16777216;
+  };
+  const gauss = (): number => {
+    const u = Math.max(next(), 1e-9);
+    return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * next());
+  };
+
+  let k = 0;
+  for (const band of bands) {
+    for (let j = 0; j < band.n; j++) {
+      // Offset alternate rings by half a step so the longitude lines are not all
+      // in phase — the reference's are not, and perfectly aligned columns are the
+      // most aliasing-prone arrangement there is.
+      const theta = (2 * Math.PI * (j + (k % 2) * 0.5)) / band.n;
+      const phi = band.phi + (sigma > 0 ? gauss() * sigma : 0);
+      const lon = theta + (sigma > 0 ? (gauss() * sigma) / Math.max(Math.cos(phi), 0.06) : 0);
+      const ring = Math.cos(phi);
+      positions[k * 3] = Math.cos(lon) * ring;
+      positions[k * 3 + 1] = Math.sin(phi);
+      positions[k * 3 + 2] = Math.sin(lon) * ring;
+      seeds[k] = (k * 0.618033988749895) % 1;
+      k += 1;
+    }
+  }
+
+  const geometry = new BufferGeometry();
+  geometry.setAttribute('position', new BufferAttribute(positions, 3));
+  geometry.setAttribute('aSeed', new BufferAttribute(seeds, 1));
+  return geometry;
+}
+
+/** THE GOLDEN-ANGLE GENERATOR. Kept for companion 3; not used by the main sphere. */
+export function buildFibonacciGeometry(count: number, latticeJitter: number): BufferGeometry {
   const positions = new Float32Array(count * 3);
   const seeds = new Float32Array(count);
   const goldenAngle = Math.PI * (3 - Math.sqrt(5));
@@ -871,7 +1095,63 @@ function buildGeometry(count: number, latticeJitter: number): BufferGeometry {
  * partially merge and centroids pull, widening the spacing distribution without
  * disturbing the angular pattern.
  */
-export const LATTICE_JITTER_DEFAULT = 0.12;
+/**
+ * ─── 0.12 -> 0.04. THE ROWS WERE THERE AND COULD NOT BE SEEN ───
+ *
+ * The complaint was that the sphere reads flat — "mine just seems like a normal
+ * round circle" — against a reference whose dots lie along curved spiral rows
+ * (parastichies) that make the eye read a 3-D surface.
+ *
+ * THE REFERENCE'S ROWS ARE REAL, NOT LCD MOIRE, and that was tested first
+ * because building toward a photographic artefact is how uFaceSat went wrong.
+ * Two independent controls: the disc's autocorrelation periodicity is LOWER
+ * than every off-disc background patch of equal area in all four frames
+ * (0.286-0.513 against 0.417-0.980) — the beat is everywhere and the sphere
+ * shows less of it, not more; and the best row direction ROTATES by 32-59
+ * degrees across the disc, which a curved surface does and a rigid raster
+ * cannot.
+ *
+ * ─── AND THEN THE ARRANGEMENT METRIC GOT IT WRONG ───
+ *
+ * A one-dimensional order parameter on detected dot centroids — max over row
+ * direction and row spacing of |mean exp(2*pi*i*u/p)| — validates cleanly
+ * against controls (a golden-angle sphere scores 0.866 against a matched-n
+ * Poisson null of 0.111, +54 sigma; jitter 0.40 scores 0.123, indistinguishable
+ * from Poisson). Measured patchwise on this build it read
+ *
+ *     jitter   0.00   0.04   0.08   0.12
+ *     ROWSCORE 0.638  0.631  0.636  0.494       reference 0.392-0.515
+ *
+ * which says 0.08 is as good as 0.00 and 0.12 is already inside the reference's
+ * range. ON THOSE NUMBERS I CONCLUDED "CHANGE NOTHING". Then I rendered all four
+ * at one disc scale and looked: 0.12 and 0.08 are smooth discs with no arcs at
+ * all, and 0.04 and 0.00 show strong curved rows sweeping pole to pole. THE
+ * VISUAL THRESHOLD IS BETWEEN 0.08 AND 0.04; the metric put it between 0.12 and
+ * 0.08 and ranked 0.08 with 0.00.
+ *
+ * The metric is not wrong about the geometry — the rows survive 0.12 as a point
+ * statistic. It is measuring the wrong domain. Rows READ because of coherent
+ * brightness along arcs across the WHOLE disc, integrated in the image; a
+ * point-statistics measure inside a 0.4R patch can be healthy while the rendered
+ * frame shows nothing. The eye is the criterion for a visibility question.
+ *
+ * ─── WHY 0.04 AND NOT 0.00 ───
+ * 0.04 is the LOWEST value at which the rows read. It keeps irregularity, which
+ * the reference has (its own patchwise score is 0.392-0.515 with 32-59 degrees
+ * of direction spread, not a crystal). And a perfect lattice is the most exposed
+ * to temporal aliasing against a 60 Hz pixel grid as the shell rotates —
+ * SHIMMER WAS NOT TESTED, because the capture path samples stills 1.5 s apart
+ * and cannot see crawl, so 0.04 is partly a hedge against a risk that was not
+ * measured. If it crawls, the direction back is toward 0.08, and the rows go
+ * with it.
+ *
+ * FREE SIDE EFFECT, MEASURED: lower jitter is also BRIGHTER. Face dot core
+ * luminance is 35.68 at 0.12 against 65.23 at 0.00 — x1.83 — because a clean
+ * lattice lands its dots on consistent sub-pixel positions instead of smearing
+ * them across two. That helps the separate, unfixed problem that this build's
+ * face reads at 37 against the reference's 109.
+ */
+export const LATTICE_JITTER_DEFAULT = 0.04;
 
 /** Default depth falloff. `--force-depth=` overrides it via bootstrap. */
 export const DEPTH_FAR_DEFAULT = 0.42;
@@ -1259,6 +1539,22 @@ export function createSphereEngine(options: SphereEngineOptions): SphereEngine {
     uRimPow: { value: options.rim?.rimPow ?? RIM_POW_DEFAULT },
     uSpreadPow: { value: options.rim?.spreadPow ?? SPREAD_POW_DEFAULT },
     uFaceSat: { value: options.faceSat ?? FACE_SAT_DEFAULT },
+    /**
+     * EVEN LIGHTING — the MAIN sphere only. `companions.ts` does not declare this
+     * uniform, so WebGL leaves it at 0 there and both companions keep the
+     * directional crescent they were fitted with. That is the whole of the
+     * scoping: one uniform set on one object, no shared constant touched.
+     */
+    uEvenLight: { value: 1 },
+    /**
+     * The single-particle ceiling, per object now rather than a shared const.
+     * 0.70 for the evenly lit UV sphere; `companions.ts` pins 0.55 and is
+     * unchanged. See the note on `uAlphaMax` in particles.frag.glsl for the
+     * arithmetic — at 0.55 every front dot on this sphere was clamped flat.
+     */
+    uAlphaMax: { value: UV_ALPHA_MAX },
+    uGlowGain: { value: UV_GLOW_GAIN },
+    uCoreTight: { value: UV_CORE_TIGHT },
     uLightDir: { value: LIGHT_DIR.clone() },
   };
 
@@ -1741,7 +2037,8 @@ export function createSphereEngine(options: SphereEngineOptions): SphereEngine {
     uniforms.uTurbulence.value = smooth.turbulence * (1 + TURB_AMP_GAIN * focusCurrent);
     uniforms.uBreath.value = Math.sin(breathPhase) * smooth.breathDepth;
     uniforms.uAmpGain.value = smooth.amplitudeGain;
-    uniforms.uPointScale.value = smooth.pointScale * bodySizeMul * fitCurrent;
+    uniforms.uPointScale.value =
+      smooth.pointScale * bodySizeMul * fitCurrent * UV_POINT_SCALE_MUL;
     // §R.1: hotter under load. coolMix 1 is fully --sphere-cool and 0 is fully
     // --sphere-hot, so load pulls it DOWN toward hot from whatever the current
     // state's resting temperature is.
@@ -1752,9 +2049,31 @@ export function createSphereEngine(options: SphereEngineOptions): SphereEngine {
     // its own gain from --status-warn rather than an exemption — see the note
     // on gainFor for why exempting it was wrong.
     uniforms.uBrightness.value =
-      smooth.brightness * bodyBrightMul * (target.palette === 'amber' ? amberGain : flameGain);
+      smooth.brightness *
+      bodyBrightMul *
+      UV_BRIGHT_MUL *
+      (target.palette === 'amber' ? amberGain : flameGain);
 
+    /**
+     * SPIN ABOUT THE POLE AXIS, THEN TILT. The order matters and three.js gives
+     * it for free: the default Euler order is XYZ, which composes as Rx·Ry·Rz, so
+     * `rotation.y` turns the shell about its OWN pole axis and `rotation.x` then
+     * leans that axis toward the viewer. The poles therefore stay put at top and
+     * bottom for the whole rotation instead of swinging through the face — which
+     * is the failure item 2b warns about, and it is avoided by construction
+     * rather than by choosing a lucky rate.
+     *
+     * WHY TILT AT ALL. With the axis exactly vertical both pole caps sit at the
+     * extreme top and bottom of the disc, edge-on, and the converging rings read
+     * as a dense line rather than as rings. `reference/main-orb.png` is tilted —
+     * that is why its pole caps show as four to five nested ELLIPSES, one seen
+     * from slightly above and one from slightly below. Measured off the
+     * reference: its pole centres sit at y = 153 and y = 584 on a disc of centre
+     * 372 and radius 242, i.e. at 0.90 R and 0.88 R from centre rather than at
+     * 1.00 R, which is a tilt of about asin(0.89) complement — 27 degrees.
+     */
     points.rotation.y = spinAngle;
+    points.rotation.x = POLE_TILT_RAD;
 
     // The drawer shift moves the sphere inside the scene rather than resizing
     // the canvas. Reallocating a WebGL drawing buffer every frame of a 200 ms

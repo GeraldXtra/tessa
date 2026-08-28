@@ -2,13 +2,16 @@
   "name": "@tessa/console",
   "version": "0.1.0",
   "private": true,
-  "description": "Tessa Console \u2014 the terminal surface. ConPTY under xterm, one WebSocket in the main process.",
+  "description": "Tessa Console — the terminal surface. ConPTY under xterm, one WebSocket in the main process.",
   "main": "./out/main/index.js",
   "scripts": {
     "smoke:pty": "node scripts/smoke-pty.mjs",
     "dev": "electron-vite dev",
     "start": "electron out/main/index.js",
     "build": "electron-vite build",
+    "icon": "node scripts/make-icon.mjs",
+    "dist": "npm run icon && electron-vite build && electron-builder --win --config electron-builder.yml",
+    "reinstall": "npm run dist && .\\release\\TessaConsoleSetup.exe /S",
     "preview": "electron-vite preview",
     "typecheck": "tsc -p tsconfig.node.json --noEmit && tsc -p tsconfig.preload.json --noEmit && tsc -p tsconfig.web.json --noEmit"
   },
@@ -22,25 +25,26 @@
     "ws": "8.21.3"
   },
   "devDependencies": {
+    "@tessa/protocol": "1.0.0",
+    "@tessa/tokens": "1.0.0",
     "@types/react": "19.2.18",
     "@types/react-dom": "19.2.4",
     "@types/ws": "8.18.1",
     "@vitejs/plugin-react": "5.2.0",
-    "@tessa/protocol": "1.0.0",
-    "@tessa/tokens": "1.0.0",
     "electron": "43.4.0",
+    "electron-builder": "26.15.3",
     "electron-vite": "5.0.0",
     "vite": "7.3.6"
   },
   "$comment": [
-    "NO \"type\": \"module\" \u2014 deliberate, same as apps/orb. A sandboxed Electron preload CANNOT be an",
+    "NO \"type\": \"module\" — deliberate, same as apps/orb. A sandboxed Electron preload CANNOT be an",
     "ES module; declaring the package ESM makes electron-vite emit ESM for main AND preload, and the",
     "preload then fails to load at runtime. Source is ESM TypeScript either way; electron-vite",
     "transpiles main/preload to CJS and the renderer stays ESM via Vite.",
     "",
     "DEPENDENCY CLASS IS THE EXTERNALIZATION SWITCH. electron-vite externalizes `dependencies` and",
     "bundles `devDependencies`:",
-    "  - @lydell/node-pty and ws are in `dependencies` \u2014 externalized, required at runtime. node-pty",
+    "  - @lydell/node-pty and ws are in `dependencies` — externalized, required at runtime. node-pty",
     "    resolves its binary via a runtime dynamic require plus an on-disk package.json read, so",
     "    bundling it is fatal. Bundling ws would drag in its optional native deps (bufferutil,",
     "    utf-8-validate) as unresolvable imports.",
@@ -51,9 +55,9 @@
     "",
     "vite is pinned to 7.3.6, NOT 8.x. electron-vite 5.0.0 peer-deps vite ^5||^6||^7; supporting vite 8",
     "required a new MAJOR (electron-vite 6.0.0-beta.1, peer ^6||^7||^8). Vite 8 swaps Rollup+esbuild",
-    "for Rolldown with documented CJS-interop changes \u2014 and CJS main/preload emission is exactly what",
+    "for Rolldown with documented CJS-interop changes — and CJS main/preload emission is exactly what",
     "the sandboxed-preload strategy above depends on. Matches apps/orb, which resolved to 7.3.6 too.",
     "",
-    "Versions pinned exactly, never caret ranges \u2014 same rule apps/orb applies."
+    "Versions pinned exactly, never caret ranges — same rule apps/orb applies."
   ]
 }

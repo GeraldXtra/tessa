@@ -65,6 +65,34 @@ function install(): void {
 }
 
 /**
+ * INSTALLED AT MODULE LOAD, NOT ON FIRST CLAIM. This line is load-bearing.
+ *
+ * `install()` used to run only from inside `claimPort`, which looks safe
+ * because the orphan bucket exists precisely to hold a port that arrived
+ * before anyone asked for it. It is not safe, and the reason is an ordering
+ * the bucket cannot help with: a port that arrives before the LISTENER exists
+ * is not orphaned, it is DROPPED. `window.postMessage` has no backlog.
+ *
+ * Terminal.tsx calls `claimPort` only AFTER `await window.tessa.startPty(...)`
+ * resolves, and main posts the port BEFORE that IPC call resolves — so for the
+ * very first pane of a session there was a window in which no listener
+ * existed at all. `claimPort` then waited forever on a port that had already
+ * been thrown away.
+ *
+ * FOUND BY PACKAGING. In development the renderer is served as unbundled ESM
+ * over HTTP and the interleaving happened to favour the renderer. In the
+ * packaged build the renderer is one preloaded bundle and main wins the race
+ * every time: the first terminal spawned a real shell, reported a real pid to
+ * the daemon under a real grant — and then displayed nothing at all, for ever.
+ * The second pane always worked, because by then the listener existed.
+ *
+ * Importing this module is now enough to be listening. `install()` remains
+ * idempotent and `claimPort` still calls it, so nothing depends on import
+ * order for correctness.
+ */
+install()
+
+/**
  * The port for `sessionId`, whenever it turns up.
  *
  * Never rejects and never times out on its own: the caller owns the deadline,

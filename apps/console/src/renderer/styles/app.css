@@ -88,12 +88,16 @@ body {
   overflow: hidden;
 }
 
+/* "There's not enough space at all. Everything seems jam-packed together, no
+   room for reading clearly." Both numbers go up one step on the spacing scale:
+   padding --sp-3 (12px) -> --sp-4 (16px), gap --sp-2 (8px) -> --sp-3 (12px).
+   The glyph size is deliberately untouched — he has already set that himself. */
 .shell {
   display: flex;
   flex-direction: column;
   height: 100%;
-  padding: var(--sp-3);
-  gap: var(--sp-2);
+  padding: var(--sp-4);
+  gap: var(--sp-3);
 }
 
 /* ── header ──────────────────────────────────────────────────────────────── */
@@ -177,6 +181,30 @@ b[data-state='failed'] {
   cursor: default;
 }
 
+/* ── THE SCROLLBAR ────────────────────────────────────────────────────────
+   xterm's viewport gets Chromium's default scrollbar, which on this dark theme
+   is a bright grey slab down the right of EVERY pane. At two panes that was one
+   of them; with unlimited splitting it is one per pane, and four bright bars is
+   the opposite of the calm Windows Terminal look he pointed at.
+
+   Narrow, token-coloured, and transparent until there is something to scroll. */
+.xterm .xterm-viewport::-webkit-scrollbar {
+  width: var(--sp-2);
+}
+
+.xterm .xterm-viewport::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.xterm .xterm-viewport::-webkit-scrollbar-thumb {
+  background: var(--panel-border);
+  border-radius: var(--radius-sm);
+}
+
+.xterm .xterm-viewport::-webkit-scrollbar-thumb:hover {
+  background: var(--accent);
+}
+
 /* The terminal is the centre stage: it floats over void with no card. */
 .term-host {
   flex: 1 1 auto;
@@ -257,10 +285,31 @@ b[data-state='failed'] {
   flex: 1 1 auto;
   min-width: 0;
   min-height: 0;
-  border: 1px solid var(--panel-border);
+  /* TRANSPARENT, NOT ABSENT. The 1px is still reserved so a pane does not shift
+     by a pixel the moment it gains or loses focus — but nothing is painted. */
+  border: 1px solid transparent;
   border-radius: var(--radius-sm);
-  padding: var(--sp-1);
-  gap: var(--sp-1);
+  /* ROOM TO READ. Was --sp-1 (4px), which ran the first column of output
+     almost into the pane edge. */
+  padding: var(--sp-3);
+  gap: var(--sp-2);
+}
+
+/* ── THE ACCENT RECTANGLE HE ASKED TO BE RID OF ────────────────────────────
+   With ONE pane filling the stage, `.pane[data-focused=yes]` painted an accent
+   border around the entire terminal area — which is not a pane affordance at
+   all, it is a border around the Console, and that is what he was looking at.
+   So a single-pane tab now paints NOTHING.
+
+   With TWO OR MORE panes the same border is the only thing answering "which
+   shell am I typing into", and lifting the two-pane cap makes that question
+   more pressing, not less. So it is kept exactly where it earns its place.
+
+   `data-panes` is written by the tab page from the placed-leaf count. If he
+   wants the border gone in every case too, delete this one rule — nothing else
+   depends on it. */
+.tab-page[data-panes='1'] .pane[data-focused='yes'] {
+  border-color: transparent;
 }
 
 .pane[data-focused='yes'] {
@@ -322,11 +371,33 @@ b[data-state='failed'] {
    with `visibility` rather than `display` so a hidden pane keeps its box — and
    therefore its column count. See the note in App. */
 
-.tab-strip {
+/* ── WHY THE ROW AND THE STRIP ARE TWO ELEMENTS ────────────────────────────
+   `.tab-strip` scrolls horizontally so many tabs stay reachable. A scrolling
+   box is also a CLIPPING box, and the shell dropdown hangs BELOW the strip —
+   so with the `∨` inside the strip its popup was clipped to nothing. It opened
+   correctly and could not be seen, which is the worst possible failure: the
+   click logged `DEVCLICK .tab-menu found=true` and the screenshot showed
+   nothing at all.
+
+   So the row holds two children: the strip, which scrolls, and the new-tab
+   group, which does not. That is Windows Terminal's arrangement too — the tabs
+   scroll under a pinned `+`. */
+.tab-row {
   display: flex;
   align-items: stretch;
   flex: 0 0 auto;
-  gap: var(--sp-1);
+  gap: var(--sp-2);
+}
+
+.tab-strip {
+  display: flex;
+  align-items: stretch;
+  /* Shrinkable, so a long tab list scrolls instead of pushing the `+` off. */
+  flex: 0 1 auto;
+  min-width: 0;
+  /* --sp-1 (4px) crammed the tabs against each other. */
+  gap: var(--sp-2);
+  padding-bottom: var(--sp-1);
   overflow-x: auto;
 }
 
@@ -334,7 +405,8 @@ b[data-state='failed'] {
   display: flex;
   align-items: center;
   gap: var(--sp-2);
-  padding: var(--sp-1) var(--sp-2);
+  /* --sp-1/--sp-2 (4px 8px) put the close X hard against the title. */
+  padding: var(--sp-2) var(--sp-3);
   max-width: 22ch;
   border: 1px solid var(--panel-border);
   border-radius: var(--radius-sm);
@@ -358,7 +430,8 @@ b[data-state='failed'] {
 }
 
 .tab-x,
-.tab-add {
+.tab-add,
+.tab-menu {
   font-family: var(--font-mono);
   font-size: var(--fs-label);
   line-height: 1;
@@ -369,15 +442,93 @@ b[data-state='failed'] {
   cursor: pointer;
 }
 
-.tab-add {
+/* ── THE `+` AND THE `∨`, AS ONE CONTROL GROUP ─────────────────────────────
+   Windows Terminal sets them slightly apart from the tabs and joins them to
+   each other. `margin-left` is the gap before the pair; the two buttons then
+   sit flush so they read as one control with two halves.
+
+   Geometry is Windows Terminal's; every colour is Tessa's active theme via
+   tokens, so a theme change repaints these with everything else. */
+.tab-new {
+  display: flex;
+  align-items: stretch;
+  flex: 0 0 auto;
+  position: relative;
+}
+
+.tab-add,
+.tab-menu {
   border: 1px solid var(--panel-border);
-  border-radius: var(--radius-sm);
   background: var(--panel);
+  padding: 0 var(--sp-3);
+  display: flex;
+  align-items: center;
+}
+
+.tab-add {
+  border-radius: var(--radius-sm) 0 0 var(--radius-sm);
+  border-right: none;
+}
+
+.tab-menu {
+  border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+  padding: 0 var(--sp-2);
 }
 
 .tab-x:hover,
-.tab-add:hover {
+.tab-add:hover,
+.tab-menu:hover {
   color: var(--accent);
+  border-color: var(--accent);
+}
+
+/* The shell list. Anchored under the `∨`, above everything, and it closes on
+   any click elsewhere — the overlay below is what catches that click. */
+.tab-menu-pop {
+  position: absolute;
+  top: calc(100% + var(--sp-1));
+  right: 0;
+  z-index: 20;
+  min-width: 22ch;
+  display: flex;
+  flex-direction: column;
+  padding: var(--sp-1);
+  gap: var(--sp-1);
+  background: var(--panel);
+  border: 1px solid var(--panel-border);
+  border-radius: var(--radius-sm);
+}
+
+.tab-menu-pop button {
+  font-family: var(--font-mono);
+  font-size: var(--fs-label);
+  text-transform: var(--label-transform);
+  letter-spacing: var(--label-tracking);
+  text-align: left;
+  color: var(--text);
+  background: none;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  padding: var(--sp-2) var(--sp-3);
+  cursor: pointer;
+}
+
+.tab-menu-pop button:hover:not(:disabled) {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+.tab-menu-pop button:disabled {
+  color: var(--text-muted);
+  cursor: default;
+}
+
+/* Catches the click that dismisses the popup, without stealing it from the
+   popup's own buttons — which sit above it on z-index. */
+.tab-menu-scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 10;
 }
 
 /* Each tab's page fills the stage and stacks on the others. */
@@ -525,57 +676,24 @@ b[data-state='failed'] {
    which is the other half, for free.
 
    `pointer-events: none` so it can never eat a click meant for a terminal. */
-/* ── THE MARK IS COMPOSITED OVER THE TERMINALS, NOT BEHIND THEM ────────────
-   Behind was the intent and it does not work. xterm paints its own background
-   across the whole screen element, and MEASURED, neither `allowTransparency`
-   with a transparent theme background nor forcing the DOM renderer made that
-   background translucent — a one-pane window sampled at exactly the void
-   colour, 8.14 luminance, with no mark anywhere. The only place the mark ever
-   showed was the 27px gap between two panes, which is precisely the "TES and
-   part of an S" he photographed.
+/* ── THE "TESSA" WATERMARK IS GONE ─────────────────────────────────────────
+   "Remove the Tessa Background there or find another thing to be there.
+   Doesn't look good there."
 
-   So it goes ON TOP, with `mix-blend-mode: screen`. Screen is the operation
-   that makes this safe: over the near-black void it is effectively additive, so
-   the mark appears; over a bright glyph it can only lighten something already
-   near white, so text does not lose contrast. `pointer-events: none` keeps it
-   incapable of eating a click, and z-index 3 puts it above the pane frames (1)
-   and xterm's own link layer (2) so nothing can clip or cover it. */
-.watermark {
-  position: absolute;
-  inset: 0;
-  display: grid;
-  place-items: center;
-  pointer-events: none;
-  user-select: none;
-  z-index: 3;
-  mix-blend-mode: screen;
-  overflow: hidden;
-}
+   Removed rather than replaced. An empty terminal is what Windows Terminal
+   shows and what he pointed at, and inventing decorative artwork to fill the
+   space is not something to do unasked.
 
-.watermark span {
-  font-family: var(--font-mono);
-  font-weight: 700;
-  /* Sized to the stage, not to a fixed pixel count, so it stays proportionate
-     when the tree takes width or the window resizes. */
-  /* 17cqw of the stage. At 1160px that is ~197px; with the tree open the stage
-     is ~910px and the mark scales with it instead of overflowing. */
-  font-size: clamp(40px, 17cqw, 240px);
-  letter-spacing: 0.22em;
-  /* The trailing letter-spacing pushes the text off-centre by half a space;
-     this pulls it back so the mark is optically centred, not merely centred. */
-  text-indent: 0.22em;
-  color: var(--mark);
-  /* 0.22, NOT the 0.11 measured under the old "behind the panes" model.
-     That number was chosen for a mark compositing directly onto the void; this
-     one screens over whatever the terminal painted, which costs some of the
-     effect. Measured at 0.11 the mark peaked at luminance 15.6 against a void
-     of 8.1 — about 1.04:1, which is the same order as the version he looked at
-     twice and could not see. `screen` is what makes the higher value safe:
-     it can only lighten, and lightening a near-white glyph changes nothing. */
-  opacity: 0.22;
-  line-height: 1;
-  white-space: nowrap;
-}
+   Two things that were built for it are deliberately KEPT, because they are
+   load-bearing for the panes and not for the mark:
+     * `.pane-stage { container-type: size }` — panes are still measured
+       against the stage.
+     * the `--mark` token block at the top — Session 2's tokens define it and
+       this file only maps it; leaving the mapping costs nothing and removing
+       it would be an edit to a shared naming scheme for no reason.
+   The `.watermark` rules and the `<div className="watermark">` in App.tsx are
+   both gone; nothing references either. */
+
 
 /* Panes paint over the mark. They have no background of their own, so the mark
    shows through the gaps and is simply invisible behind glyphs — it never

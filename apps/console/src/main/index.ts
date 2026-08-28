@@ -10,8 +10,8 @@
  * through a narrow contextBridge surface.
  */
 
-import { readFileSync, writeFileSync} from 'node:fs'
-import { join } from 'node:path'
+import { readFileSync, statSync, writeFileSync } from 'node:fs'
+import { dirname, join, resolve } from 'node:path'
 import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, shell } from 'electron'
 // The window's background is set before any CSS loads, so it cannot come from
 // tokens.css — it has to be read from the token SOURCE. @tessa/tokens is a
@@ -25,8 +25,245 @@ import { describeShell, pickShell, resolveShells, type ShellId } from './shells.
 import { readTheme } from './theme.ts'
 import { listDir } from './filetree.ts'
 import { ensureSettingsFile, loadSettings } from './settings.ts'
+import { startFileLog } from './log.ts'
 
 const isDev = !app.isPackaged
+
+/**
+ * TEE EVERY DIAGNOSTIC TO DISK, BEFORE ANYTHING ELSE RUNS.
+ *
+ * Called at module scope, not inside `whenReady`, because the failures worth
+ * catching happen earlier than that: a native module that will not load, a
+ * settings file that will not parse, a second instance losing the lock. See
+ * log.ts for why a packaged GUI process has nowhere else to say them.
+ */
+const LOG_PATH = startFileLog(`Tessa Console ${app.getVersion()} — packaged=${app.isPackaged} pid=${process.pid}`)
+
+/* ════════════════════════════════════════════════ THE SINGLE-INSTANCE LOCK */
+
+/**
+ * The folder each NEW WINDOW was asked to open in, keyed by its webContents id
+ * and consumed ONCE by that window's first shell.
+ *
+ * ── WHY A MAP AND NOT THE SINGLE `pendingCwd` THIS REPLACES ────────────────
+ *
+ * `tcli` now opens a WINDOW rather than a tab, so two windows can be starting
+ * within milliseconds of each other. One shared variable would let the second
+ * window's folder be consumed by the first window's shell — he would type
+ * `tcli` in two folders and get two terminals in the same one, intermittently,
+ * which is the worst kind of bug to be handed.
+ *
+ * Keyed by `event.sender.id` at the moment the shell is requested, so a window
+ * can only ever consume its own.
+ *
+ * Still single-use per window. If it persisted, every later terminal in that
+ * window would keep reopening in the folder it was launched from rather than
+ * inheriting the pane he is working in.
+ */
+const openingCwd = new Map<number, string>()
+
+/** Read and clear, for one window. */
+function takeCwdFor(webContentsId: number): string | null {
+  const c = openingCwd.get(webContentsId)
+  if (c === undefined) return null
+  openingCwd.delete(webContentsId)
+  return c
+}
+
+/**
+ * The folder the FIRST window should open in — this process's own launch
+ * context. Set at module scope below, read once by `whenReady`.
+ */
+let firstWindowCwd: string | null = null
+
+/**
+ * A directory that actually exists and is actually local, or null.
+ *
+ * EVERYTHING ARRIVING HERE IS UNTRUSTED INPUT. `second-instance` hands over the
+ * argv and working directory of a process this one did not start, so this is a
+ * boundary, not a convenience check:
+ *
+ *   - It must be a DIRECTORY. A file path would be handed to the daemon as the
+ *     `cwd` of a grant request and the spawn would then fail — burning a
+ *     CONTRACT 6.5 grant on a shell that could never have started.
+ *   - UNC paths are REFUSED, not attempted. A shell opened on a disconnected
+ *     share hangs at the prompt with no way back, and the hydration rules in
+ *     core/tools/files.py have no meaning off a local volume. Refusing with a
+ *     reason in the log beats failing obscurely.
+ */
+function safeStartDir(dir: string | undefined | null): string | null {
+  if (!dir) return null
+  const d = String(dir).trim()
+  if (!d) return null
+  // TWO backslashes. This briefly held ONE, lost to shell escaping when the
+  // edit was applied — which still caught UNC but also refused any path
+  // rooted at a bare backslash.
+  if (d.startsWith('\\\\')) {
+    logMain(`tcli: refusing UNC path ${d} — open it from a local folder instead`)
+    return null
+  }
+  try {
+    if (!statSync(d).isDirectory()) {
+      logMain(`tcli: ${d} is not a directory — ignoring`)
+      return null
+    }
+  } catch (err) {
+    logMain(`tcli: cannot read ${d} (${(err as Error).message}) — ignoring`)
+    return null
+  }
+  return d
+}
+
+/**
+ * ── WHY THE LOCK EXISTS, AND WHY IT IS THE FIRST THING THIS FILE DOES ───────
+ *
+ * Two reasons, and the second is a data risk rather than a feature.
+ *
+ * 1. `tcli` typed in an Explorer address bar has to open a fresh Console WINDOW
+ *    rooted at the folder he was looking at. The ONLY route Electron offers to
+ *    a second invocation's working directory is the `second-instance` event's
+ *    third argument, and that event only fires for a lock holder.
+ *
+ *    ⚠ THIS ROUND REVERSED WHAT THE HANDLER DOES. It used to open a new TAB in
+ *    the running window; it now opens a new WINDOW. The lock is kept anyway,
+ *    and keeping it is the point: without it each `tcli` would be a separate
+ *    Electron PROCESS — a second main, a second GPU process, a second utility
+ *    host — on a 2-core i5-7200U. One process owning N windows costs one
+ *    renderer per window instead, and keeps a single owner of the settings
+ *    file. See the `second-instance` handler.
+ *
+ * 2. Two Consoles could both write `console-settings.json` — his 23 key
+ *    bindings — with nothing arbitrating between them. Last writer won.
+ *
+ * ── WHY THIS DOES NOT BREAK `npm run dev` ──────────────────────────────────
+ *
+ * Electron keys the lock off the userData path, and MEASURED on this machine
+ * those already differ:
+ *
+ *     dev       %APPDATA%\Electron         `electron out/main/index.js` runs
+ *                                          Electron's default-app harness, so
+ *                                          getName() falls back to "Electron"
+ *     packaged  %APPDATA%\@tessa\console   reads resources/app.asar/package.json
+ *
+ * So the dev build and the installed build hold SEPARATE locks and run side by
+ * side. Nothing was scoped, renamed or moved to achieve it — it was already
+ * true, and measuring it first is what stopped a `userData` change that would
+ * have moved where his settings are read from, for no reason at all.
+ *
+ * The consequence he has to be told: `tcli` launches the INSTALLED app, so
+ * running it while only the DEV app is open starts the installed Console rather
+ * than adding a tab to dev. Correct — they are different applications — but
+ * surprising if nobody says it out loud.
+ */
+/**
+ * ⚠ THE DEV BUILD GETS ITS OWN userData, AND THIS LINE IS WHY THE LOCK IS SAFE.
+ *
+ * Electron keys the single-instance lock off the userData path. MEASURING the
+ * two dev entry points showed they do NOT agree with each other:
+ *
+ *     npm run start  ->  %APPDATA%\Electron          (`electron out/main/index.js`
+ *                                                     runs Electron's default-app
+ *                                                     harness; getName() falls
+ *                                                     back to "Electron")
+ *     npm run dev    ->  %APPDATA%\@tessa\console    (electron-vite hands Electron
+ *                                                     the APP DIRECTORY, so it
+ *                                                     reads apps/console/package.json)
+ *     packaged       ->  %APPDATA%\@tessa\console
+ *
+ * So `npm run dev` collided with the INSTALLED app and `npm run start` did not.
+ * Testing only the latter would have "proved" the lock was safe while leaving
+ * the one command he builds every prompt with unable to start whenever the
+ * installed Console happened to be open.
+ *
+ * Pinning a dev-only userData makes both dev entry points agree with each other
+ * and disagree with the packaged app, which is exactly what is wanted.
+ *
+ * ⚠ THIS DOES NOT MOVE HIS SETTINGS. `console-settings.json`, `orb-theme.json`
+ * and `runtime.json` all live under `%LOCALAPPDATA%\Tessa`, resolved from the
+ * LOCALAPPDATA environment variable in settings.ts / theme.ts / token.ts. None
+ * of them has ever been derived from `userData`. The only thing that moves is
+ * the dev build's throwaway Chromium profile.
+ */
+if (!app.isPackaged) {
+  app.setPath('userData', join(app.getPath('appData'), 'tessa-console-dev'))
+}
+
+const GOT_SINGLE_INSTANCE_LOCK = app.requestSingleInstanceLock()
+
+if (!GOT_SINGLE_INSTANCE_LOCK) {
+  // `app.exit()` and NOT `app.quit()`, deliberately. `quit()` is cooperative:
+  // it fires before-quit/will-quit and RETURNS, so module evaluation would
+  // continue past this line — constructing a DaemonSupervisor and a second
+  // WebSocket to the daemon, and registering a whenReady handler that opens a
+  // window. All of that from a process whose entire job is to hand its working
+  // directory to the running Console and die. `exit()` terminates immediately.
+  console.log('[tessa-console] second instance — cwd handed to the running Console, exiting')
+  app.exit(0)
+}
+
+/**
+ * A SECOND `tcli` — open a tab in the window that is already up.
+ *
+ * `workingDirectory` is the whole feature. Explorer's address bar runs a command
+ * through ShellExecute with the current folder as the process working
+ * directory, Electron forwards it here, and this is the only place it can be
+ * read from.
+ *
+ * ── WHY THIS SENDS `newTab` AND SETS A VARIABLE INSTEAD OF PASSING A PATH ───
+ *
+ * The renderer already knows how to open a tab: `tessa:menu` carries command
+ * strings and `newTab` is already one of them (App.tsx). A new IPC channel and a
+ * matching renderer handler would be a second route to the same thing, and two
+ * routes to one action is how the menu and the keyboard drifted apart before.
+ *
+ * So main seeds `pendingCwd` and then asks for a tab through the existing door.
+ * The new pane calls `tessa:pty-start` milliseconds later and consumes it.
+ */
+app.on('second-instance', (_event, argv, workingDirectory) => {
+  const asked = safeStartDir(devFlagFrom(argv, '--cwd') ?? workingDirectory)
+  const target = asked ?? app.getPath('home')
+  logMain(`second-instance: workingDirectory=${JSON.stringify(workingDirectory)} -> opening a NEW WINDOW at ${target}`)
+
+  // ── A WHOLE WINDOW, NOT A TAB. THIS IS A DELIBERATE REVERSAL. ────────────
+  //
+  // The previous round routed a second `tcli` into the running window as a new
+  // tab, and proved it. He wants the opposite: every `tcli` is a fresh Console
+  // window rooted at that folder, even when one is already open.
+  //
+  // The single-instance LOCK IS KEPT even so, and that is the whole design.
+  // Dropping it would give each `tcli` its own Electron process — a second
+  // main, a second GPU process, a second utility host — on a 2-core i5-7200U.
+  // Keeping it means one process owning N windows: one main, one GPU, one PTY
+  // supervisor, and a renderer per window. It also keeps ONE owner of
+  // console-settings.json, so his 23 bindings still have exactly one writer.
+  //
+  // `createWindow` raises and focuses the new window itself, and offsets it so
+  // it cannot land exactly on top of the one already there.
+  createWindow(target)
+})
+
+/**
+ * A FIRST `tcli` — the Console was closed, so this process IS the new window.
+ *
+ * `process.cwd()` is the folder ShellExecute handed us, which for a `tcli` typed
+ * in an address bar is exactly the folder he was looking at.
+ *
+ * ⚠ THE EXCLUSION IS LOAD-BEARING. Launched from the Start Menu shortcut the
+ * working directory is the INSTALL DIRECTORY (measured: the .lnk's WorkingDir is
+ * `...\Programs\TessaConsole`). Opening his first terminal of the day inside the
+ * application's own install folder would be a regression, so a cwd equal to the
+ * executable's own directory is ignored and the existing fallback — his home
+ * directory — stands.
+ */
+{
+  const explicit = devFlag('--cwd')
+  const here = safeStartDir(explicit ?? process.cwd())
+  const exeDir = dirname(app.getPath('exe'))
+  if (here && (explicit || resolve(here).toLowerCase() !== resolve(exeDir).toLowerCase())) {
+    firstWindowCwd = here
+    console.log(`[tessa-console] start directory from ${explicit ? '--cwd' : 'process.cwd()'}: ${here}`)
+  }
+}
 
 /**
  * Keep painting when the window is covered.
@@ -150,8 +387,33 @@ function installMenu(isDevBuild: boolean): void {
   Menu.setApplicationMenu(Menu.buildFromTemplate(template))
 }
 
-function createWindow(): BrowserWindow {
+/**
+ * A window.
+ *
+ * `startDir` is the folder this window's FIRST shell should open in — a `tcli`
+ * invocation's working directory. It is recorded against the window's
+ * webContents id rather than in a shared variable, so two windows opening at
+ * once cannot take each other's folder.
+ *
+ * ── IT MUST BE VISIBLY A NEW WINDOW ───────────────────────────────────────
+ *
+ * A second window landing exactly on top of the first is indistinguishable
+ * from nothing happening — the same trap the previous round hit when a tab
+ * opened in a window he could not see. So each window after the first is
+ * offset down and right from the one that spawned it, and brought to the
+ * front. On Windows a background process cannot raise itself with `focus()`
+ * alone; `app.focus({ steal: true })` is the part that actually does it.
+ */
+function createWindow(startDir?: string): BrowserWindow {
+  // Cascade from whichever window is frontmost, wrapping every 6 so a long
+  // session cannot walk new windows off the bottom of a 768px screen.
+  const CASCADE_PX = 34
+  const from = BrowserWindow.getFocusedWindow() ?? BrowserWindow.getAllWindows().at(-1)
+  const step = (BrowserWindow.getAllWindows().length % 6) + 1
+  const offset = from ? { x: from.getBounds().x + CASCADE_PX * step, y: from.getBounds().y + CASCADE_PX * step } : null
+
   const win = new BrowserWindow({
+    ...(offset ? { x: offset.x, y: offset.y } : {}),
     width: 1200,
     height: 700,
     // The owner's display is 1366x768. Anything larger than this opens
@@ -181,19 +443,36 @@ function createWindow(): BrowserWindow {
     },
   })
 
-  // Forward renderer console to the main log in dev. Without this, anything the
-  // renderer reports — including the security self-checks in App.tsx — is
-  // invisible unless devtools happen to be open.
-  if (isDev) {
-    // Electron 43 deprecated the positional (event, level, message) signature
-    // in favour of a single event object.
-    win.webContents.on('console-message', (event) => {
-      console.log(`[renderer:${event.level}] ${event.message}`)
-    })
+  // Forward renderer console to the main log. This used to be gated on `isDev`,
+  // back when the only destination was a terminal that a packaged app does not
+  // have. It now goes to the log file too, and the packaged case is exactly the
+  // one where it matters: the renderer's own security self-checks, the GPU rung
+  // it selected and every xterm failure are otherwise invisible in an installed
+  // build with no devtools.
+  //
+  // Electron 43 deprecated the positional (event, level, message) signature in
+  // favour of a single event object.
+  win.webContents.on('console-message', (event) => {
+    console.log(`[renderer:${event.level}] ${event.message}`)
+  })
+
+  // RECORDED BEFORE THE RENDERER CAN ASK. `tessa:pty-start` arrives well after
+  // this, but keying it here means the id is bound at construction rather than
+  // raced for later.
+  if (startDir) {
+    openingCwd.set(win.webContents.id, startDir)
+    logMain(`window ${win.webContents.id} will open its first shell in ${startDir}`)
   }
+  // A window whose renderer dies must not leave its folder in the map for ever.
+  win.on('closed', () => openingCwd.delete(win.webContents.id))
 
   win.once('ready-to-show', () => {
     win.show()
+    // Every window raises itself, not just the first: a `tcli` window that
+    // opened behind the one he was looking at reads as "nothing happened".
+    if (win.isMinimized()) win.restore()
+    win.focus()
+    app.focus({ steal: true })
     // A latency run REQUIRES a compositing window. Chromium stops rAF entirely
     // for a hidden or fully occluded window, which produced a run that stalled
     // at sample 600 with no error. Under --measure we pin the window on top and
@@ -243,10 +522,43 @@ function logMain(message: string): void {
 
 /* ═════════════════════════════════════════ DEV HARNESS — Step 5 exit criterion */
 
-/** Read `--flag value` from argv. Dev harness only; absent in normal launches. */
+/**
+ * Read `--flag value` from ANY argv.
+ *
+ * Split out from `devFlag` because `second-instance` delivers the OTHER
+ * process's argv, and reading `process.argv` there would answer a question
+ * about the wrong process entirely — silently, and with a plausible-looking
+ * result.
+ */
+function devFlagFrom(argv: readonly string[], name: string): string | undefined {
+  // `--flag=value` first. Chromium's command-line parser normalises switches it
+  // recognises into that form, and a plain indexOf would miss them entirely.
+  const eq = argv.find((a) => a.startsWith(`${name}=`))
+  if (eq) return eq.slice(name.length + 1) || undefined
+
+  const i = argv.indexOf(name)
+  if (i < 0) return undefined
+  const next = argv[i + 1]
+  // ⚠ THE GUARD IS NOT DEFENSIVE PROGRAMMING — IT IS A MEASURED BUG.
+  //
+  // `second-instance` delivers the second process's argv AFTER Chromium has had
+  // it, and Chromium APPENDS its own switches. Observed on this machine: a
+  // launch carrying `--cwd "\server\share"` arrived with
+  // `--allow-file-access-from-files` sitting where the value should have been,
+  // and the Console dutifully tried to stat a switch name as a directory:
+  //
+  //     tcli: cannot read --allow-file-access-from-files (ENOENT ...)
+  //
+  // A value that begins with `-` is never a directory, so it is never the
+  // value. Rejecting it makes the caller fall back to `workingDirectory`, which
+  // is the correct answer anyway.
+  if (next === undefined || next.startsWith('-')) return undefined
+  return next
+}
+
+/** Read `--flag value` from this process's argv. */
 function devFlag(name: string): string | undefined {
-  const i = process.argv.indexOf(name)
-  return i >= 0 ? process.argv[i + 1] : undefined
+  return devFlagFrom(process.argv, name)
 }
 
 type DevStep =
@@ -454,6 +766,13 @@ app.whenReady().then(async () => {
   // keystroke, or the first Ctrl+A of the session is still eaten by Chromium's
   // Edit role. `setApplicationMenu` is global rather than per-window, so this is
   // the right place and the right time.
+  logMain(`log file: ${LOG_PATH || '(none — LOCALAPPDATA unset)'}`)
+  logMain(`paths: exe=${app.getPath('exe')} __dirname=${__dirname}`)
+  // The lock keys off userData, so both are logged together: this one line is
+  // what proves dev and installed hold SEPARATE locks rather than one shared
+  // one, on any machine, without a differential experiment.
+  logMain(`identity: name=${app.getName()} userData=${app.getPath('userData')} singleInstanceLock=${GOT_SINGLE_INSTANCE_LOCK}`)
+
   installMenu(isDev)
   logMain(`menu: custom menu installed (Edit roles removed; devTools=${isDev})`)
 
@@ -509,7 +828,8 @@ app.whenReady().then(async () => {
    * `cd`) needs OSC 7, which no default Windows shell emits without a prompt
    * hook — that is Phase 2's job and is deliberately not faked here.
    */
-  let lastCwd: string | null = null
+  /** The directory the last shell opened in, PER WINDOW (webContents id). */
+  const lastCwd = new Map<number, string>()
 
   const seeded = ensureSettingsFile()
   let loaded = loadSettings()
@@ -621,6 +941,7 @@ app.whenReady().then(async () => {
   // Console that skipped this gate would be caught by the daemon rather than
   // silently tolerated.
   ipcMain.handle('tessa:pty-start', async (_e, dims: { cols: number; rows: number }, shellId?: string) => {
+    const senderId = _e.sender.id
     // ── WHICH SHELL ────────────────────────────────────────────────────────
     //
     // The renderer passes an ID from a closed set, never a command line. An
@@ -647,7 +968,21 @@ app.whenReady().then(async () => {
     // project folder must land in that project folder — anything else is
     // surprising. `--cwd` overrides for the harness; otherwise the last
     // directory a terminal reported, falling back to home on the first one.
-    const cwd = lastCwd ?? app.getPath('home')
+    // ONE cwd, resolved ONCE, used for BOTH the grant request and the spawn.
+    //
+    // These used to diverge: the grant was requested for `lastCwd` while the
+    // shell was actually started in `devFlag('--cwd') ?? cwd`. Harmless while
+    // only the harness passed `--cwd`, and wrong the moment `tcli` does — the
+    // daemon would audit a §6.5 grant for one directory and a shell would open
+    // in another, making the audit answer the wrong question.
+    //
+    // THIS WINDOW's `tcli` folder first: it is an explicit instruction about
+    // this terminal and outranks the inherited directory. Then the directory
+    // the last shell IN THIS WINDOW opened in — per window, so a `tcli` window
+    // rooted in one project cannot hand its folder to a terminal opened in
+    // another window.
+    const cwd =
+      takeCwdFor(senderId) ?? devFlag('--cwd') ?? lastCwd.get(senderId) ?? app.getPath('home')
 
     // The grant is asked for BY SHELL. `profileId` is what the daemon audits
     // and what its policy keys on, so a Git Bash spawn must not present itself
@@ -722,7 +1057,7 @@ app.whenReady().then(async () => {
         // PowerShell with `/k`, which is not a command it understands.
         shell: proofMode ? (process.env['COMSPEC'] ?? 'cmd.exe') : choice.spec.exe,
         args: proofMode ? ['/k', 'ping -n 600 127.0.0.1'] : choice.spec.args,
-        cwd: devFlag('--cwd') ?? cwd,
+        cwd,
         cols: dims?.cols ?? 80,
         rows: dims?.rows ?? 24,
         sessionId,
@@ -734,10 +1069,10 @@ app.whenReady().then(async () => {
       //    without an observed pid, so this can no longer redeem a grant for a
       //    PTY nobody saw start.
       await reportPty(daemonClient, sessionId, 'started', result.pid)
-      lastCwd = devFlag('--cwd') ?? cwd
+      lastCwd.set(senderId, cwd)
       logMain(
         `STEP5 sessionId=${sessionId} grantId=${grantId} shellPid=${result.pid} ` +
-          `shell=${choice.spec.id} exe=${choice.spec.exe} cwd=${lastCwd}`,
+          `shell=${choice.spec.id} exe=${choice.spec.exe} cwd=${cwd}`,
       )
       // ONCE. `tessa:pty-start` now fires per PANE, so without this guard a
       // four-pane run would start the script four times over.
@@ -760,7 +1095,7 @@ app.whenReady().then(async () => {
         shellMessage: choice.message,
         // Where it OPENED, for the tab title. Not the live cwd — that needs
         // OSC 7, which no default Windows shell emits.
-        cwd: lastCwd,
+        cwd,
       }
     } catch (err) {
       // The PTY never came up. Release the grant rather than stranding it —
@@ -773,7 +1108,7 @@ app.whenReady().then(async () => {
   })
 
   // Only now — handler registered, daemon link settled — may a window exist.
-  win = createWindow()
+  win = createWindow(firstWindowCwd ?? undefined)
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow()

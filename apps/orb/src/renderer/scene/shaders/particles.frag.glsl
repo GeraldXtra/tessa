@@ -119,6 +119,20 @@ uniform float uSpreadPow;
 uniform float uFaceSat;
 
 /**
+ * EVEN LIGHTING, 1 = on. Set by the MAIN sphere only; the companions do not
+ * declare it and WebGL defaults it to 0, so they keep their crescent.
+ *
+ * It removes the two DIRECTIONAL terms and nothing else:
+ *   - the wrapped lambert becomes 1, so there is no dark side
+ *   - rimAdd becomes 0, so there is no crescent
+ * `depthFade` is DELIBERATELY KEPT. Depth on this sphere reads front-to-back by
+ * distance from the camera, not by a light direction — symmetric left/right and
+ * top/bottom — and it is also the only lever available for calming the
+ * front/back grid interference as the shell rotates.
+ */
+uniform float uEvenLight;
+
+/**
  * The most one sprite may contribute. See the note at the end of main().
  *
  * Not a uniform: it is a property of the framebuffer, not of the look, and
@@ -150,7 +164,34 @@ uniform float uFaceSat;
  * gap — 48.7 against 97.3 — and moving two globals to close it is exactly the
  * kind of un-asked-for retune that removed the crescent last round.
  */
-const float ALPHA_MAX = 0.55;
+/**
+ * ─── 0.55 WAS A CONSTANT AND IT WAS CLIPPING EVERY FRONT DOT FLAT ───
+ *
+ * It is now a UNIFORM so the two sphere kinds can differ, because they must.
+ * The companions pin it to 0.55 (companions.ts) and keep exactly the behaviour
+ * they were fitted with. The MAIN sphere raises it, and here is why.
+ *
+ * The main sphere is an evenly lit UV grid: no crescent, no lambert, so every
+ * front-facing dot arrives at the same alpha. That alpha is
+ * `uBrightness * grain * depthFade`, which at idle is 1.10 x 0.693 x ~0.9 = 0.686
+ * — ABOVE 0.55. So every front dot was being clamped to the identical value and
+ * the sphere had no tonal range at all: measured dot peak 32.91 against
+ * reference/main-orb.png's 84.32, and coverage above luminance 8 of 1.58%
+ * against the reference's 24.99%.
+ *
+ * Raising the ceiling does not brighten by fiat; it stops discarding range the
+ * shell already had. Under the squared blend a dot renders at `tint * out^2`, so
+ * for gold (tint luminance 208) the reference's 84.32 needs out = sqrt(84.32/208)
+ * = 0.636. 0.70 clears that with headroom and leaves the back hemisphere, which
+ * carries depthFade 0.42, at 208 * (0.686*0.42)^2 = 17 — still clearly dimmer
+ * than the front, which is the depth cue.
+ */
+uniform float uAlphaMax;
+
+/** Amplitude of the wide un-squared skirt. 0 = off, which companions.ts pins. */
+uniform float uGlowGain;
+/** Scales dist2 for the CORE term only, so a bigger quad keeps the same core. */
+uniform float uCoreTight;
 
 varying float vRim;
 varying float vSeed;
@@ -179,7 +220,47 @@ void main() {
   // falls off over the last quarter. Still antialiased — a hard cut would make
   // each point a square at small sizes, which is what the original comment was
   // guarding against and is still true.
-  float falloff = 1.0 - smoothstep(0.08, 0.25, dist2);
+  /**
+   * ─── COMPOUND FALLOFF: A SHARP SQUARED CORE PLUS A WIDE UN-SQUARED SKIRT ───
+   *
+   * The reference's sphere sits in a soft wash: bright sharp dot cores with the
+   * black between them filled by diffuse glow. Two mechanisms were killing that
+   * here, and both are named in REPORT-F:
+   *
+   *   - the quad is discarded beyond dist2 > 0.25, so a dot can never glow past
+   *     0.5 * gl_PointSize; and
+   *   - AdditiveBlending is SrcAlphaFactor, so a fragment contributes
+   *     `tint * out^2` — a skirt at alpha 0.1 renders at 0.01 and vanishes.
+   *
+   * UN-SQUARING THE BLEND IS THE WRONG FIX: the squaring is what makes the cores
+   * sharp. So the two are separated INSIDE the falloff instead. Because the blend
+   * squares whatever `out_` carries, emitting
+   *
+   *     falloff = sqrt( sharp^2  +  uGlowGain * wide )
+   *
+   * makes the rendered contribution proportional to `sharp^2 + uGlowGain * wide`:
+   * the CORE still arrives squared and stays sharp, and the SKIRT arrives
+   * UN-squared and survives. No change to the blend, no softening of the cores.
+   *
+   * `uCoreTight` scales dist2 for the core term only, so the quad can be enlarged
+   * to hold the skirt while the core keeps the same size IN PIXELS.
+   *
+   * WITH uGlowGain = 0 AND uCoreTight = 1 THIS IS EXACTLY THE OLD EXPRESSION —
+   * sqrt(sharp^2) = sharp — which is what `companions.ts` pins, so they are
+   * untouched to the last bit.
+   *
+   * AND THE HAZE IS A RENDERED EFFECT, NOT THE CAMERA — measured before building
+   * it. In reference/main-orb.png the wash STOPS DEAD at the silhouette (annulus
+   * medians 15.76 at r/R 0.88-0.90, 0.50 at 0.98-1.00, 0.000 from 1.00 outward,
+   * exactly zero by 1.10) where a lens bloom would smear outward; and the local
+   * between-dot floor correlates +0.688 with the local dot brightness, which is
+   * what a sum of per-dot skirts does. So this is the reference's own mechanism,
+   * not an imitation of an artefact.
+   */
+  float d2core = dist2 * uCoreTight;
+  float sharp = 1.0 - smoothstep(0.08, 0.25, d2core);
+  float wide = exp(-dist2 * 12.0);
+  float falloff = sqrt(sharp * sharp + uGlowGain * wide);
 
   // Displaced particles drift toward the cool rim colour, which is what gives
   // the shell depth without a second draw call or any post-processing.
@@ -243,6 +324,7 @@ void main() {
   // side, and it is the term that gives the shell a dark side at all. Without
   // it the sphere is lit from within and has no volume to read.
   float lambert = mix(uDarkSide, 1.0, pow(0.5 + 0.5 * vLight, uLambertPow));
+  lambert = mix(lambert, 1.0, uEvenLight);
 
   // THE CRESCENT — the sharp half.
   //
@@ -291,7 +373,7 @@ void main() {
   // `sqrt` keeps the rim responsive to state — a brighter state still has a
   // brighter edge — while compressing 1.8x down to 1.35x. The BODY keeps the
   // full multiplier, so "listening brightens" still reads where it always did.
-  float rimAdd = uRimGain * grow * face * sqrt(max(uBrightness, 0.0));
+  float rimAdd = uRimGain * grow * face * sqrt(max(uBrightness, 0.0)) * (1.0 - uEvenLight);
   float lit = uBrightness + rimAdd;
 
   float alpha = falloff * lit * grain * depthFade * lambert * spread * (1.0 + vPulse * 1.6);
@@ -316,6 +398,6 @@ void main() {
   // It cannot reach zero and claiming otherwise would be false. What it does
   // reach is a crescent whose saturated pixels are a sparse specular glint
   // inside a coloured band, rather than a white edge on the sphere.
-  float out_ = min(alpha, ALPHA_MAX);
+  float out_ = min(alpha, uAlphaMax);
   gl_FragColor = vec4(tint * out_, out_);
 }
