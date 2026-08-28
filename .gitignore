@@ -59,7 +59,8 @@ desktop.ini
 
 # folder
 *sessions/
-*resume.session.txt
+resume.session.txt*
+resume.session.txt
 *reference/
 *Legacy/
 *docs/
