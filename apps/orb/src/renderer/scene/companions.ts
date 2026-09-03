@@ -312,6 +312,24 @@ export function createCompanion(
     // different rooms. See LIGHT_DIR in sphere-engine.ts for the count across
     // the sixteen reference frames that decided the side.
     uLightDir: { value: new Vector3(-1.0, -0.28, 0.3).normalize() },
+    /**
+     * ROUND Q: the main sphere's FIXED SURFACE GRADIENT and far-hemisphere
+     * fade, pinned OFF here for the same shared-program reason as everything
+     * above — an undeclared uniform keeps whatever the main sphere's draw
+     * left on it, and the main sphere now draws with uGradMix 1. uGradMix 0
+     * leaves the theme tint untouched (the gradient is the main sphere's
+     * identity, these keep theirs); uBackFade (-2,-1) makes the fade's
+     * smoothstep 1.0 for every dot, front or back, so the companions keep
+     * showing their far side exactly as before.
+     */
+    uGradMix: { value: 0 },
+    uGradCool: { value: new Color(0, 0, 0) },
+    uGradMid: { value: new Color(0, 0, 0) },
+    uGradWarm: { value: new Color(0, 0, 0) },
+    uGradEdges: { value: new Vector2(0, 1) },
+    uGradWarmPow: { value: 1 },
+    uGradAxis: { value: new Vector3(0, 0, 1) },
+    uBackFade: { value: new Vector2(-2, -1) },
   };
 
   const material = new ShaderMaterial({

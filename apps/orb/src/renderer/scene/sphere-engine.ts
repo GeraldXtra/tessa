@@ -28,9 +28,12 @@ import {
   BufferAttribute,
   BufferGeometry,
   Color,
+  Euler,
   LinearSRGBColorSpace,
+  NormalBlending,
   PerspectiveCamera,
   Points,
+  Quaternion,
   Scene,
   ShaderMaterial,
   Vector2,
@@ -1290,7 +1293,7 @@ export const UV_GRAIN_POW = 0.45;
  * brightness alone gets eaten. See the note in particles.vert.glsl.
  */
 export const UV_CAP_BAND: readonly [number, number] = [0.899, 0.995];
-export const UV_CAP_GAIN = 3.2;
+export const UV_CAP_GAIN = 4.0;
 /**
  * ─── ZERO, AND THE CAPTURE IS WHY ───
  *
@@ -1453,7 +1456,224 @@ function buildGeometry(count: number, latticeJitter: number): BufferGeometry {
   return geometry;
 }
 
-/** THE GOLDEN-ANGLE GENERATOR. Kept for companion 3; not used by the main sphere. */
+/**
+ * ─── ROUND Q: THE MAIN SPHERE IS A GOLDEN-ANGLE LATTICE, WITH A FIXED GRADIENT ───
+ *
+ * The main-sphere target changed from `reference/main-orb.png` (a photograph of
+ * a UV grid) to `reference/third-orb.png` (a clean render of flowing rows, no
+ * bloom, no camera). Everything below is MEASURED off that file at its own
+ * scale — sphere radius 265.8 px in a 740x678 frame — see REPORT-Q.md items 2-5.
+ *
+ *   dots       fwhm 4.51 px = 0.0170 R; a flat-topped soft disc (profile
+ *              1.00 1.06 0.65 0.07 0.05 at r = 0..4 px), no glow, matte
+ *   spacing    7.00 px nearest-neighbour at the face centre (0.0263 R)
+ *   count      15,500-16,000 from the centre density (57 px^2 per dot) and
+ *              14,500 from the count inside 0.5 R; the med tier's own 15,600
+ *              sits inside that range and matches the row spacing to 1%
+ *   jitter     0 — the rows are perfectly smooth. The reference's psi6 of
+ *              0.25 (a clean projected golden-angle lattice scores 0.80) is
+ *              ANISOTROPY — its centre cell is a 7x8 px rectangle with a
+ *              10.6 px diagonal — not positional noise
+ *   axis       in-plane azimuth 126 deg (lower-right to upper-left); the
+ *              elevation toward the camera is FIB_AXIS_EL_DEG; handedness is
+ *              this generator's own (its mirror correlates 0.029 vs 0.087)
+ *   gradient   RADIAL: hue vs distance-from-centre correlates +0.81 (R^2
+ *              0.66) and linear x/y terms add 0.02 — rim WARM, centre COOL.
+ *              Purple at the centre, magenta at 0.5 R, orange at the rim,
+ *              a smoothstep on r/R with edges 0.12..0.89. The three stops are
+ *              tokens (--orb-grad-cool/-mid/-warm), fixed to the image, NOT
+ *              the theme — by the owner's ruling
+ *   back       the between-dot floor is black (p50 5.3 of 255): the far
+ *              hemisphere is not visible, so it is faded out here
+ *
+ * The UV generator and every UV_* constant stay in this file and are unused
+ * by the main sphere while MAIN_LATTICE is 'fibonacci'. Flip it to 'uv' and
+ * round P's sphere comes back exactly.
+ */
+export type MainLattice = 'fibonacci' | 'spiral' | 'uv';
+// `as`, not an annotation: an annotated const is narrowed to its initializer
+// for the rest of the file, and every `=== 'spiral'` below would be a type error.
+export const MAIN_LATTICE = 'fibonacci' as MainLattice;
+/** Points on the main golden-angle shell. The tier count is a CEILING on it. */
+export const FIB_COUNT = 15_600;
+/** Tangential lattice jitter of the main shell. 0: the reference's rows are clean. */
+export const FIB_JITTER = 0;
+/** Spiral axis: elevation toward the camera, and in-plane azimuth (0 = right, 90 = up). */
+export const FIB_AXIS_EL_DEG = 12;
+export const FIB_AXIS_AZ_DEG = 126;
+/** Phase about the spiral axis at rest. */
+export const FIB_SPIN_DEG = 0;
+/** Multiplier on the state's idle spin. 0: round 1 is STATIC; rotation is a later round. */
+export const FIB_SPIN_MUL = 0;
+/**
+ * ─── ROUND R: the idle turbulence is OFF on the main sphere ───
+ *
+ * `uTurbulence` (idle 0.022) moves every dot radially by a per-dot noise, and
+ * a radial move has a lateral component that grows with distance from the
+ * face centre. Measured on sub-pixel centroids (`subpix3.py`, round Q's
+ * shipped build): row straightness 0.054 / 0.047 / 0.076 / 0.099 px by 0.2 R
+ * band, against 0.03 for the clean lattice — small, but it is the only thing
+ * displacing a dot off its lattice position, and the reference is a still
+ * render with rows straight to 0.027 px. Breath is a uniform scale and moves
+ * nothing relative to anything.
+ */
+export const FIB_TURB_MUL = 0;
+
+/**
+ * ─── ROUND R EVIDENCE, OFF BY DEFAULT: THE CONSTANT-PITCH SPIRAL ───
+ *
+ * The owner ruled that the reference's tight aligned ranks are a golden-angle
+ * lattice made tighter, and that the generator is not to change. The
+ * measurement disagrees, and this block exists so the disagreement can be
+ * SEEN in the app rather than argued (REPORT-R.md items 2 and 3):
+ *
+ *   - the shipped golden-angle shell is already as regular as the generator
+ *     can make it: sub-pixel straightness 0.050 px (clean control 0.03),
+ *     jitter 0, sub-pixel phase random in both images;
+ *   - the reference's cell has TWO close families and a far third
+ *     (1.00 · 1.07 · 1.45 on centroids, 1.00 · 1.14 · 1.52 on peaks; psi6
+ *     0.25-0.34); a golden-angle cell has THREE near-equal families
+ *     (1.00 · 1.19 · 1.26; psi6 0.78) at every axis elevation swept
+ *     (`cell3.py`, 0-90 deg: 6th/1st never above 1.43). Three equal families
+ *     read as scatter; two plus a far third read as ranks. That is the whole
+ *     of "loose vs tight", and no jitter, spacing, size or snap changes it;
+ *   - a spiral of CONSTANT PITCH and constant arc spacing (one continuous
+ *     turn after another, dots evenly spaced along it, an integer count per
+ *     turn at the equator so consecutive turns line up into columns) has the
+ *     reference's cell (1.00 · 1.15 · 1.48), rows straight to 0.01 px, scores
+ *     0.496 on the reference's whole-face row-direction field against the
+ *     golden angle's 0.437, and still curls into spiral arcs at its poles —
+ *     it is NOT the UV grid (no closed rings, no meridians).
+ *
+ * `MAIN_LATTICE = 'spiral'` turns it on. Shipped OFF, as ruled.
+ */
+/** Dots per turn at the equator — an integer, so consecutive turns align into columns there. */
+export const SPIRAL_EQ_COUNT = 236;
+/** Pitch between turns over spacing along a turn. The reference's centre cell is 8 : 7. */
+export const SPIRAL_PITCH_RATIO = 8 / 7;
+/** The count that gives exactly SPIRAL_EQ_COUNT per equatorial turn: n^2 / (pi * ratio). 15,511 at 236. */
+export const SPIRAL_COUNT = Math.round((SPIRAL_EQ_COUNT * SPIRAL_EQ_COUNT) / (Math.PI * SPIRAL_PITCH_RATIO));
+/** Chirality; the reference's, by the direction-field fit (0.505 against 0.494 for the mirror). */
+export const SPIRAL_HAND = -1;
+/** Axis: in the view plane pointing right (poles at the left and right rims), 6 deg toward the camera. */
+export const SPIRAL_AXIS_EL_DEG = 6;
+export const SPIRAL_AXIS_AZ_DEG = 0;
+export const SPIRAL_SPIN_DEG = 0;
+
+/** The rest pose that applies to whichever lattice the main sphere is. */
+const MAIN_AXIS =
+  MAIN_LATTICE === 'spiral'
+    ? { el: SPIRAL_AXIS_EL_DEG, az: SPIRAL_AXIS_AZ_DEG, spin: SPIRAL_SPIN_DEG }
+    : { el: FIB_AXIS_EL_DEG, az: FIB_AXIS_AZ_DEG, spin: FIB_SPIN_DEG };
+/** Point-size multiplier on the state's pointScale, fitted to the reference's 0.0170 R fwhm. */
+export const FIB_POINT_SCALE_MUL = 2.12;
+/**
+ * Brightness multiplier. Idle brightness is 1.10; 1.10 x this = 1.0, so with
+ * uAlphaMax 1.0, even lighting and no depth term a front dot's flat top writes
+ * exactly its token colour to the framebuffer. No palette gain: the gradient
+ * is fixed to the image, so there is no theme to normalise against.
+ */
+export const FIB_BRIGHT_MUL = 1 / 1.1;
+export const FIB_ALPHA_MAX = 1.0;
+export const FIB_GLOW_GAIN = 0;
+export const FIB_CORE_TIGHT = 1.0;
+/** Flat grain: the reference's dots are uniform within a colour (sd/mean 0.13, and that includes its smooth shading). */
+export const FIB_GRAIN_MIN = 1.0;
+export const FIB_GRAIN_POW = 1.0;
+/** No linear depth dimming: the far hemisphere is removed by FIB_BACK_FADE instead. */
+export const FIB_DEPTH_FAR = 1.0;
+/** Gradient position: smoothstep(edges, sin(angle from the camera-facing axis)). Fitted rms 0.038. */
+export const FIB_GRAD_EDGES: readonly [number, number] = [0.12, 0.89];
+/**
+ * Easing of the mid -> warm half. Linear (1.0) measured 12 deg too warm at
+ * 0.6-0.7 R on the first build (hue 359 vs the reference's 347) while every
+ * other band sat within 4 deg: the reference lingers in crimson before it
+ * turns orange. 1.6 puts that band's mix at 0.20 instead of 0.36.
+ */
+export const FIB_GRAD_WARM_POW = 1.6;
+/** Fade by signed facing (normal . eye): fully out by -0.25, full at 0 — the silhouette row keeps its brightness. */
+export const FIB_BACK_FADE: readonly [number, number] = [-0.25, 0.0];
+
+/**
+ * The shell's rest orientation. Order 'ZXY' applies Ry (spin about the
+ * lattice's own +y spiral axis) first, then Rx (tilt toward the camera), then
+ * Rz (in-plane azimuth), so the axis lands at FIB_AXIS_AZ_DEG / FIB_AXIS_EL_DEG
+ * whatever the spin — the spin becomes rotation later without touching this.
+ */
+function fibRestEuler(spin = 0): Euler {
+  return new Euler(
+    (MAIN_AXIS.el * Math.PI) / 180,
+    (MAIN_AXIS.spin * Math.PI) / 180 + spin,
+    ((MAIN_AXIS.az - 90) * Math.PI) / 180,
+    'ZXY',
+  );
+}
+
+/**
+ * The OBJECT-SPACE direction that faces the camera at rest. The gradient is
+ * computed against this in the vertex stage from the dot's own object-space
+ * direction, which is what makes it a surface property: rotate the shell and
+ * the cool patch turns with it. Derived from the same Euler the shell is
+ * posed with, so the two cannot drift apart.
+ */
+function fibGradAxis(): Vector3 {
+  const q = new Quaternion().setFromEuler(fibRestEuler());
+  return new Vector3(0, 0, 1).applyQuaternion(q.invert()).normalize();
+}
+
+/** The main sphere's geometry: the golden-angle shell, or round P's UV grid. */
+function buildMainGeometry(count: number, latticeJitter: number): BufferGeometry {
+  if (MAIN_LATTICE === 'fibonacci') {
+    return buildFibonacciGeometry(Math.min(FIB_COUNT, count), FIB_JITTER);
+  }
+  if (MAIN_LATTICE === 'spiral') {
+    return buildSpiralGeometry(Math.min(SPIRAL_COUNT, count));
+  }
+  return buildGeometry(count, latticeJitter);
+}
+
+/**
+ * THE CONSTANT-PITCH SPIRAL (round R evidence; see the SPIRAL_* note). One
+ * continuous spiral from pole to pole: equal-area latitude steps, and the
+ * angle advances so that each turn sits one pitch below the last — theta =
+ * 2*pi*phi/pitch — which makes the arc spacing along a turn constant and the
+ * count per turn proportional to sin(phi): an integer at the equator by
+ * construction of SPIRAL_COUNT, so consecutive turns line up into columns
+ * there and shear slowly away from it, which is the curving-row flow; short
+ * turns at the poles are the spiral arcs. At a capped count (a lower tier)
+ * the per-turn count is no longer an integer and the columns stagger — a
+ * degradation, stated. Same attributes as the golden-angle generator.
+ */
+export function buildSpiralGeometry(count: number): BufferGeometry {
+  const positions = new Float32Array(count * 3);
+  const seeds = new Float32Array(count);
+  // s * pitch = 4*pi/count (equal-area), pitch = ratio * s.
+  const s = Math.sqrt((4 * Math.PI) / (Math.max(count, 1) * SPIRAL_PITCH_RATIO));
+  const pitch = SPIRAL_PITCH_RATIO * s;
+  for (let i = 0; i < count; i++) {
+    const y = 1 - (2 * (i + 0.5)) / count;
+    const ring = Math.sqrt(Math.max(0, 1 - y * y));
+    const phi = Math.acos(Math.max(-1, Math.min(1, y)));
+    const theta = (SPIRAL_HAND * 2 * Math.PI * phi) / pitch;
+    positions[i * 3] = Math.cos(theta) * ring;
+    positions[i * 3 + 1] = y;
+    positions[i * 3 + 2] = Math.sin(theta) * ring;
+    seeds[i] = (i * 0.618033988749895) % 1;
+  }
+  const geometry = new BufferGeometry();
+  geometry.setAttribute('position', new BufferAttribute(positions, 3));
+  geometry.setAttribute('aSeed', new BufferAttribute(seeds, 1));
+  geometry.setAttribute('aCross', new BufferAttribute(new Float32Array(count), 1));
+  return geometry;
+}
+
+/**
+ * THE GOLDEN-ANGLE GENERATOR. Used by the main sphere since round Q; also the
+ * generator for companion 3. Its parameters are exactly two — the count and a
+ * tangential jitter as a multiple of the lattice's own spacing — and it bakes
+ * in NO colour, size, deformation or orientation: the lattice is canonical,
+ * axis +y, and the shell is posed by fibRestEuler.
+ */
 export function buildFibonacciGeometry(count: number, latticeJitter: number): BufferGeometry {
   const positions = new Float32Array(count * 3);
   const seeds = new Float32Array(count);
@@ -1991,6 +2211,8 @@ export function createSphereEngine(options: SphereEngineOptions): SphereEngine {
   const scene = new Scene();
   const camera = new PerspectiveCamera(FOV_DEGREES, 1, 0.1, 100);
   camera.position.z = CAMERA_Z;
+  // Both spiral lattices take the round-Q material and uniforms; only 'uv' takes round P's.
+  const fib = MAIN_LATTICE !== 'uv';
 
   const uniforms = {
     uTime: { value: 0 },
@@ -2021,7 +2243,7 @@ export function createSphereEngine(options: SphereEngineOptions): SphereEngine {
      * one flag, identical geometry, so the comparison cannot be confounded the
      * way a 984x652-against-1366x720 comparison once was.
      */
-    uDepthFar: { value: options.depthFar ?? DEPTH_FAR_DEFAULT },
+    uDepthFar: { value: fib ? FIB_DEPTH_FAR : (options.depthFar ?? DEPTH_FAR_DEFAULT) },
     /**
      * THE RIM. See vFresnel in the vertex stage for the measurement that
      * produced these two numbers.
@@ -2060,18 +2282,40 @@ export function createSphereEngine(options: SphereEngineOptions): SphereEngine {
      * unchanged. See the note on `uAlphaMax` in particles.frag.glsl for the
      * arithmetic — at 0.55 every front dot on this sphere was clamped flat.
      */
-    uAlphaMax: { value: UV_ALPHA_MAX },
-    uGlowGain: { value: UV_GLOW_GAIN },
-    uCoreTight: { value: UV_CORE_TIGHT },
-    uCrossGain: { value: UV_CROSS_GAIN },
-    uCrossSize: { value: UV_CROSS_SIZE },
-    uCrossWidth: { value: new Vector2(UV_CROSS_WIDTH[0], UV_CROSS_WIDTH[1]) },
-    uGrainMin: { value: UV_GRAIN_MIN },
-    uGrainPow: { value: UV_GRAIN_POW },
-    uCapBand: { value: new Vector2(UV_CAP_BAND[0], UV_CAP_BAND[1]) },
-    uCapGain: { value: UV_CAP_GAIN },
-    uCapSize: { value: UV_CAP_SIZE },
-    uCapCeil: { value: UV_CAP_CEIL },
+    /**
+     * ROUND Q: the UV-only machinery — cross, caps, lifted cap ceiling, glow,
+     * tight core, wide grain — is scoped OFF the golden-angle main sphere
+     * here, by value, not by deleting anything. `fib` false restores every
+     * UV_* constant.
+     */
+    uAlphaMax: { value: fib ? FIB_ALPHA_MAX : UV_ALPHA_MAX },
+    uGlowGain: { value: fib ? FIB_GLOW_GAIN : UV_GLOW_GAIN },
+    uCoreTight: { value: fib ? FIB_CORE_TIGHT : UV_CORE_TIGHT },
+    uCrossGain: { value: fib ? 0 : UV_CROSS_GAIN },
+    uCrossSize: { value: fib ? 0 : UV_CROSS_SIZE },
+    uCrossWidth: { value: fib ? new Vector2(0, 0) : new Vector2(UV_CROSS_WIDTH[0], UV_CROSS_WIDTH[1]) },
+    uGrainMin: { value: fib ? FIB_GRAIN_MIN : UV_GRAIN_MIN },
+    uGrainPow: { value: fib ? FIB_GRAIN_POW : UV_GRAIN_POW },
+    uCapBand: { value: fib ? new Vector2(2, 3) : new Vector2(UV_CAP_BAND[0], UV_CAP_BAND[1]) },
+    uCapGain: { value: fib ? 0 : UV_CAP_GAIN },
+    uCapSize: { value: fib ? 0 : UV_CAP_SIZE },
+    uCapCeil: { value: fib ? 0 : UV_CAP_CEIL },
+    /**
+     * THE FIXED SURFACE GRADIENT (round Q). Three stops read from tokens —
+     * measured off `third-orb.png`'s dot peak pixels, fixed to the image, not
+     * the theme — placed along sin(angle from the camera-facing object-space
+     * axis). `uGradMix` 1 replaces the theme tint entirely; companions.ts pins
+     * it to 0. `uBackFade` removes the far hemisphere, which the reference
+     * does not show.
+     */
+    uGradMix: { value: fib ? 1 : 0 },
+    uGradCool: { value: tokenColor('--orb-grad-cool') },
+    uGradMid: { value: tokenColor('--orb-grad-mid') },
+    uGradWarm: { value: tokenColor('--orb-grad-warm') },
+    uGradEdges: { value: new Vector2(FIB_GRAD_EDGES[0], FIB_GRAD_EDGES[1]) },
+    uGradWarmPow: { value: FIB_GRAD_WARM_POW },
+    uGradAxis: { value: fibGradAxis() },
+    uBackFade: { value: fib ? new Vector2(FIB_BACK_FADE[0], FIB_BACK_FADE[1]) : new Vector2(-2, -1) },
     uLightDir: { value: LIGHT_DIR.clone() },
   };
 
@@ -2091,7 +2335,19 @@ export function createSphereEngine(options: SphereEngineOptions): SphereEngine {
     transparent: true,
     depthWrite: false,
     depthTest: false,
-    blending: AdditiveBlending,
+    /**
+     * ROUND Q: MATTE, not additive, for the golden-angle sphere. The
+     * reference's dots are opaque discs — where its silhouette rows overlap
+     * they stay the same orange, they do not sum toward white. The shader
+     * already writes premultiplied colour (tint * out, out), so NormalBlending
+     * with premultipliedAlpha is ONE / ONE_MINUS_SRC_ALPHA: "over". Draw order
+     * is the buffer order, and it only matters where dots overlap, which is
+     * the silhouette, where neighbours share a colour. The far hemisphere is
+     * faded to zero before it can paint over anything. Companions keep their
+     * own additive material.
+     */
+    blending: fib ? NormalBlending : AdditiveBlending,
+    premultipliedAlpha: fib,
   });
 
   /**
@@ -2104,7 +2360,7 @@ export function createSphereEngine(options: SphereEngineOptions): SphereEngine {
   }
 
   const latticeJitter = options.rim?.jitter ?? LATTICE_JITTER_DEFAULT;
-  let geometry = buildGeometry(countFor(tier), latticeJitter);
+  let geometry = buildMainGeometry(countFor(tier), latticeJitter);
   const points = new Points(geometry, material);
   scene.add(points);
 
@@ -2573,11 +2829,12 @@ export function createSphereEngine(options: SphereEngineOptions): SphereEngine {
     uniforms.uAmplitude.value = amplitude;
     fitCurrent = approach(fitCurrent, fitTarget, rate);
     uniforms.uRadius.value = smooth.radius * fitCurrent;
-    uniforms.uTurbulence.value = smooth.turbulence * (1 + TURB_AMP_GAIN * focusCurrent);
+    uniforms.uTurbulence.value =
+      smooth.turbulence * (1 + TURB_AMP_GAIN * focusCurrent) * (fib ? FIB_TURB_MUL : 1);
     uniforms.uBreath.value = Math.sin(breathPhase) * smooth.breathDepth;
     uniforms.uAmpGain.value = smooth.amplitudeGain;
     uniforms.uPointScale.value =
-      smooth.pointScale * bodySizeMul * fitCurrent * UV_POINT_SCALE_MUL;
+      smooth.pointScale * bodySizeMul * fitCurrent * (fib ? FIB_POINT_SCALE_MUL : UV_POINT_SCALE_MUL);
     // §R.1: hotter under load. coolMix 1 is fully --sphere-cool and 0 is fully
     // --sphere-hot, so load pulls it DOWN toward hot from whatever the current
     // state's resting temperature is.
@@ -2590,11 +2847,14 @@ export function createSphereEngine(options: SphereEngineOptions): SphereEngine {
     uniforms.uBrightness.value =
       smooth.brightness *
       bodyBrightMul *
-      UV_BRIGHT_MUL *
-      (target.palette === 'amber' ? amberGain : flameGain);
+      (fib
+        ? FIB_BRIGHT_MUL
+        : UV_BRIGHT_MUL * (target.palette === 'amber' ? amberGain : flameGain));
     // The skirt rides the SAME palette switch as the brightness, so a theme or
     // state crossfade carries the wash with it rather than stepping it.
-    uniforms.uGlowGain.value = target.palette === 'amber' ? amberGlowGain : flameGlowGain;
+    uniforms.uGlowGain.value = fib
+      ? FIB_GLOW_GAIN
+      : target.palette === 'amber' ? amberGlowGain : flameGlowGain;
 
     /**
      * SPIN ABOUT THE POLE AXIS, THEN TILT. The order matters and three.js gives
@@ -2614,8 +2874,15 @@ export function createSphereEngine(options: SphereEngineOptions): SphereEngine {
      * 372 and radius 242, i.e. at 0.90 R and 0.88 R from centre rather than at
      * 1.00 R, which is a tilt of about asin(0.89) complement — 27 degrees.
      */
-    points.rotation.y = spinAngle;
-    points.rotation.x = POLE_TILT_RAD;
+    if (fib) {
+      // The measured rest pose (see fibRestEuler). FIB_SPIN_MUL is 0 this
+      // round — static — so the idle spin does not carry the rows or the
+      // cool patch anywhere; when rotation comes, it comes through here.
+      points.rotation.copy(fibRestEuler(spinAngle * FIB_SPIN_MUL));
+    } else {
+      points.rotation.y = spinAngle;
+      points.rotation.x = POLE_TILT_RAD;
+    }
 
     // The drawer shift moves the sphere inside the scene rather than resizing
     // the canvas. Reallocating a WebGL drawing buffer every frame of a 200 ms
@@ -2833,7 +3100,7 @@ export function createSphereEngine(options: SphereEngineOptions): SphereEngine {
     const count = countFor(tier);
     scene.remove(points);
     geometry.dispose();
-    geometry = buildGeometry(count, latticeJitter);
+    geometry = buildMainGeometry(count, latticeJitter);
     points.geometry = geometry;
     scene.add(points);
 

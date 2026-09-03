@@ -237,6 +237,18 @@ uniform float uCapGain;
 uniform float uCapCeil;
 /** Scales dist2 for the CORE term only, so a bigger quad keeps the same core. */
 uniform float uCoreTight;
+// ROUND Q: the fixed surface gradient (three token stops, cool at the patch
+// centre, mid half way, warm at the grazing rim), its mix against the theme
+// tint (1 on the main sphere, 0 on the companions), the smoothstep edges on
+// sin(angle from the camera-facing axis), and the far-hemisphere fade edges on
+// the signed facing.
+uniform vec3  uGradCool;
+uniform vec3  uGradMid;
+uniform vec3  uGradWarm;
+uniform float uGradMix;
+uniform vec2  uGradEdges;
+uniform float uGradWarmPow;
+uniform vec2  uBackFade;
 
 varying float vRim;
 varying float vSeed;
@@ -247,6 +259,8 @@ varying float vDepth;
 varying float vFresnel;
 varying float vLight;
 varying float vSpread;
+varying float vGradT;
+varying float vFacing;
 
 void main() {
   // Round the point. gl_PointCoord is [0,1] across the sprite; work in squared
@@ -343,6 +357,26 @@ void main() {
   float lTint = dot(tint, LUMA);
   tint *= (lTint > 0.0001) ? (lHued / lTint) : 1.0;
 
+  /**
+   * ─── ROUND Q: THE FIXED SURFACE GRADIENT ───
+   *
+   * Measured off reference/third-orb.png: the dots' hue follows DISTANCE FROM
+   * THE DISC CENTRE (corr +0.81, R^2 0.66; adding linear x/y terms gains
+   * 0.02) — purple at the centre, magenta half way out, orange at the rim.
+   * On a sphere that distance is sin(angle to the viewing axis), so the same
+   * quantity computed against an OBJECT-SPACE axis (vGradT is its cosine)
+   * reproduces the image at rest and turns with the shell afterwards. The
+   * far hemisphere is held at the rim value so the cool patch is ONE marking
+   * that rotates away, not a second one at the antipode. The transition is
+   * the fitted smoothstep on r/R (edges 0.12..0.89, rms 0.038) through three
+   * token stops: cool -> mid over the first half, mid -> warm over the second.
+   */
+  float rimness = (vGradT > 0.0) ? sqrt(max(1.0 - vGradT * vGradT, 0.0)) : 1.0;
+  float gs = smoothstep(uGradEdges.x, uGradEdges.y, rimness);
+  vec3 gradTint = (gs < 0.5) ? mix(uGradCool, uGradMid, gs * 2.0)
+                             : mix(uGradMid, uGradWarm, pow((gs - 0.5) * 2.0, uGradWarmPow));
+  tint = mix(tint, gradTint, uGradMix);
+
   // Per-particle brightness jitter so the shell does not look like a printed
   // dot screen. Cheap hash on the seed; deterministic across frames.
   float h = fract(sin(vSeed * 91.7) * 43758.5453);
@@ -437,7 +471,11 @@ void main() {
   // symmetric top and bottom by construction: |dir.y| does not distinguish them.
   float lit = (uBrightness + rimAdd) * (1.0 + uCrossGain * vCross + uCapGain * vCap);
 
-  float alpha = falloff * lit * grain * depthFade * lambert * spread * (1.0 + vPulse * 1.6);
+  // ROUND Q: the far hemisphere fades out by signed facing. The reference's
+  // between-dot floor is black (p50 5.3 of 255) — nothing of its back shows.
+  // Companions pin the edges to (-2,-1), which makes this 1.0 for every dot.
+  float backFade = smoothstep(uBackFade.x, uBackFade.y, vFacing);
+  float alpha = falloff * lit * grain * depthFade * lambert * spread * backFade * (1.0 + vPulse * 1.6);
 
   // THE CEILING. One sprite may not, on its own, saturate the framebuffer.
   //

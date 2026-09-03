@@ -112,6 +112,11 @@ uniform float uJitter;
  * otherwise evenly lit ball.
  */
 uniform float uEvenLight;
+// ROUND Q. The OBJECT-SPACE direction that faces the camera at rest. Dotted
+// with the dot's own object-space direction it gives the gradient position as
+// a surface property — it turns with the shell. Companions pin (0,0,1) and a
+// uGradMix of 0, so it is inert there.
+uniform vec3 uGradAxis;
 
 varying float vRim;
 varying float vSeed;
@@ -185,6 +190,11 @@ varying float vLight;
 /** How much bigger this point actually drew than its unlit size, after the
  *  clamp. The fragment stage divides brightness by it. */
 varying float vSpread;
+// ROUND Q: cosine of the angle to the camera-facing object axis (the gradient
+// position), and the SIGNED facing (normal . eye) that the far-hemisphere fade
+// reads — vFresnel takes abs() and cannot tell front from back.
+varying float vGradT;
+varying float vFacing;
 
 // Three detuned sines instead of a hash. No texture fetch, no branching, and on
 // an integrated part the vertex stage has headroom that the fragment stage does
@@ -287,6 +297,8 @@ void main() {
   vec3 nView = normalize((modelViewMatrix * vec4(dir, 0.0)).xyz);
   vec3 eye   = normalize(-viewPos.xyz);
   vFresnel   = 1.0 - clamp(abs(dot(nView, eye)), 0.0, 1.0);
+  vFacing    = dot(nView, eye);
+  vGradT     = dot(dir, normalize(uGradAxis));
   vLight     = dot(nView, uLightDir);
 
   // View depth, normalised across the shell's own diameter rather than against
