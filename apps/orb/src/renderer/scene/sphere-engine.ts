@@ -33,6 +33,7 @@ import {
   Points,
   Scene,
   ShaderMaterial,
+  Vector2,
   Vector3,
   WebGLRenderer,
 } from 'three';
@@ -49,8 +50,49 @@ import { createCompanion, type Companion } from './companions.ts';
 import vertexShader from './shaders/particles.vert.glsl?raw';
 import fragmentShader from './shaders/particles.frag.glsl?raw';
 
-const FOV_DEGREES = 42;
-const CAMERA_Z = 3.2;
+/**
+ * ─── THE DEAD NORTH POLE WAS THE CAMERA, NOT THE LIGHTING ───
+ *
+ * Three rounds treated the welded north cap as a brightness problem. It is a
+ * PROJECTION problem, and the reference says so precisely.
+ *
+ * On a sphere the surface normal IS the position, so the grazing angle is a pure
+ * function of screen radius — n.eye = z, and the projected radius is
+ * sqrt(1-z^2). Computed over the real camera at every radius and every exponent,
+ * a cap dot and a limb dot AT THE SAME SCREEN RADIUS have IDENTICAL fresnel:
+ * separation 1.00x, not 1.01x. So no fresnel curve, however steep, can dim the
+ * rim while sparing a cap that is sitting ON the rim. The cap has to MOVE.
+ *
+ * And the reason it was on the rim is that the camera was too close. At
+ * CAMERA_Z/R = 3.46 perspective magnifies the NEAR pole and shrinks the FAR one:
+ *
+ *                       north cap      south cap     skew
+ *   CAMERA_Z 3.2          0.982 R        0.754 R     0.228   <- what shipped
+ *   CAMERA_Z 12.76        0.919 R        0.860 R     0.058   <- this
+ *   orthographic          0.891 R        0.891 R     0.000
+ *
+ * MEASURED ON THE REFERENCE, central column strip at one sphere radius, its cap
+ * rings peak at r/R 0.828 / 0.877 / 0.916 / 0.960 at the TOP and 0.877 / 0.916 /
+ * 0.960 at the BOTTOM — the same radii top and bottom, SYMMETRIC. And
+ * cos(27 +/- theta) for theta = 5..15 degrees is 0.848..0.927 and 0.799..0.956.
+ * The reference's cap IS the orthographic cap at this exact tilt. Its camera is
+ * orthographic or nearly so; ours was not.
+ *
+ * ─── WHY BOTH NUMBERS MOVE TOGETHER: THIS IS A DOLLY ZOOM ───
+ *
+ * Pulling the camera back alone would shrink the sphere. Scaling CAMERA_Z by m
+ * and tan(fov/2) by 1/m holds the image size exactly, because every place the
+ * two appear in this file they appear as one of two invariant products:
+ *
+ *   uSizeScale / CAMERA_Z      = height / (2 tan(fov/2) CAMERA_Z)   -> point size
+ *   2 tan(fov/2) CAMERA_Z      = visibleHeight                      -> worldPerPixel
+ *
+ * Both are unchanged by construction, so the layout, the fit factor and the
+ * sprite scale all carry over untouched. m = 4: FOV 42 -> 11 degrees and
+ * CAMERA_Z 3.2 -> 12.76, which holds tan(fov/2) * CAMERA_Z at 1.2285.
+ */
+const FOV_DEGREES = 11;
+const CAMERA_Z = 12.76;
 
 const FPS_FOCUSED = 30;
 const FPS_BACKGROUND = 10;
@@ -330,6 +372,13 @@ export interface SphereStats {
    * bug back.
    */
   paletteGain: number;
+  /**
+   * The glow skirt's amplitude AS APPLIED, after the bright-end clamp. Published
+   * for the same reason `paletteGain` is: the clamp is invisible in a still, and
+   * a capture that reads the unclamped UV_GLOW_GAIN under a bright theme is a
+   * capture of a build where it did not run. See UV_GLOW_LUM_POW.
+   */
+  glowGain: number;
   /**
    * The canvas geometry the last resize() actually applied.
    *
@@ -755,8 +804,82 @@ function tokenColor(property: string): Color {
  * separation already existed; it is stated because a shared generator would have
  * silently turned both companions into UV grids.
  */
-export const UV_LAT_BANDS = 26;
-export const UV_LON_EQUATOR = 76;
+/**
+ * ─── THE FIELD WAS STRIPED, AND IT WAS LATITUDE, NOT DENSITY ───
+ *
+ * Beside the reference the build read COARSE and STRIPED — bright rows with
+ * visibly dark gaps between them — where the reference reads fine, dense and
+ * continuous. The obvious reading is "not enough dots", and it is wrong: the
+ * TOTAL areal dot density already matched. Counting deduplicated dots in a
+ * 140x140 px patch at the centre of the disc, both images resampled to a sphere
+ * radius of 227 px, gave 80 for the reference and 88 for the build — 1.10x, not
+ * a shortfall.
+ *
+ * The gap is entirely in ONE AXIS. Counting latitude rows in that same patch:
+ *
+ *                  row pitch      implied bands
+ *   reference       16.0 px            45
+ *   build           36.0 px            20
+ *
+ * The build packs its dots into too few rows and then over-packs each row —
+ * which is exactly why adding longitude would not have closed the stripes, and
+ * why the areal density looked right while the picture did not.
+ *
+ * LONGITUDE IS ALREADY CORRECT and is deliberately left alone: 76 at the
+ * equator puts the horizontal spacing at the sub-viewer point at
+ * 2*pi*227*cos(27 deg)/76 = 16.7 px, against the reference's 16.0. Raising it
+ * would cost points and coverage to fix something that measures right.
+ *
+ * So the bands scale by 36.0/16.0 = 2.25, and 26 * 2.25 = 58.5.
+ */
+export const UV_LAT_BANDS = 44;
+/**
+ * ─── CUT FOR AIR: 76 -> 50, AND THE DOLLY ZOOM IS WHY IT MOVED AT ALL ───
+ *
+ * Round J measured this correct at 76 and left it alone. That was true under the
+ * OLD camera. The dolly zoom removed the centre magnification and compressed
+ * both pitches, exactly as it did for latitude — the row pitch needed 58 -> 44
+ * bands for the same reason. Measured after it: the centre patch holds 123 dots
+ * against the reference's 80, and with the row pitch at 15.5 px that puts the
+ * COLUMN pitch at 10.2 px against the reference's 15.4 — columns 1.5x too dense
+ * while rows are right. The field was anisotropic again, the other way round.
+ *
+ * 76 * 80/123 = 49.4, and 76 * 10.2/15.4 = 50.3. Both roads give 50.
+ */
+export const UV_LON_EQUATOR = 50;
+
+/**
+ * ─── THE EQUATOR ARM, AS DENSITY ───
+ *
+ * The bands nearest the equator carry this multiple of their longitude count, so
+ * their dots sit at half the spacing and merge into the continuous line the
+ * reference shows. It is the reference's own mechanism (see UV_CROSS_GAIN) and,
+ * unlike a marked meridian, it is ROTATIONALLY SYMMETRIC — a denser ring reads
+ * the same at every spin angle, so this arm is rotation-safe by construction
+ * where an object-space meridian would swing off the screen axis.
+ */
+/**
+ * ─── REVERTED TO 1.0 (OFF), AND THE GEOMETRY IS WHY ───
+ *
+ * REPORT-M established that the reference's cross is DENSITY, not brightness,
+ * and this band was the right answer to that. It is the wrong answer to WHERE.
+ *
+ * The band packs the EQUATOR RING, which is object space. The shell is leaned 27
+ * degrees, so that ring projects as an ELLIPSE reaching +/-R*sin(27) = 0.45 R
+ * above and below the centre — it does not lie along the horizontal line through
+ * the disc where the reference's band is and where the metric samples. Measured,
+ * strengthening it from +/-3 deg at 2.0x to +/-6 deg at 2.5x moved the equator
+ * band-mean the WRONG WAY, 1.23x -> 1.10x: it was adding dots off the line and
+ * diluting the strip it was meant to fill.
+ *
+ * This is the same trap round J hit with an object-space cross mask, and the
+ * same conclusion: on a leaned shell, nothing painted on the SURFACE lies along
+ * a straight screen axis. A density cross therefore cannot be built in geometry
+ * at this tilt, and the view-space brightness mask is restored instead.
+ */
+const UV_EQ_BAND_MUL = 1.0;
+/** How far from the equator the density band reaches, in degrees of latitude. */
+const UV_EQ_BAND_DEG = 6.0;
 /**
  * THE POLE PINCH, AND THE ONE PIECE OF CRAFT IN THIS FILE.
  *
@@ -775,7 +898,25 @@ export const UV_LON_EQUATOR = 76;
  * reference shows four to five nested rings at each pole, which is what this
  * produces.
  */
-const UV_POLE_MIN_LON = 16;
+/**
+ * ─── AND THE TAPER HAD TO EASE HARDER, BECAUSE THE BANDS MORE THAN DOUBLED ───
+ *
+ * The floor and the exponent are not independent of UV_LAT_BANDS. With 26 bands
+ * the outermost ring sat 3.5 degrees from the pole; with 58 it sits 1.6 degrees
+ * out, so the polar rings are less than half as far apart on screen and the SAME
+ * dots-per-ring welds them into a solid mass. Holding floor 16 / exponent 0.5
+ * through the band change would have made the pile-up worse, not better.
+ *
+ * Dots on the outermost four rings, equator held at 76:
+ *
+ *   26 bands, floor 16, exp 0.50    19 / 32 / 41 / 49     (what shipped)
+ *   58 bands, floor 16, exp 0.50    16 / 22 / 28 / 33     denser cap, worse
+ *   58 bands, floor 12, exp 0.65    12 / 15 / 21 / 26     what this ships
+ *
+ * Total 3,180 points — 20.4% of the med tier's 15,600 allocation, so the grid
+ * is bought out of headroom rather than out of the companions.
+ */
+const UV_POLE_MIN_LON = 10;
 
 /**
  * ─── THE TAPER EXPONENT, AND I HAD OVER-CORRECTED ───
@@ -803,7 +944,7 @@ const UV_POLE_MIN_LON = 16;
  * dense enough to read as a bright ring, and nowhere near the sixteen-times of an
  * untapered sphere.
  */
-const UV_LON_TAPER_EXP = 0.5;
+const UV_LON_TAPER_EXP = 0.85;
 
 /**
  * How far the pole axis leans toward the viewer. MEASURED off the reference.
@@ -817,7 +958,40 @@ const UV_LON_TAPER_EXP = 0.5;
  * It is a fixed lean, not an animation: the shell spins about this axis, so the
  * poles stay where they are for the whole rotation.
  */
+/**
+ * ─── 38 DEGREES WAS TRIED AND REVERTED; THE LEAN IS NOT WHAT SHUTS THE CAP ───
+ *
+ * 27 degrees comes from the reference's cap positions read as an ORTHOGRAPHIC
+ * projection, cap distance = R * cos(tilt). The camera is not orthographic, and
+ * that is real: the north pole leans TOWARD the viewer, sits closer to the
+ * camera than the shell's centre, and projects FURTHER out than the cosine
+ * predicts — measured, a nominal 0.891 R rendered at about 0.97 R.
+ *
+ * So 38 degrees was tried, which is what lands the cap at the reference's
+ * ~0.86 R once that 1.09 factor is inverted. IT DID NOT OPEN THE CAP. The
+ * capture is in the report: the rings still weld into a bright arc, because
+ * what is drowning the cap is not its position but the LIMB. Projection
+ * compresses surface density as 1/cos toward the silhouette, and this shell has
+ * no limb darkening, so the outermost few degrees of the disc are far brighter
+ * than the cap sitting just inside them. The reference's limb is much fainter
+ * relative to its cap.
+ *
+ * That is the deferred front/back balance work, not a tilt value, so the tilt
+ * goes back to the number that was actually measured rather than shipping a
+ * composition change that did not do what it was changed for.
+ */
 const POLE_TILT_RAD = (27 * Math.PI) / 180;
+
+/**
+ * How far short of each pole the latitude bands stop.
+ *
+ * The reference's pole caps are OPEN BULLSEYES: nested rings around a dark
+ * centre. A UV grid whose bands run all the way in has no such centre — its
+ * innermost ring is a few pixels across and simply fills. Measured on the
+ * reference, the hole inside the innermost ring is about 15-20 px on a 227 px
+ * radius, which is 4-5 degrees of latitude.
+ */
+const UV_POLE_HOLE_RAD = (5 * Math.PI) / 180;
 
 /** Single-particle ceiling for the evenly lit UV sphere. See particles.frag.glsl. */
 export const UV_ALPHA_MAX = 1.0;
@@ -840,7 +1014,7 @@ export const UV_ALPHA_MAX = 1.0;
  * state is scaled by the same number) and the companions, which build their own
  * uniforms, are untouched.
  */
-export const UV_BRIGHT_MUL = 1.35;
+export const UV_BRIGHT_MUL = 1.9;
 
 /**
  * ─── THE DOTS WERE SINGLE PIXELS, AND EVEN LIGHTING IS WHY ───
@@ -863,7 +1037,26 @@ export const UV_BRIGHT_MUL = 1.35;
  * reference's 2.20 and the old sphere's 3.09, and it widens the Gaussian's skirt
  * with it — which is the halo the reference has and the bare build did not.
  */
-export const UV_POINT_SCALE_MUL = 4.0;
+/**
+ * ─── RAISED AGAIN, BECAUSE COVERAGE IS QUAD-BOUND, NOT AMPLITUDE-BOUND ───
+ *
+ * After the thinning, coverage above luminance 8 sat at 19.97% against the
+ * reference's 25.74%, and RAISING THE SKIRT AMPLITUDE DID ALMOST NOTHING:
+ * UV_GLOW_GAIN 0.38 -> 0.70, an applied 0.28 -> 0.52, moved gold's coverage from
+ * 19.58% to 19.97%. Meanwhile mean luminance was ALREADY ABOVE the reference —
+ * 16.77 against 12.51 — with a lower coverage.
+ *
+ * That pair is diagnostic: the build's light is concentrated in fewer, brighter
+ * pixels where the reference's is spread. The skirt is `exp(-dist2*12)` and the
+ * fragment discards beyond dist2 > 0.25, so at the quad's edge the skirt is
+ * already down to exp(-3) = 0.05 — it is being CUT OFF, and more amplitude just
+ * makes the same small footprint brighter.
+ *
+ * The fix is a bigger quad, not a bigger number: 2.6 -> 3.6 widens the skirt by
+ * 1.38x and nearly doubles its area, and UV_CORE_TIGHT rises by the square of
+ * the same factor so the CORE keeps its size in pixels.
+ */
+export const UV_POINT_SCALE_MUL = 3.2;
 
 /**
  * THE GLOW, and the two numbers that make it work together.
@@ -881,20 +1074,295 @@ export const UV_POINT_SCALE_MUL = 4.0;
  * dot, exp(-dist2*12) is 0.122, so a single dot contributes gain * 79 * 0.122,
  * and neighbours at ~8 px spacing overlap two-deep.
  */
-export const UV_CORE_TIGHT = 6.7;
-export const UV_GLOW_GAIN = 0.2;
+/**
+ * SHRUNK WITH THE QUAD, AND IT HAS TO BE. `uCoreTight` scales dist2 for the core
+ * term only, so it is what keeps the core the same size IN PIXELS while the quad
+ * changes. dist2 goes as the square of the quad width, so when
+ * UV_POINT_SCALE_MUL went 4.0 -> 2.6 this had to go 6.7 * (2.6/4.0)^2 = 2.83.
+ *
+ * The quad had to come down because the row pitch did: at 36 px rows a 9.6 px
+ * quad had room, at 16 px rows it does not, and overlapping skirts would fill
+ * the black the round is trying to keep. The CORE is deliberately unchanged —
+ * that is the shrink/brightness coupling, and the dot peak is the check.
+ */
+export const UV_CORE_TIGHT = 4.29;
+/**
+ * ─── CUT HARD: THE HALO IS THE "GLOWING BALL", NOT THE CORE ───
+ *
+ * Measured at 8x on a matched-scale field crop, the build's dot CORES already
+ * match the reference: field dot area 8.00 px red / 6.00 gold against the
+ * reference's 7.00, and the normalised radial profile falls to 0.50 at 1.03 px
+ * against the reference's 0.93. The cores were never the fault.
+ *
+ * What the build has and the reference does NOT is a smooth circular HALO around
+ * every dot — the skirt. It measures low (0.03-0.12 of peak past r=2) but it is
+ * SMOOTH and ROUND, so the eye reads a glowing ball; the reference's surround at
+ * the same radii is noisy speckle with no ring structure at all. Its profile
+ * sits on a 0.16-0.24 floor that never reaches black, which is photographic
+ * haze, not a per-dot halo.
+ *
+ * So the skirt goes to a quarter of what it was. Coverage falls with it and is
+ * ALLOWED to: see the note on the coverage target in REPORT-O.
+ */
+export const UV_GLOW_GAIN = 0.06;
+
+/**
+ * ─── THE SKIRT IS CLAMPED AT THE BRIGHT END, AND A GLOBAL CUT WAS WRONG ───
+ *
+ * At UV_GLOW_GAIN 0.3 the wash landed for RED — coverage above luminance 8 of
+ * 22.73% against reference/main-orb.png's 24.99%, on a between-dot floor of 7.0
+ * against 6-7. Under GOLD the same gain measured 33.08%: the wash filled too
+ * much of the black and the dots stopped reading as points.
+ *
+ * MY FIRST FIX WAS A FLAT CUT AND IT WAS THE WRONG SHAPE. Taking the gain to
+ * 0.2 and UV_BRIGHT_MUL to 1.35 brought gold to 27.85% but dragged red down
+ * with it, from 22.73% to 17.48% — it fixed the theme that was wrong by
+ * breaking the one that was right. Both constants are restored above.
+ *
+ * WHAT ACTUALLY RUNS HOT IS THE BRIGHT END. `gainFor` below already normalises
+ * the shell for the palette luminance, and it does so correctly for the dot
+ * CORES. It does not hold for the wash: measured at one disc scale, the same
+ * gain gives a between-dot floor of 11.0-12.4 under gold against 6.9-7.6 under
+ * red, a factor of 1.6, and a mean disc luminance of 18.045 against 9.738. So
+ * the skirt needs its own normalisation on top of the shell's.
+ *
+ * This is that normalisation, and it only ever REDUCES. The knee is the
+ * luminance of the theme reference/main-orb.png was rendered in, read from its
+ * token rather than written here, so the theme the wash was fitted against
+ * comes out at exactly 1.0 and red cannot move by construction. Every brighter
+ * theme is scaled by (knee / its luminance).
+ *
+ * ─── THE EXPONENT IS FITTED, AND A FULL CLAMP OVERSHOT ───
+ *
+ * Coverage above a threshold grows with the LOG of the skirt amplitude: the
+ * skirt is a Gaussian, so the radius at which it crosses 8 goes as ln(A/8) and
+ * the covered area goes with it. Two gold captures at the same brightness give
+ * that slope directly — gain 0.300 measured 28.12% and gain 0.126 measured
+ * 15.24%, so 14.9 coverage points per e-fold of amplitude.
+ *
+ * 1.0 — the full clamp, gold at the knee ratio 0.3424/0.8157 = 0.42 — is what
+ * produced that 15.24%, which is 8.5 points BELOW the reference rather than
+ * above it. It over-corrects because the palette gain has already done part of
+ * this job for the cores; only the residual belongs here.
+ *
+ * The reference reads 23.72% on the same ruler, so gold needs ln 0.296 down
+ * from 28.12%, a factor of 0.744, and 0.4197^0.35 is 0.738. Hence 0.35.
+ *
+ * RED CANNOT MOVE, whatever this number is: its own luminance IS the knee, so
+ * the ratio is exactly 1 and 1 to any power is 1. That is the property the
+ * exponent was allowed to be fitted freely against.
+ */
+/**
+ * ─── REFIT TO 0 AT THE WIDE-QUAD OPERATING POINT, AND THE MEASUREMENT SAYS SO ───
+ *
+ * 0.35 was fitted when the skirt was QUAD-BOUND — clipped by the sprite's own
+ * discard — and in that regime gold ran hot and needed holding down. Widening
+ * the quad changed the regime, and re-measuring the slope on this build gives:
+ *
+ *              applied gain   cov>8      slope (points per e-fold of amplitude)
+ *   gold       0.517 / 0.199  39.79 / 24.47      16.0
+ *   red        0.700 / 0.270  41.31 / 30.18      11.7
+ *
+ * Solving each theme to the reference's 25.74% asks for an applied gain of
+ * 0.216 for GOLD and 0.185 for RED — i.e. gold now wants MORE skirt than red,
+ * the opposite of what the clamp does. Holding the old 0.35 would push gold
+ * further under a target it is already below.
+ *
+ * So the exponent is refit to 0, which makes the clamp inert: both themes take
+ * the raw gain. The machinery is one `Math.pow` and is kept rather than deleted
+ * because it is the thing that has to move again if the sprite geometry does —
+ * it has been refitted twice for exactly that reason.
+ */
+export const UV_GLOW_LUM_POW = 0;
+
+/**
+ * ─── THE CROSS, AND WHY IT IS AN ATTRIBUTE AND NOT A GRADIENT ───
+ *
+ * The reference has a brighter equator band and a brighter centre meridian.
+ * Measured on the inner 0.8 R, so limb compression cannot contribute:
+ *
+ *                  equator / off-equator     meridian / off-meridian
+ *   reference             1.34x                     1.26x
+ *   build                 1.01x                     1.04x
+ *
+ * i.e. the build has no cross at all. The tempting fix is a view-facing wash,
+ * and it is the wrong one twice over: it would put the light back in a
+ * DIRECTION, which is the crescent this sphere spent two rounds removing, and
+ * it would brighten the whole centre of the disc rather than two lines.
+ *
+ * So the cross is carried as a PER-VERTEX ATTRIBUTE. `aCross` is 1 on the
+ * equatorial band and on the two meridians that project to the vertical line
+ * through the centre, 0 everywhere else, and the vertex stage multiplies
+ * brightness by (1 + uCrossGain * aCross). Nothing else on the sphere can be
+ * touched by it, because nothing else carries the attribute.
+ *
+ * 0.55 is set from the ratio: the marked dots have to lift their own band by
+ * about a third against neighbours that do not move.
+ */
+/**
+ * ─── THE CROSS IS DENSITY, NOT BRIGHTNESS, AND THE MEASUREMENT SAYS SO ───
+ *
+ * Comparing dots ON the cross arms with dots OFF them, per-dot peak luminance:
+ *
+ *                on/off per-dot brightness
+ *   REFERENCE            1.12x        <- essentially nothing
+ *   build red            1.01x        <- already matches the reference
+ *   build gold           1.61x        <- ALREADY an artificial bright stripe
+ *
+ * The reference's cross is NOT brighter dots. REPORT-L found the same thing from
+ * the other side: per-dot brightness correlates -0.035 with distance to the
+ * cross, i.e. not at all. What a magnified strip through the centre shows is the
+ * middle row carrying its dots in PAIRS — the same brightness as the rows either
+ * side, packed at roughly twice the spacing.
+ *
+ * So the arm is carried by SPACING. Raising this gain further would paint a
+ * bright stripe where the reference has a dense band, and gold is already past
+ * the reference on it — hence the trim rather than the raise.
+ */
+export const UV_CROSS_GAIN = 0.2;
+
+/**
+ * Half-thickness of each arm, as a fraction of the sphere radius. The metric
+ * that sets the target samples a strip of +/-0.035 R, so the arms are cut to
+ * match what is being measured rather than to a number that looked right.
+ */
+const CROSS_HALF_WIDTH = 0.045;
+
+/** How much wider a marked cross dot draws. See the note in particles.vert.glsl. */
+export const UV_CROSS_SIZE = 0.18;
+
+/**
+ * Half-thickness of the two cross arms, in shell radii: [meridian, equator].
+ *
+ * ONE WIDTH COULD NOT LAND BOTH ARMS. At a common 0.014 the meridian measured
+ * 1.36x against its 1.26x target while the equator sat at 1.12x against 1.34x —
+ * the vertical arm was already past target while the horizontal one was a third
+ * of the way. The metric samples a strip of +/-0.035 R, so a 0.014 arm fills
+ * only 40% of what is being averaged; widening the equator arm toward the strip
+ * raises its measured ratio without touching the meridian.
+ */
+export const UV_CROSS_WIDTH: readonly [number, number] = [0.020, 0.028];
+
+/**
+ * ─── PER-DOT BRIGHTNESS SPREAD. See the long note in particles.frag.glsl. ───
+ *
+ * The reference's per-dot spread is 16.28x (CV 0.776) and 92% of it is RANDOM,
+ * not positional. The build measured 1.99x. `grain` was `0.78 + 0.22*h`, a range
+ * ratio of only 1.28.
+ *
+ * The rendered contribution goes as alpha^2, so a rendered spread of R needs an
+ * alpha spread of sqrt(R): 16.28x wants 4.03x on alpha against the 1.41x the
+ * build had. The floor carries that, and the power carries the SHAPE — the
+ * reference is skewed toward the bright end, alpha p5/p50/p95 = 0.248/0.824/1.0,
+ * which a power below 1 on a uniform hash reproduces.
+ *
+ * DELIBERATELY WIDENED DOWNWARD ONLY. The bright end stays where it is, so this
+ * cannot introduce clipping that was not already there; all the new range is
+ * added below the old floor.
+ */
+export const UV_GRAIN_MIN = 0.075;
+export const UV_GRAIN_POW = 0.45;
+
+/**
+ * ─── THE POLE CAPS ARE BRIGHTER THAN THE FIELD, AND BY HOW MUCH ───
+ *
+ * Measured as a cap disc (r < 0.16 R about each projected pole) against a ring
+ * at the SAME radius from the disc centre — matched that way so projection
+ * crowding cannot bias it:
+ *
+ *              cap / same-radius ring     cap / inner field
+ *   REFERENCE          2.49x                    7.79x
+ *   build red          1.19x                    2.32x
+ *   build gold         1.07x                    2.02x
+ *
+ * The caps recede where the reference's pop. This is the ONE structural
+ * component the per-dot regression found (corr -0.187 with distance to the
+ * pole), so it is the structural half of the variation and the random half is
+ * UV_GRAIN_MIN's.
+ *
+ * POSITIONAL, NOT DIRECTIONAL, and symmetric by construction: the mask is
+ * `smoothstep` on |dir.y|, which cannot tell the two poles apart. The band runs
+ * from cos(16 deg) to cos(8 deg) — the cap disc measured above is about 10-12
+ * degrees of colatitude.
+ *
+ * Both a brightness and a SIZE term, for the reason the cross needed both: one
+ * sprite is capped at uAlphaMax and the front dots already arrive near it, so
+ * brightness alone gets eaten. See the note in particles.vert.glsl.
+ */
+export const UV_CAP_BAND: readonly [number, number] = [0.899, 0.995];
+export const UV_CAP_GAIN = 3.2;
+/**
+ * ─── ZERO, AND THE CAPTURE IS WHY ───
+ *
+ * The cross needed a SIZE term because the alpha ceiling ate its brightness. The
+ * caps must NOT have one. At 0.25 the cap ratio measured correctly — 2.55x
+ * against the reference's 2.49x — and still looked wrong: fattening dots that
+ * are already the densest on the shell welded the cap rings into a bright BLOB
+ * where the reference has nested ellipses around a dark centre. The number was
+ * right and the picture was not.
+ *
+ * So the caps are lifted by BRIGHTNESS ONLY, over a WIDER band (colatitude ~6-20
+ * degrees rather than 8-16) so the lift is spread across more rings with a
+ * gradient instead of concentrated on two.
+ */
+/**
+ * ─── -0.45 -> -0.20: GROWN TO THE REFERENCE'S OWN CAP DOT SIZE, NOT FATTENED ───
+ *
+ * Round O cut the halo and left the cap dots at 12 px area against the field's 7.
+ * Cap/field brightness fell to 1.60x red / 1.49x gold against the reference's
+ * 2.49x, and the reachability arithmetic says gain alone cannot get it back:
+ *
+ *   the reference's cap dots are 26 px area (3.71x its field) at 1.18x its field
+ *   PEAK. Its cap brightness is AREA, not heat. The build's peak ratio is already
+ *   1.18x — identical — so the only thing missing is the area. Carrying the gap
+ *   on peak instead would need ~296 luminance on red, which clips at 253.
+ *
+ * So the quad grows back toward the reference's 26 px and no further. Area goes
+ * as quad^2 while unclamped: (0.80/0.55)^2 x 12 = 25 px. This is the reference's
+ * actual mechanism, not the round-M welding: the halo is gone, so a bigger core
+ * has no skirt to merge with its neighbours through. The crop is the hard line.
+ */
+export const UV_CAP_SIZE = -0.2;
+
+/**
+ * ─── HOW FAR THE CAP DOTS' OWN CEILING IS LIFTED ───
+ *
+ * Scoped to the cap mask, so `UV_ALPHA_MAX` itself does not move and the field
+ * cannot newly clip. See the note in particles.frag.glsl.
+ *
+ * The target is the reference's cap/field brightness of 2.49x. The rendered
+ * contribution goes as out^2, so reaching 2.4x on a dot's OWN peak — rather than
+ * through overlap — needs the ceiling at sqrt(2.4) = 1.55x, i.e. +0.55.
+ *
+ * The palette gain keeps this from clipping the bright themes: red's alpha runs
+ * 1.070/0.693 = 1.54x gold's, so where red's cap dots reach the new ceiling
+ * gold's arrive at about 1.0 and never use the headroom. That is the prediction;
+ * item 4 of the report is the measurement.
+ */
+export const UV_CAP_CEIL = 0.7;
 
 function buildGeometry(count: number, latticeJitter: number): BufferGeometry {
   // Ring plan first, so the buffers are allocated to the EXACT produced count and
   // nothing overflows the tier's allocation.
   const bands: { phi: number; n: number }[] = [];
   for (let i = 0; i < UV_LAT_BANDS; i++) {
-    const phi = -Math.PI / 2 + (Math.PI * (i + 0.5)) / UV_LAT_BANDS;
+    // THE POLAR HOLE. Bands stop short of the pole instead of marching into it.
+    // With 58 bands the innermost sat 1.55 degrees out — 6 px on this sphere —
+    // so the cap's centre filled in and the reference's DARK HOLE inside the
+    // innermost ring was lost. The reference keeps roughly 5 degrees clear.
+    const span = Math.PI - 2 * UV_POLE_HOLE_RAD;
+    const phi = -Math.PI / 2 + UV_POLE_HOLE_RAD + (span * (i + 0.5)) / UV_LAT_BANDS;
     bands.push({
       phi,
-      n: Math.max(
-        UV_POLE_MIN_LON,
-        Math.round(UV_LON_EQUATOR * Math.pow(Math.max(Math.cos(phi), 1e-6), UV_LON_TAPER_EXP)),
+      n: Math.round(
+        Math.max(
+          UV_POLE_MIN_LON,
+          Math.round(
+            UV_LON_EQUATOR * Math.pow(Math.max(Math.cos(phi), 1e-6), UV_LON_TAPER_EXP),
+          ),
+          // THE EQUATOR ARM: the bands within UV_EQ_BAND_DEG of the equator are
+          // packed at UV_EQ_BAND_MUL times their normal longitude count.
+        ) * (Math.abs(phi) <= (UV_EQ_BAND_DEG * Math.PI) / 180 ? UV_EQ_BAND_MUL : 1),
       ),
     });
   }
@@ -909,6 +1377,10 @@ function buildGeometry(count: number, latticeJitter: number): BufferGeometry {
 
   const positions = new Float32Array(total * 3);
   const seeds = new Float32Array(total);
+  // THE CROSS. 1 marks a dot as belonging to the equator ring or to the centre
+  // meridian; the vertex stage lifts only those. See UV_CROSS_GAIN.
+  const cross = new Float32Array(total);
+
 
   // Sub-pixel DITHER, not lattice jitter. Expressed as a multiple of the
   // equatorial arc spacing, so at the shipped 0.04 it is 0.0033 rad — about
@@ -940,6 +1412,36 @@ function buildGeometry(count: number, latticeJitter: number): BufferGeometry {
       positions[k * 3 + 1] = Math.sin(phi);
       positions[k * 3 + 2] = Math.sin(lon) * ring;
       seeds[k] = (k * 0.618033988749895) % 1;
+      /**
+       * THE CROSS IS MARKED BY POSITION, NOT BY RING INDEX, AND THE FIRST
+       * VERSION GOT BOTH LINES WRONG.
+       *
+       * It marked longitudes 0 and pi as "the meridian". Those lie in the plane
+       * z = 0, so they project onto the SILHOUETTE, not onto the vertical line
+       * through the centre — the vertical line is the meridian pair at x = 0.
+       * And it marked the equator band, but the shell is LEANED, so the equator
+       * projects as an ellipse reaching +/-R*sin(tilt) above and below the
+       * centre and almost never crosses the horizontal strip at all. Measured,
+       * that version moved the equator ratio the WRONG WAY, 1.01 -> 0.93.
+       *
+       * Both lines are planes through the origin, so both are one dot product:
+       *
+       *   vertical   the plane x = 0
+       *   horizontal the plane whose normal is the screen's up axis carried
+       *              into object space, (0, cos tilt, -sin tilt) — the great
+       *              circle that actually projects to y = 0 once the shell is
+       *              leaned. At zero tilt this collapses to the equator, which
+       *              is what makes it the right generalisation rather than a
+       *              second special case.
+       */
+      const px = positions[k * 3];
+      const py = positions[k * 3 + 1];
+      const pz = positions[k * 3 + 2];
+      const onVertical = Math.abs(px) < CROSS_HALF_WIDTH;
+      const onHorizontal =
+        Math.abs(py * Math.cos(POLE_TILT_RAD) - pz * Math.sin(POLE_TILT_RAD)) <
+        CROSS_HALF_WIDTH;
+      cross[k] = onVertical || onHorizontal ? 1 : 0;
       k += 1;
     }
   }
@@ -947,6 +1449,7 @@ function buildGeometry(count: number, latticeJitter: number): BufferGeometry {
   const geometry = new BufferGeometry();
   geometry.setAttribute('position', new BufferAttribute(positions, 3));
   geometry.setAttribute('aSeed', new BufferAttribute(seeds, 1));
+  geometry.setAttribute('aCross', new BufferAttribute(cross, 1));
   return geometry;
 }
 
@@ -1031,6 +1534,11 @@ export function buildFibonacciGeometry(count: number, latticeJitter: number): Bu
   const geometry = new BufferGeometry();
   geometry.setAttribute('position', new BufferAttribute(positions, 3));
   geometry.setAttribute('aSeed', new BufferAttribute(seeds, 1));
+  // Zeroed, never omitted. The main sphere and the companions compile to ONE
+  // WebGLProgram, so an attribute the vertex stage declares must be bound by
+  // every geometry that program ever draws — leaving it off is the attribute
+  // version of the uEvenLight leak, and it fails silently the same way.
+  geometry.setAttribute('aCross', new BufferAttribute(new Float32Array(count), 1));
   return geometry;
 }
 
@@ -1555,6 +2063,15 @@ export function createSphereEngine(options: SphereEngineOptions): SphereEngine {
     uAlphaMax: { value: UV_ALPHA_MAX },
     uGlowGain: { value: UV_GLOW_GAIN },
     uCoreTight: { value: UV_CORE_TIGHT },
+    uCrossGain: { value: UV_CROSS_GAIN },
+    uCrossSize: { value: UV_CROSS_SIZE },
+    uCrossWidth: { value: new Vector2(UV_CROSS_WIDTH[0], UV_CROSS_WIDTH[1]) },
+    uGrainMin: { value: UV_GRAIN_MIN },
+    uGrainPow: { value: UV_GRAIN_POW },
+    uCapBand: { value: new Vector2(UV_CAP_BAND[0], UV_CAP_BAND[1]) },
+    uCapGain: { value: UV_CAP_GAIN },
+    uCapSize: { value: UV_CAP_SIZE },
+    uCapCeil: { value: UV_CAP_CEIL },
     uLightDir: { value: LIGHT_DIR.clone() },
   };
 
@@ -1761,6 +2278,26 @@ export function createSphereEngine(options: SphereEngineOptions): SphereEngine {
   let flameGain = paletteGainOn ? gainFor(palette.flame.cool) : 1;
   let amberGain = paletteGainOn ? gainFor(palette.amber.cool) : 1;
 
+  /**
+   * The tint luminance the glow skirt was fitted at. Read from the token of the
+   * theme `reference/main-orb.png` was rendered in, never written here, so that
+   * theme normalises to exactly 1.0 and a token edit moves the knee with it.
+   *
+   * Falls back to no clamping at all if the property is missing, which is the
+   * safe direction: an absent token must not silently delete the wash.
+   */
+  const glowKneeLum = relativeLuminance(tokenColor('--theme-red-body'));
+
+  /** See UV_GLOW_LUM_POW. Only ever reduces; at or below the knee it is 1.0. */
+  function glowGainFor(c: Color): number {
+    const l = relativeLuminance(c);
+    if (!(l > 0.001) || !(glowKneeLum > 0.001)) return UV_GLOW_GAIN;
+    return UV_GLOW_GAIN * Math.min(1, Math.pow(glowKneeLum / l, UV_GLOW_LUM_POW));
+  }
+
+  let flameGlowGain = glowGainFor(palette.flame.cool);
+  let amberGlowGain = glowGainFor(palette.amber.cool);
+
   /* ── smoothed parameter state ──────────────────────────────────────────── */
 
   const smooth = { ...paramsFor('idle') } as SphereParams;
@@ -1840,6 +2377,7 @@ export function createSphereEngine(options: SphereEngineOptions): SphereEngine {
     tier,
     particles: countFor(tier),
     paletteGain: 1,
+    glowGain: UV_GLOW_GAIN,
     cost: ZERO,
     raf: ZERO,
     present: ZERO,
@@ -1947,6 +2485,7 @@ export function createSphereEngine(options: SphereEngineOptions): SphereEngine {
       focused,
       samples,
       paletteGain: flameGain,
+      glowGain: uniforms.uGlowGain.value as number,
     };
 
     if (!focused) return;
@@ -2053,6 +2592,9 @@ export function createSphereEngine(options: SphereEngineOptions): SphereEngine {
       bodyBrightMul *
       UV_BRIGHT_MUL *
       (target.palette === 'amber' ? amberGain : flameGain);
+    // The skirt rides the SAME palette switch as the brightness, so a theme or
+    // state crossfade carries the wash with it rather than stepping it.
+    uniforms.uGlowGain.value = target.palette === 'amber' ? amberGlowGain : flameGlowGain;
 
     /**
      * SPIN ABOUT THE POLE AXIS, THEN TILT. The order matters and three.js gives
@@ -2456,6 +2998,10 @@ export function createSphereEngine(options: SphereEngineOptions): SphereEngine {
       // change it.
       flameGain = paletteGainOn ? gainFor(palette.flame.cool) : 1;
       amberGain = paletteGainOn ? gainFor(palette.amber.cool) : 1;
+      // Same reasoning, same one place: the skirt clamp is a property of the
+      // tokens too. See UV_GLOW_LUM_POW.
+      flameGlowGain = glowGainFor(palette.flame.cool);
+      amberGlowGain = glowGainFor(palette.amber.cool);
       palette.amber.hot.copy(tokenColor('--status-warn'));
       palette.amber.cool.copy(tokenColor('--status-warn'));
     },

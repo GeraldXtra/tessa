@@ -664,6 +664,7 @@ export function App() {
       if (s.publishedAt === 0) return;
       window.tessa.reportMetrics(
         `tier=${s.tier} pts=${s.particles} pgain=${s.paletteGain.toFixed(3)} ` +
+      `glow=${s.glowGain.toFixed(3)} ` +
           `focused=${s.focused} n=${s.samples} ` +
           `cost=${s.cost.p50.toFixed(2)}/${s.cost.p95.toFixed(2)} ` +
           `raf=${s.raf.p50.toFixed(1)}/${s.raf.p95.toFixed(1)} ` +

@@ -190,11 +190,58 @@ uniform float uAlphaMax;
 
 /** Amplitude of the wide un-squared skirt. 0 = off, which companions.ts pins. */
 uniform float uGlowGain;
+/**
+ * How much brighter a dot on the equator ring or the centre meridian is.
+ * 0 = off, which companions.ts pins — and their aCross is zeroed as well, so
+ * the cross cannot reach them through either route.
+ */
+uniform float uCrossGain;
+
+/**
+ * ─── PER-DOT BRIGHTNESS SPREAD: THE FLAT-CARPET FIX ───
+ *
+ * Measured on `reference/main-orb.png`, per-dot peak luminance runs p5/p50/p95 =
+ * 13.0 / 143.9 / 212.0 — a **16.28x spread**, CV 0.776. The build measured
+ * 64.9 / 103.7 / 125.8, a spread of **1.99x**, CV 0.182. Eight times too narrow,
+ * and that is why the field reads as a flat digital carpet against the
+ * reference's texture.
+ *
+ * AND THE VARIATION IS ALMOST ENTIRELY RANDOM, not structural. Regressing each
+ * dot's peak on its position — radius, distance to the cross arms, distance to
+ * the pole caps — explains only **R^2 = 0.084** of the variance. The residual CV
+ * is 0.743 against a total of 0.776, so **92% of the reference's spread is
+ * per-LED randomness**. The only positional term that shows at all is distance
+ * to the POLE (corr -0.187), which is the cap brightness handled by uCapGain;
+ * the cross does NOT show up per-dot (corr -0.035) because it is a density and
+ * size effect, not a brightness-per-dot one.
+ *
+ * So: a per-dot random multiplier, from `aSeed`, in OBJECT space — it is tied to
+ * the dot, so it is stable as the shell turns rather than twinkling on rotation.
+ *
+ * uGrainMin is the faint floor and uGrainPow shapes the distribution. The
+ * reference is skewed toward the BRIGHT end with a long faint tail — in alpha
+ * terms its p5/p50/p95 are 0.248 / 0.824 / 1.0 — and a power BELOW 1 on a
+ * uniform hash reproduces exactly that shape.
+ *
+ * COMPANIONS ARE BIT-IDENTICAL: they pin uGrainMin 0.78 and uGrainPow 1.0, which
+ * reduces this expression to the `0.78 + 0.22 * h` it replaces.
+ */
+uniform float uGrainMin;
+uniform float uGrainPow;
+/** How much brighter a pole-cap dot is. 0 = off; companions.ts pins it. */
+uniform float uCapGain;
+/**
+ * How much HIGHER the per-sprite ceiling goes for a pole-cap dot, as a fraction
+ * of uAlphaMax. 0 = off; companions.ts pins it. See the note at the ceiling.
+ */
+uniform float uCapCeil;
 /** Scales dist2 for the CORE term only, so a bigger quad keeps the same core. */
 uniform float uCoreTight;
 
 varying float vRim;
 varying float vSeed;
+varying float vCross;
+varying float vCap;
 varying float vPulse;
 varying float vDepth;
 varying float vFresnel;
@@ -298,7 +345,14 @@ void main() {
 
   // Per-particle brightness jitter so the shell does not look like a printed
   // dot screen. Cheap hash on the seed; deterministic across frames.
-  float grain = 0.78 + 0.22 * fract(sin(vSeed * 91.7) * 43758.5453);
+  float h = fract(sin(vSeed * 91.7) * 43758.5453);
+  float grainRnd = uGrainMin + (1.0 - uGrainMin) * pow(h, uGrainPow);
+  // ─── THE CAP DOTS ARE EXEMPT FROM THE RANDOM DIP ───
+  // The reference's pole rings read as CLEAN bright rings, not twinkly ones. If
+  // the random variance reached them, brightening them would produce a SPECKLED
+  // cap rather than a ring — bright dots next to dropouts. `vCap` lifts them back
+  // to full, so the variance is the field's and the caps stay clean.
+  float grain = mix(grainRnd, 1.0, vCap);
 
   // The heartbeat band brightens the particles it passes through rather than
   // adding a separate ring: the pulse IS the shell reacting, not an overlay
@@ -374,7 +428,14 @@ void main() {
   // brighter edge — while compressing 1.8x down to 1.35x. The BODY keeps the
   // full multiplier, so "listening brightens" still reads where it always did.
   float rimAdd = uRimGain * grow * face * sqrt(max(uBrightness, 0.0)) * (1.0 - uEvenLight);
-  float lit = uBrightness + rimAdd;
+  // THE CROSS, and this is the ONLY place it acts. `vCross` is 1 on exactly two
+  // marked sets of dots and 0 on every other dot on the sphere, so this cannot
+  // become a directional wash however large uCrossGain is set.
+  // THE CROSS AND THE CAPS, and these are the ONLY places either acts. Both are
+  // hard positional masks — 1 on the marked dots, 0 on every other dot — so
+  // neither can become a directional wash however large it is set. The caps are
+  // symmetric top and bottom by construction: |dir.y| does not distinguish them.
+  float lit = (uBrightness + rimAdd) * (1.0 + uCrossGain * vCross + uCapGain * vCap);
 
   float alpha = falloff * lit * grain * depthFade * lambert * spread * (1.0 + vPulse * 1.6);
 
@@ -398,6 +459,26 @@ void main() {
   // It cannot reach zero and claiming otherwise would be false. What it does
   // reach is a crescent whose saturated pixels are a sparse specular glint
   // inside a coloured band, rather than a white edge on the sphere.
-  float out_ = min(alpha, uAlphaMax);
+  /**
+   * ─── THE CEILING IS RAISED FOR THE CAP DOTS ONLY, AND THAT IS THE WHOLE FIX ───
+   *
+   * REPORT-M located the wall that had capped the poles for eight rounds: the cap
+   * dots sit ON this ceiling, so `uCapGain` does nothing to them per-dot and the
+   * only way their brightness ever rose was FATTENING them until neighbours
+   * overlapped. Round L got bright-and-blobbed; round M got crisp-and-dim. The
+   * two are the same knob while the ceiling is flat.
+   *
+   * A GLOBAL raise would have worked and would have put every dot on the sphere
+   * at risk — the field's 0.000% white clip took rounds to reach. It is not
+   * needed: `vCap` is already here, so the ceiling can be lifted for the marked
+   * cap dots and left EXACTLY where it was everywhere else. The field, the cross
+   * band and the bright end of the grain keep the old ceiling BY CONSTRUCTION,
+   * not by measurement — nothing outside the cap mask can change.
+   *
+   * uCapCeil is how much higher a cap dot may go. 0 reproduces the old line
+   * exactly, which is what companions.ts pins.
+   */
+  float ceiling = uAlphaMax * (1.0 + uCapCeil * vCap);
+  float out_ = min(alpha, ceiling);
   gl_FragColor = vec4(tint * out_, out_);
 }

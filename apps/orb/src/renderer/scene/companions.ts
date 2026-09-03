@@ -37,6 +37,7 @@ import {
   LinearSRGBColorSpace,
   Points,
   ShaderMaterial,
+  Vector2,
   Vector3,
   type Scene,
 } from 'three';
@@ -179,6 +180,12 @@ function lattice(count: number, jitter: number): BufferGeometry {
   const g = new BufferGeometry();
   g.setAttribute('position', new BufferAttribute(positions, 3));
   g.setAttribute('aSeed', new BufferAttribute(seeds, 1));
+  // Zeroed aCross, and it is NOT optional. The companions share one compiled
+  // WebGLProgram with the main sphere, so every attribute that program's vertex
+  // stage declares has to be bound here too. This is the attribute-side twin of
+  // the uEvenLight leak that broke the companions two rounds ago, and pinning it
+  // to zero also states the intent: the equator cross is the main sphere's.
+  g.setAttribute('aCross', new BufferAttribute(new Float32Array(count), 1));
   return g;
 }
 
@@ -282,6 +289,24 @@ export function createCompanion(
      */
     uGlowGain: { value: 0 },
     uCoreTight: { value: 1 },
+    /** NO CROSS ON THE COMPANIONS, pinned for the same reason. */
+    uCrossGain: { value: 0 },
+    uCrossSize: { value: 0 },
+    uCrossWidth: { value: new Vector2(0, 0) },
+    /**
+     * BIT-IDENTICAL GRAIN. uGrainMin 0.78 with uGrainPow 1.0 reduces the new
+     * expression to the `0.78 + 0.22 * h` the companions were fitted with, so
+     * the wider per-dot spread is the main sphere's alone.
+     */
+    uGrainMin: { value: 0.78 },
+    uGrainPow: { value: 1 },
+    /** NO CAPS on the companions. The band is pinned out of range so the
+     *  smoothstep can never leave 0, and the gains are zero as well. */
+    uCapBand: { value: new Vector2(2, 3) },
+    uCapGain: { value: 0 },
+    uCapSize: { value: 0 },
+    /** No lifted ceiling on the companions either. */
+    uCapCeil: { value: 0 },
     // The SAME light as the main sphere, flipped to the left with it. Three
     // objects in one scene lit from two directions would read as three
     // different rooms. See LIGHT_DIR in sphere-engine.ts for the count across

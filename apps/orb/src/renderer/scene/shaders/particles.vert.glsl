@@ -13,6 +13,14 @@
 
 attribute float aSeed;
 
+/**
+ * THE CROSS. 1 on the equator ring and on the centre meridian, 0 everywhere
+ * else. Passed straight through to the fragment stage, which lifts only the
+ * dots that carry it — see UV_CROSS_GAIN in sphere-engine.ts for why this is an
+ * attribute and not a view-facing gradient.
+ */
+attribute float aCross;
+
 uniform float uTime;        // seconds, frozen for `blocked`
 uniform float uAmplitude;   // [0,1] from the amplitude signal
 uniform float uRadius;
@@ -20,6 +28,28 @@ uniform float uTurbulence;
 uniform float uBreath;      // signed breathing offset, already phased on the CPU
 uniform float uAmpGain;
 uniform float uPointScale;  // world units
+/** How much wider a marked cross dot draws. 0 = off; companions.ts pins it. */
+uniform float uCrossSize;
+/**
+ * Half-thickness of the two cross arms, in units of the shell radius.
+ *   .x  the MERIDIAN, the vertical arm, masked on |rel.x|
+ *   .y  the EQUATOR,  the horizontal arm, masked on |rel.y|
+ * Two numbers rather than one because the two arms measured differently at the
+ * same width — the meridian reached 1.36x while the equator sat at 1.12x — and
+ * one width cannot move them independently.
+ */
+uniform vec2 uCrossWidth;
+
+/**
+ * THE POLE CAPS, as an OBJECT-SPACE band. `.x` is the cosine where the cap
+ * starts, `.y` where it is full — so `smoothstep(x, y, |dir.y|)` is 1 on the cap
+ * and 0 elsewhere. Object space, not screen space: `dir.y` is latitude on the
+ * unmodified shell, so the mask rides the shell through spin and tilt and marks
+ * the same LEDs at every angle. Companions pin it out of range.
+ */
+uniform vec2 uCapBand;
+/** How much wider a pole-cap dot draws. 0 = off; companions.ts pins it. */
+uniform float uCapSize;
 uniform float uSizeScale;   // canvasHeight / (2 * tan(fov/2)) — set on resize
 
 // §R.1 equatorial pulse. uPulse runs 0->1 once per received heartbeat.
@@ -85,6 +115,8 @@ uniform float uEvenLight;
 
 varying float vRim;
 varying float vSeed;
+varying float vCross;
+varying float vCap;
 varying float vPulse;
 
 /**
@@ -212,6 +244,37 @@ void main() {
   vRim = clamp((radius / max(uRadius, 0.0001)) - 0.92, 0.0, 1.0);
   vSeed = aSeed;
 
+  /**
+   * ─── THE CROSS IS A SCREEN-ALIGNED MASK, AND OBJECT SPACE COULD NOT DO IT ───
+   *
+   * `aCross` marked two great circles in OBJECT space: the plane x = 0, and the
+   * plane whose normal is the screen up-axis carried through the pole tilt. That
+   * is correct only at spin angle zero. The shell composes as Rx(tilt) * Ry(spin)
+   * — the spin turns the shell about its own axis FIRST — so at any other angle
+   * Ry mixes x into z and both marked circles swing off the screen axes. The
+   * render showed exactly that: a slanted, lumpy band across the disc where the
+   * reference has a straight thin line.
+   *
+   * The reference's cross is straight, horizontal and vertical, and spans the
+   * whole disc. Nothing painted on the SURFACE of a spinning sphere does that.
+   * So the mask is taken in VIEW space instead, relative to the shell's own
+   * centre and radius: `rel` is the particle's offset from the centre of the
+   * disc in units of the shell radius, which is the screen frame by
+   * construction, so the arms stay straight and axis-aligned at every spin angle
+   * and every tilt.
+   *
+   * Still scoped to two thin lines and to nothing else — a hard cutoff, not a
+   * gradient, so it cannot become a view-facing wash however large it is set.
+   */
+  vec3 centreView = (modelViewMatrix * vec4(0.0, 0.0, 0.0, 1.0)).xyz;
+  vec3 rel = (viewPos.xyz - centreView) / max(uRadius, 0.0001);
+  vCross = (abs(rel.y) < uCrossWidth.y || abs(rel.x) < uCrossWidth.x) ? 1.0 : 0.0;
+
+  // THE POLE CAP, in object space so it names the same dots at every spin angle.
+  // `dir` is the unit direction on the unmodified shell, so |dir.y| is the cosine
+  // of the colatitude: 1 at a pole, 0 at the equator.
+  vCap = smoothstep(uCapBand.x, uCapBand.y, abs(dir.y));
+
   // VIEW-ANGLE fresnel, which is a different quantity from vRim: vRim measures
   // radial DISPLACEMENT, so a particle thrown outward reads as "rim" wherever
   // it is on the sphere. This measures the angle between the surface normal and
@@ -268,9 +331,26 @@ void main() {
   float face = smoothstep(-0.15, 0.85, vLight);
   float grow = pow(vFresnel, uRimPow);
   float base = uPointScale * uSizeScale / max(-viewPos.z, 0.001);
-  float want = base * (1.0 + uRimSize * grow * face * (1.0 - uEvenLight));
+  /**
+   * THE CROSS ACTS ON SIZE, BECAUSE ON BRIGHTNESS IT WAS BEING EATEN.
+   *
+   * The fragment stage caps one sprite at uAlphaMax, and the main sphere's front
+   * dots already arrive above that cap — so multiplying their brightness by 1.55
+   * changed nothing at all. Measured: the equator ratio moved 0.93 -> 1.02
+   * against a target of 1.34, with the brightness term alone.
+   *
+   * Size is the one lever the ceiling cannot flatten: a wider sprite covers more
+   * pixels, and the strip mean the target is stated in rises with covered area
+   * whether or not each pixel is clamped. The brightness term stays as well —
+   * it is what lifts the marked dots' SKIRTS, which are nowhere near the cap.
+   */
+  float wantRim = base * (1.0 + uRimSize * grow * face * (1.0 - uEvenLight));
+  float want = wantRim * (1.0 + uCrossSize * vCross + uCapSize * vCap);
   float got  = clamp(want, 1.0, POINT_SIZE_MAX);
   gl_PointSize = got;
+  // The cross growth, as the clamp actually delivered it. Divided back out of
+  // vSpread below so the energy-conservation term never sees it.
+  float crossGot = got / max(clamp(wantRim, 1.0, POINT_SIZE_MAX), 0.0001);
 
   // THE REALISED GROWTH, POST-CLAMP — and it has to be measured here, not
   // assumed in the fragment stage.
@@ -286,5 +366,14 @@ void main() {
   //
   // Passing the ratio the clamp actually delivered makes the two agree by
   // construction, whatever the clamp is set to.
-  vSpread = got / max(base, 0.0001);
+  //
+  // ─── EXCEPT FOR THE CROSS, WHICH MUST NOT BE CONSERVED ───
+  // This term exists so that WIDENING a sprite does not also brighten it, which
+  // is right for the rim: the rim spreads a fixed amount of light. The cross is
+  // the opposite instruction — it is there to ADD light on two lines — so
+  // conserving it cancels exactly the effect it was added for. Measured with it
+  // conserved, growing the marked dots by 45% moved the equator ratio from 1.02
+  // to only 1.16 against a target of 1.34, because the fragment stage was
+  // dividing the gain straight back out.
+  vSpread = got / max(base * crossGot, 0.0001);
 }
