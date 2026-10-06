@@ -94,11 +94,51 @@ class Hold:
         return a == b
 
 
+def is_answer(text: str) -> bool:
+    t = (text or "").strip()
+    return bool(_NO.match(t) or _YES.match(t))
+
+
+@dataclass(eq=False)
+class Step:
+    tool: str
+    args: dict[str, Any]
+    say: str
+    label: str
+    origin: str = "schedule"
+    skip: str = ""
+    red: bool = False
+    state: str = "waiting"
+    request_id: str = ""
+
+
+@dataclass
+class Plan:
+    steps: list[Step]
+    line: str = ""
+    at: float = field(default_factory=time.monotonic)
+    current: int = -1
+    hold: Hold | None = None
+
+    @property
+    def live(self) -> list[Step]:
+        return [s for s in self.steps if not s.skip]
+
+    @property
+    def step(self) -> Step | None:
+        return self.steps[self.current] if 0 <= self.current < len(self.steps) else None
+
+    def position(self, step: Step) -> tuple[int, int]:
+        live = self.live
+        return live.index(step) + 1, len(live)
+
+
 class ConfirmLedger:
     """One pending hold, or none."""
 
     def __init__(self) -> None:
         self._hold: Hold | None = None
+        self.plan: Plan | None = None
 
     @property
     def pending(self) -> Hold | None:

@@ -16,8 +16,10 @@ No evidence means the plain confirmation. She does not perform the line.
 from __future__ import annotations
 
 import hashlib
+import re
 import shutil
 import subprocess
+import threading
 from pathlib import Path
 from typing import Any, Callable, get_args
 
@@ -27,9 +29,9 @@ from core.tools.base import ToolError, ToolHold
 
 from . import memory
 from .approvals import ApprovalError, ApprovalGate, red_refusal, resolve_edit
-from .confirm import ConfirmLedger
+from .confirm import ConfirmLedger, Plan, Step, is_answer
 from .provenance import ExternalContent, InjectionRefusal
-from .router import action_done, action_failed, destructive_hold
+from .router import action_done, action_failed, destructive_hold, hold_line
 from .tools_local import (
     ToolCall,
     listening_on_port,
@@ -86,6 +88,9 @@ class Executor:
         # A missing surface must never become an open gate.
         self.approvals = ApprovalGate(on_request=on_permission_request)
         self.last_injection: dict[str, Any] | None = None
+        self._tls = threading.local()
+        self._plan_lock = threading.RLock()
+        self._plan_note = ""
         # THE CLAIM STORE (core/brain/claims.py). Optional, like the fence:
         # with none supplied an X read is fenced and NOT noted, which is the
         # safe direction. The daemon supplies its one store — see server.py.
@@ -239,7 +244,20 @@ class Executor:
         Called BEFORE routing, because "yes" routes to nothing and would
         otherwise come back as "I heard you, Emperor. Not that one yet."
         """
-        verdict, held = self.ledger.resolve_utterance(text)
+        with self._plan_lock:
+            plan = self.ledger.plan
+            verdict, held = self.ledger.resolve_utterance(text)
+            if plan is not None:
+                if held is not None and held is plan.hold:
+                    return None if verdict == "none" else self._plan_answer(plan, verdict, held)
+                gone = self._plan_gone(plan)
+                if gone:
+                    line = f"{gone} {self._plan_close(plan, gone)}".strip()
+                    if held is None and is_answer(text):
+                        return line
+                    self._plan_note = line
+                elif held is None and is_answer(text) and plan.step is not None and plan.step.state == "card":
+                    return "That step is waiting on the Orb's card, Emperor. Approve or deny it there."
         if held is None or verdict == "none":
             return None
         if verdict == "cancel":
@@ -280,6 +298,193 @@ class Executor:
         return self.run(ToolCall(name=held.tool, args=args,
                                  origin=getattr(held, "origin", "schedule"),
                                  confirmed=True))
+
+    def _traced(self, call: ToolCall) -> tuple[str, list[tuple[str, str, str]]]:
+        prev = getattr(self._tls, "trail", None)
+        self._tls.trail = []
+        try:
+            said = self.run(call)
+            return said, list(self._tls.trail)
+        finally:
+            self._tls.trail = prev
+
+    @staticmethod
+    def _listed(items: list[str]) -> str:
+        if len(items) < 2:
+            return "".join(items)
+        return ", ".join(items[:-1]) + " and " + items[-1]
+
+    def _step_line(self, step: Step) -> str:
+        spec = REGISTRY.get(step.tool)
+        return f"{step.tool} {self._audit_line(spec, step.args)}" if spec is not None else step.tool
+
+    def start_plan(self, asked: list[Any]) -> tuple[str, list[str]]:
+        with self._plan_lock:
+            old = self.ledger.plan
+            earlier = ""
+            if old is not None:
+                earlier = self._plan_close(old, "replaced by his next sentence", "I stopped the earlier plan.")
+            dropped = self.ledger.pending
+            if dropped is not None:
+                self._log("HOLD-DROPPED", dropped.tool, "a new plan replaced it", "amber",
+                          actor=self._actor_of(getattr(dropped, "origin", None)))
+                self.ledger.clear()
+            first = asked[0].call
+            origin = self._actor_of(first.origin)
+            verdict = getattr(self, "voice_verdict", None)
+            doubted = verdict is not None and not verdict.allows("amber", getattr(self, "voice_confident", 0.62))
+            if doubted or (self.session is not None and getattr(self.session, "external_content_in_context", 0)):
+                return " ".join(x for x in (earlier, self.run(first)) if x), [first.name]
+            try:
+                from core.tools import x_tools
+                resolved, groups = x_tools.plan_targets(
+                    [(a.call.name, dict(a.call.args or {}), a.clause, a.count) for a in asked])
+            except ToolError as err:
+                self._log("PLAN-REFUSED", "agent.plan", err.reason, "amber", actor=origin)
+                reason = err.reason.rstrip(". ")
+                refused = f"I did not start that, sir. {reason[:1].upper()}{reason[1:]}. {err.alternative}".strip()
+                return " ".join(x for x in (earlier, refused) if x), []
+            except Exception as exc:
+                self._log("PLAN-REFUSED", "agent.plan", f"{type(exc).__name__}: {exc}", "amber", actor=origin)
+                failed = action_failed(f"{type(exc).__name__}: {exc}", "Nothing was done. Ask me again.")
+                return " ".join(x for x in (earlier, failed) if x), []
+            plan = Plan(steps=[Step(tool=r["tool"], args=dict(r["args"]), say=r["say"], label=r["label"],
+                                    origin=asked[r["group"]].call.origin, skip=r["skip"],
+                                    red=self._tier_of(r["tool"]) == "red") for r in resolved])
+            listed = "; ".join(f"{i}. {self._step_line(s)}" + (f" [skipped: {s.skip}]" if s.skip else "")
+                               for i, s in enumerate(plan.steps, 1))
+            self._log("PLAN", "agent.plan",
+                      f"{len(plan.live)} of {len(plan.steps)} step(s) from his sentence: {listed}",
+                      "amber", actor=origin)
+            skips = " ".join(s.skip for s in plan.steps if s.skip)
+            live = plan.live
+            if not live:
+                self._plan_close(plan, "every step was already done")
+                return " ".join(x for x in (earlier, skips, "Nothing changed.") if x), []
+            head = ""
+            if len(live) > 1:
+                body = ", then ".join(g for g in groups if g)
+                tail = (", one yes each." if not any(s.red for s in live)
+                        else ", one at a time. Anything public waits for the Orb's card.")
+                head = body[:1].upper() + body[1:] + tail
+            plan.line = " ".join(x for x in (earlier, skips, head) if x)
+            self.ledger.plan = plan
+            said, tools = self._plan_advance(plan)
+            return " ".join(x for x in (plan.line, said) if x), tools
+
+    def _plan_advance(self, plan: Plan) -> tuple[str, list[str]]:
+        parts: list[str] = []
+        tools: list[str] = []
+        while True:
+            step = next((s for s in plan.steps if not s.skip and s.state == "waiting"), None)
+            if step is None:
+                return " ".join(x for x in [*parts, self._plan_close(plan, "complete")] if x), tools
+            plan.current = plan.steps.index(step)
+            k, n = plan.position(step)
+            where = f"step {k} of {n}: " if n > 1 else ""
+            said, trail = self._traced(ToolCall(name=step.tool, args=dict(step.args), origin=step.origin))
+            tools.append(step.tool)
+            verbs = [(v, s_) for v, t, s_ in trail if t == step.tool]
+            held = self.ledger.pending
+            if any(v == "HELD" for v, _s in verbs):
+                if held is not None and held.tool == step.tool and held.args == step.args:
+                    step.state = "armed"
+                    plan.hold = held
+                    parts.append(hold_line(step.tool, where + (step.say or held.detail)))
+                    return " ".join(parts), tools
+                if held is not None:
+                    self._log("HOLD-DROPPED", held.tool, "it did not match the plan's frozen step", "amber",
+                              actor=self._actor_of(getattr(held, "origin", None)))
+                    self.ledger.clear()
+                step.state = "failed"
+                parts.append("That hold did not match the step I had resolved, so I let it go.")
+            elif any(v == "PENDING-APPROVAL" for v, _s in verbs):
+                found = [re.search(r"requestId=([0-9a-f]+)", s_) for v, s_ in verbs if v == "PENDING-APPROVAL"]
+                step.state = "card"
+                step.request_id = next((m.group(1) for m in found if m), "")
+                parts.append(red_refusal(step.tool, where + step.say) if step.say else said)
+                return " ".join(parts), tools
+            elif any(v == "ran" for v, _s in verbs):
+                step.state = "done"
+                parts.append(said)
+                continue
+            else:
+                step.state = "failed"
+                parts.append(said)
+            parts.append(self._plan_close(plan, "a step did not arm"))
+            return " ".join(x for x in parts if x), tools
+
+    def _plan_answer(self, plan: Plan, verdict: str, held: Any) -> str:
+        step = plan.step
+        plan.hold = None
+        if verdict == "cancel":
+            self._log("CANCELLED", held.tool, held.detail, self._tier_of(held.tool),
+                      actor=self._actor_of(getattr(held, "origin", None)))
+            if step is not None:
+                step.state = "cancelled"
+            return f"Left it, Emperor. {self._plan_close(plan, 'he said no')}".strip()
+        said, trail = self._traced(ToolCall(name=held.tool, args=dict(held.args),
+                                            origin=getattr(held, "origin", "schedule"), confirmed=True))
+        if step is not None and any(v == "ran" and t == step.tool for v, t, _s in trail):
+            step.state = "done"
+            nxt, _tools = self._plan_advance(plan)
+            return " ".join(x for x in (said, nxt) if x)
+        if step is not None:
+            step.state = "failed"
+        return f"{said} {self._plan_close(plan, 'the step failed')}".strip()
+
+    def _plan_gone(self, plan: Plan) -> str:
+        step = plan.step
+        if step is None:
+            return ""
+        if step.state == "armed":
+            if plan.hold is not None and self.ledger.pending is plan.hold:
+                return ""
+            if plan.hold is not None and plan.hold.expired():
+                return "The last hold waited more than a minute, so I let it go."
+            return "Something else took the place of the last hold."
+        if step.state == "card":
+            req = self.approvals.pending.get(step.request_id)
+            if req is not None and not req.expired:
+                return ""
+            return "The card for the last step is gone."
+        return ""
+
+    def _plan_close(self, plan: Plan, why: str, stop: str = "I stopped the plan there.") -> str:
+        if self.ledger.plan is plan:
+            self.ledger.plan = None
+        plan.hold = None
+        done = [s.label for s in plan.steps if s.state == "done"]
+        left = [s.label for s in plan.steps if not s.skip and s.state != "done"]
+        origin = plan.steps[0].origin if plan.steps else None
+        self._log("PLAN-ENDED", "agent.plan",
+                  f"{why}: done {len(done)} [{'; '.join(done)}], not done {len(left)} [{'; '.join(left)}]",
+                  "amber", actor=self._actor_of(origin))
+        if not left:
+            n = len(plan.live)
+            return f"That was the last of the {n}, all done." if n > 1 else ""
+        return (f"{stop} Done: {self._listed(done) or 'nothing'}. "
+                f"Not done: {self._listed(left)}.")
+
+    def plan_card_answered(self, request_id: str, outcome: str, spoken: str = "") -> str:
+        with self._plan_lock:
+            plan = self.ledger.plan
+            step = plan.step if plan is not None else None
+            if step is None or step.state != "card" or step.request_id != request_id:
+                return ""
+            if outcome == "approved":
+                step.state = "done"
+                said, _tools = self._plan_advance(plan)
+                return " ".join(x for x in (spoken, said) if x)
+            step.state = "refused" if outcome == "denied" else "failed"
+            lead = (f"You denied the card for {step.label}, Emperor."
+                    if outcome == "denied" else f"The card for {step.label} did not go through.")
+            return f"{lead} {self._plan_close(plan, 'card ' + outcome)}".strip()
+
+    def take_plan_note(self) -> str:
+        with self._plan_lock:
+            note, self._plan_note = self._plan_note, ""
+            return note
 
     # ── the approval path: a decision arriving from a surface ────────────────
 
@@ -466,12 +671,24 @@ class Executor:
         # of a successful injection, and no approval reaches past it.
         handler_args = self._with_provenance(spec, args, actor)
         try:
-            result = spec.handler(**handler_args)
-        except ToolHold:
-            # A red handler that still wants a confirmation has already had one:
-            # the approval card IS the confirmation.
-            handler_args["confirmed"] = True
-            result = spec.handler(**handler_args)
+            try:
+                result = spec.handler(**handler_args)
+            except ToolHold:
+                # A red handler that still wants a confirmation has already had one:
+                # the approval card IS the confirmation.
+                handler_args["confirmed"] = True
+                result = spec.handler(**handler_args)
+        except ToolHold as again:
+            # IT ASKED AGAIN, AFTER THE CARD (the sentences round, item 5a). One
+            # retry with `confirmed` is all a card buys: a handler that holds a
+            # second time would otherwise escape as a bare exception with no
+            # outcome on the chain. Recorded, refused, and returned to the
+            # surface as `err.internal` (server.py's ApprovalError branch).
+            self._log("APPROVED-BUT-FAILED", spec.name,
+                      f"requestId={request_id} asked for a confirmation again after the card: {again.detail}",
+                      spec.tier, actor=actor)
+            raise ApprovalError("internal", "the tool asked for a second confirmation after your "
+                                            "approval; nothing was done") from None
         # ORDER MATTERS AND I GOT IT WRONG ONCE. A bare
         # `except (ToolError, InjectionRefusal): raise` placed ABOVE the
         # ToolError branch shadowed it, so a handler's own refusal escaped as a
@@ -966,6 +1183,9 @@ class Executor:
         the same policy as `_actor_of`: an actor nobody can name is not the
         owner.
         """
+        trail = getattr(getattr(self, "_tls", None), "trail", None)
+        if trail is not None:
+            trail.append((verb, tool, summary))
         if self._audit is None:
             return
         if not isinstance(actor, str) or actor not in self._AUDIT_ACTORS:
@@ -1151,7 +1371,7 @@ class Executor:
             self.ledger.arm(spec.name, args, detail, origin=origin)
             self._log("HELD", spec.name, f"{self._audit_line(spec, args)} (model-built amber)",
                       spec.tier, actor=origin)
-            return destructive_hold(detail)
+            return hold_line(spec.name, detail)
 
         # 3. THE HOLD — AMBER ONLY now. A repeat of the same command IS the
         #    confirmation she promised out loud (core/brain/confirm.py), and it
@@ -1177,6 +1397,23 @@ class Executor:
             # RESOLVED origin — the value the card and the chain carry.
             result = spec.handler(**self._with_provenance(spec, args, origin))
         except ToolHold as hold:
+            # 3c. A HOLD FROM A TOOL THAT CAN NEVER RECEIVE A YES FAILS CLOSED
+            #     (the sentences round, item 5a, 2026-10-06). The executor puts
+            #     `confirmed` on the handler's args ONLY for a tool registered
+            #     `holds=True` (step 3 above), so a `holds=False` tool that
+            #     raises ToolHold anyway — a green capability whose guard said
+            #     CONFIRM for a protected target is one — would be armed here,
+            #     re-run unconfirmed by his "yes", raise again and be re-armed:
+            #     she would ask forever, alive and hung. Refused instead, on the
+            #     chain, and the ledger is NEVER armed, so no "yes" can loop it.
+            if not spec.holds:
+                self._log("REFUSED-HOLD", spec.name,
+                          f"{hold.detail} — asked for a confirmation, but {spec.name} is "
+                          f"registered holds=False and can never receive one", spec.tier, actor=origin)
+                what = hold.detail.rstrip(". ")
+                return spec.failure.format(
+                    reason=(what[:1].upper() + what[1:] + " needs a confirmation this tool cannot take."),
+                    alternative="Nothing was done. That is how the tool is registered, not what you asked.")
             # 3b. THE HANDLER MAY RESOLVE THE TARGET IT HOLDS ON (X engagement
             #     round, 2026-09-12). "like post two" arrives as {index: 2};
             #     x_tools resolves the ordinal against the snapshot of the last
@@ -1209,7 +1446,7 @@ class Executor:
             self.ledger.arm(spec.name, held_args, hold.detail, origin=origin)
             self._log("HELD", spec.name, self._audit_line(spec, held_args), spec.tier,
                       actor=origin)
-            return destructive_hold(hold.detail)
+            return hold_line(spec.name, hold.detail)
         except ToolError as err:
             self._log("FAILED", spec.name, f"{err.reason}", spec.tier, actor=origin)
             # Capitalised: the template puts the reason after a full stop, and

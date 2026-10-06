@@ -33,6 +33,7 @@
 
 import { RAILS } from '../rails/rails.tsx';
 import { currentSentinelSource, sentinelStatus } from '../rails/sentinel-status.ts';
+import { sentinelFlareStore } from '../state/plasma-inputs.ts';
 import { railStore, useStore } from '../state/store.ts';
 
 interface RailProps {
@@ -42,7 +43,8 @@ interface RailProps {
 
 export function Rail({ blocked = false }: RailProps) {
   const open = useStore(railStore);
-  const sentinel = sentinelStatus(currentSentinelSource());
+  const flare = useStore(sentinelFlareStore);
+  const sentinel = sentinelStatus(currentSentinelSource()) ?? (flare ? 'red' : null);
 
   return (
     <nav className="rail" aria-label="Rails" data-blocked={blocked || undefined}>

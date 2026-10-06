@@ -529,6 +529,25 @@ _X = [
         note="READ ONLY. The voice-learning round's reader, now a tool of its own. Fenced "
              "even for his own account: a profile page renders other people's quoted posts.",
     ),
+    # ── THE SENTENCES ROUND (2026-10-06): the profile HEADER. x.read_user reads
+    #    a profile's ARTICLES and never its header, so "read @ada's bio" had no
+    #    tool at all (his U4/U5 went to a file read, then to "I cannot find any
+    #    posts"). Green, on the read key, read-only (AST-checked in
+    #    core/tests/test_sentences.py). The bio is fenced as external content;
+    #    no `posts` list is returned, so nothing here reaches the claim or style
+    #    stores. A NAME resolves through X's people search first.
+    _spec(
+        name="x.read_profile", tier="green", capability="x.read",
+        handler=x_tools.read_profile,
+        phrasings=("read @ada's bio", "who is @ada", "how many followers does @ada have"),
+        success="{spoken}",
+        failure="I could not read that profile, sir. {reason} {alternative}",
+        audit="read x profile header {handle}",
+        note="READ ONLY. The header first (name, @handle, bio, location, link, joined, followers, "
+             "following, whether he follows them from the page's own button, protected / suspended), "
+             "then whether it has posts. Three outcomes: posts; no posts / protected / suspended; no "
+             "header — said as the page shows it. The bio is fenced as external.",
+    ),
     # ── THE MEDIA ROUND (2026-09-22), part 1: a post's link. GREEN on the
     #    read key and not even a page load — the permalink is what every read
     #    already extracts (built by shape from the status href), resolved
@@ -561,12 +580,15 @@ _X = [
         handler=x_tools.like, holds=True,
         frozen=("post_id",),
         phrasings=("like that one", "like post two", "like the first one",
-                   "like 1234567890123"),
+                   "like 1234567890123", "like the newest post from @ada"),
         success="Liked {who}'s post {post_id}, Emperor.{note}",
         failure="I did not like it, sir. {reason} {alternative}",
         audit="LIKE x post {post_id}",
         note="By STATUS ID. An ordinal resolves against the last read's snapshot once, at "
-             "request time; the hold is armed on the id. Idempotent. Reverse: x.unlike.",
+             "request time; the hold is armed on the id. `author` (an @name, a name, or 'their') "
+             "with `nth` (1 = newest) reads their profile once and holds on their nth newest OWN "
+             "post — never pinned, a repost or an ad, never one he already likes. Idempotent. "
+             "Reverse: x.unlike.",
     ),
     _spec(
         name="x.unlike", tier="amber", capability="x.interact",
@@ -614,7 +636,10 @@ _X = [
         success="Following {who}, Emperor.{note}",
         failure="I did not follow them, sir. {reason} {alternative}",
         audit="FOLLOW x @{handle}",
-        note="ONE @name, frozen; the hold names it before any navigation. The Follow button "
+        note="ONE @name, frozen; the hold names it before any navigation. A NAME ('premier "
+             "league') is resolved first through X's people search — exact name, then followers; "
+             "parody/commentary/fan accounts never picked — and the hold names '@handle (Name, N "
+             "followers)'; the resolved handle is what is frozen. The Follow button "
              "is matched on its exact accessible name, so suggested accounts on the same "
              "page are unreachable. Idempotent. Reverse: x.unfollow.",
     ),

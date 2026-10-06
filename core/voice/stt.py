@@ -275,13 +275,25 @@ class WhisperSTT:
         self.size = size
         self.compute_type = compute_type
         t0 = time.perf_counter()
-        self.model = WhisperModel(
-            size,
-            device="cpu",
-            compute_type=compute_type,
-            cpu_threads=CPU_THREADS,
-            download_root=str(MODEL_ROOT),
-        )
+        try:
+            self.model = WhisperModel(
+                size,
+                device="cpu",
+                compute_type=compute_type,
+                cpu_threads=CPU_THREADS,
+                download_root=str(MODEL_ROOT),
+                local_files_only=True,
+            )
+            self.source = "local"
+        except Exception:
+            self.model = WhisperModel(
+                size,
+                device="cpu",
+                compute_type=compute_type,
+                cpu_threads=CPU_THREADS,
+                download_root=str(MODEL_ROOT),
+            )
+            self.source = "hub"
         self.load_s = time.perf_counter() - t0
 
     def transcribe(self, audio: np.ndarray, sample_rate: int = 16_000) -> Transcript:  # noqa: C901

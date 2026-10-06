@@ -46,6 +46,13 @@ from datetime import datetime, timedelta, timezone  # noqa: E402
 from pathlib import Path  # noqa: E402
 from typing import Any, Iterable  # noqa: E402
 
+for _stdio in (sys.stdout, sys.stderr):
+    if _stdio is not None and hasattr(_stdio, "reconfigure"):
+        try:
+            _stdio.reconfigure(encoding="utf-8", errors="backslashreplace")
+        except (OSError, ValueError):
+            pass
+
 import websockets  # noqa: E402
 import yaml  # noqa: E402
 from websockets.asyncio.server import ServerConnection, serve  # noqa: E402
@@ -232,12 +239,137 @@ def topic_matches(subscriptions: Iterable[str], msg_type: str) -> bool:
     return False
 
 
+WIRE_TIERS = ("green", "amber", "red")
+
+
+def audit_appended_payload(row: dict[str, Any]) -> dict[str, Any]:
+    out: dict[str, Any] = {"entryId": row.get("seq"), "actor": row.get("actor"), "tool": row.get("tool")}
+    if row.get("tier") in WIRE_TIERS:
+        out["tier"] = row["tier"]
+    out["summary"] = row.get("summary")
+    out["ts"] = row.get("ts")
+    return out
+
+
+class AuditFeed:
+    def __init__(self, audit: Any, broadcast: Any, *, poll_s: float = 1.0) -> None:
+        self.path = Path(audit.path)
+        self._broadcast = broadcast
+        self.poll_s = poll_s
+        self.offset: int | None = None
+        self.sent = 0
+        self.skipped = 0
+        self._loop: asyncio.AbstractEventLoop | None = None
+        self._wake: asyncio.Event | None = None
+        written = audit.append
+
+        def append(*args: Any, **kwargs: Any) -> dict[str, Any]:
+            entry = written(*args, **kwargs)
+            self.notify()
+            return entry
+
+        audit.append = append
+
+    def _size(self) -> int:
+        try:
+            return self.path.stat().st_size
+        except OSError:
+            return 0
+
+    def mark(self) -> int:
+        self.offset = self._size()
+        return self.offset
+
+    def notify(self) -> None:
+        loop, wake = self._loop, self._wake
+        if loop is None or wake is None:
+            return
+        try:
+            loop.call_soon_threadsafe(wake.set)
+        except RuntimeError:
+            pass
+
+    def read_new(self) -> list[dict[str, Any]]:
+        if self.offset is None:
+            self.mark()
+            return []
+        size = self._size()
+        if size < self.offset:
+            log(f"!! audit feed: {self.path.name} shrank from {self.offset} to {size} bytes; following from the new end")
+            self.offset = size
+            return []
+        if size == self.offset:
+            return []
+        with self.path.open("rb") as fh:
+            fh.seek(self.offset)
+            chunk = fh.read(size - self.offset)
+        end = chunk.rfind(b"\n")
+        if end < 0:
+            return []
+        rows: list[dict[str, Any]] = []
+        for raw in chunk[:end].split(b"\n"):
+            if not raw.strip():
+                continue
+            try:
+                row = json.loads(raw.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                row = None
+            if isinstance(row, dict) and "seq" in row:
+                rows.append(row)
+            else:
+                self.skipped += 1
+                log(f"!! audit feed: skipped an unreadable line after byte {self.offset}")
+        self.offset += end + 1
+        return rows
+
+    async def run(self) -> None:
+        self._loop = asyncio.get_running_loop()
+        self._wake = asyncio.Event()
+        if self.offset is None:
+            self.mark()
+        log(f"audit feed: live from byte {self.offset} of {self.path.name}")
+        while True:
+            self._wake.clear()
+            try:
+                rows = await asyncio.to_thread(self.read_new)
+            except Exception as exc:
+                log(f"!! audit feed read failed: {type(exc).__name__}: {exc}")
+                rows = []
+            for row in rows:
+                try:
+                    await self._broadcast("evt.audit.appended", audit_appended_payload(row))
+                    self.sent += 1
+                except Exception as exc:
+                    log(f"!! audit feed broadcast failed at seq {row.get('seq')}: {type(exc).__name__}: {exc}")
+            try:
+                await asyncio.wait_for(self._wake.wait(), self.poll_s)
+            except asyncio.TimeoutError:
+                pass
+
+
 # ── daemon ────────────────────────────────────────────────────────────────────
 
 
 #: The timezone today's calendar events are shown in. Lagos, UTC+1, no DST.
 #: A surface may override it per request; this is only the default.
 CALENDAR_TZ = "Africa/Lagos"
+
+
+async def _plan_after_card(daemon: Any, executor: Any, request_id: str, outcome: str, spoken: str = "") -> None:
+    hook = getattr(executor, "plan_card_answered", None)
+    if not callable(hook):
+        return
+    try:
+        line = await asyncio.to_thread(hook, request_id, outcome, spoken)
+    except Exception as exc:
+        log(f"!! plan after card failed: {type(exc).__name__}: {exc}")
+        return
+    if line:
+        log(f"plan after card {outcome} ({request_id[:8]})")
+        await daemon.broadcast("evt.transcript.message", {
+            "companionId": DEFAULT_COMPANION_ID,
+            "message": {"messageId": ulid(), "role": "assistant", "text": line, "ts": now_iso()},
+        })
 
 
 class TessaDaemon:
@@ -248,6 +380,7 @@ class TessaDaemon:
         self.started_at = time.monotonic()
 
         self.audit = AuditLog(ROOT / "data" / "audit.log")
+        self.audit_feed = AuditFeed(self.audit, self.broadcast)
         # THE CREDENTIAL VAULT. Locked at start, always: the passphrase-derived
         # key lives in memory only and dies with this process, so every restart
         # re-locks it. No `path=` — the default is %LOCALAPPDATA%\Tessa\vault.json,
@@ -1696,6 +1829,7 @@ class TessaDaemon:
                 "remembered": bool(payload.get("remember", False))})
             log(f"permission DENIED {pending.tool} ({request_id[:8]})")
             await ws.send(envelope("res.ok", {}, corr=corr))
+            await _plan_after_card(self, executor, request_id, "denied")
             return
 
         # ── APPROVE ──────────────────────────────────────────────────────────
@@ -1719,6 +1853,8 @@ class TessaDaemon:
                 "code": err.code, "message": err.message,
                 "retryable": False}, corr=corr))
             log(f"permission REFUSED {pending.tool} ({request_id[:8]}): {err.message}")
+            if request_id not in gate.pending:
+                await _plan_after_card(self, executor, request_id, "failed")
             return
         except Exception as exc:  # noqa: BLE001
             self.audit.append(
@@ -1728,6 +1864,7 @@ class TessaDaemon:
             await ws.send(envelope("err.internal", {
                 "code": "internal", "message": f"{type(exc).__name__}",
                 "retryable": False}, corr=corr))
+            await _plan_after_card(self, executor, request_id, "failed")
             return
 
         # Broadcast first — see the deny branch. The action has ALREADY run by
@@ -1740,6 +1877,7 @@ class TessaDaemon:
         log(f"permission APPROVED{' (EDITED)' if record['edited'] else ''} "
             f"{record['tool']} ({request_id[:8]})")
         await ws.send(envelope("res.ok", {"spoken": record["spoken"]}, corr=corr))
+        await _plan_after_card(self, executor, request_id, "approved", str(record.get("spoken") or ""))
 
     async def _h_audit_query(self, ws, state, payload, corr) -> None:
         limit = int(payload.get("limit", 100))
@@ -2398,8 +2536,39 @@ async def main() -> None:
                 log(f"voice: wake phrase UNAVAILABLE ({detector.load_error}) "
                     f"- push-to-talk is unaffected")
 
-        mic.open()
-        daemon.audit_mic_open(pre_roll_s=1.0, device="default input")
+        _mic_t0 = time.monotonic()
+        _mic_task = None
+        try:
+            mic.open()
+            daemon.audit_mic_open(pre_roll_s=1.0, device="default input")
+        except Exception as exc:
+            log(f"voice: NO MICROPHONE ({type(exc).__name__}: {exc}) - running text-only; "
+                f"looking for one every 10 s for 5 minutes, then every 60 s")
+
+            def _mic_attempt() -> None:
+                if bus.is_speaking:
+                    raise RuntimeError("she is speaking")
+                bus.stop("microphone rescan")
+                with bus._lock:
+                    if bus._stream is not None:
+                        raise RuntimeError("she is speaking")
+                    mic.reopen()
+
+            async def _await_microphone() -> None:
+                tries = 0
+                while True:
+                    await asyncio.sleep(10.0 if time.monotonic() - _mic_t0 < 300.0 else 60.0)
+                    tries += 1
+                    try:
+                        await asyncio.to_thread(_mic_attempt)
+                    except Exception:
+                        continue
+                    daemon.audit_mic_open(pre_roll_s=1.0, device="default input")
+                    log(f"voice: microphone found after {time.monotonic() - _mic_t0:.0f} s "
+                        f"(attempt {tries}) - voice is live")
+                    return
+
+            _mic_task = asyncio.create_task(_await_microphone())
 
         if args.inject_wav:
             # DEV ONLY. Feeds a recorded WAV into the SAME callback the sound
@@ -2466,6 +2635,8 @@ async def main() -> None:
     except (ValueError, AttributeError):
         pass
 
+    daemon.audit_feed.mark()
+
     async with serve(
         daemon.handle,
         host="127.0.0.1",              # CONTRACT §1 — loopback only, never 0.0.0.0
@@ -2499,6 +2670,7 @@ async def main() -> None:
         stop_watch = asyncio.create_task(lifecycle.watch_stop_requests(
             rt.local_appdata_root(), daemon.token, daemon.audit))
         log_cap = asyncio.create_task(lifecycle.log_cap_task(ROOT / "data" / "logs"))
+        audit_feed = asyncio.create_task(daemon.audit_feed.run())
         try:
             await stop.wait()
         finally:
@@ -2508,6 +2680,7 @@ async def main() -> None:
             schedule_ticker.cancel()
             stop_watch.cancel()
             log_cap.cancel()
+            audit_feed.cancel()
 
         reason = lifecycle.STOPPER.reason or "stop"
         restarting = lifecycle.STOPPER.restarting
@@ -2543,9 +2716,11 @@ async def main() -> None:
     except Exception as exc:  # noqa: BLE001
         log(f"!! runtime file removal failed: {type(exc).__name__}: {exc}")
     try:
-        _closed = close_browser_on_shutdown(reason="daemon shutdown")
+        _closed = close_browser_on_shutdown(reason="daemon shutdown", limit_s=5.0)
         if _closed.get("was_open"):
-            log(f"browser: closed on shutdown (up {_closed.get('up_s')}s)")
+            log(f"browser: closed on shutdown (up {_closed.get('up_s')}s) - {_closed.get('how')} "
+                f"in {_closed.get('ms')} ms"
+                + (f", {len(_closed.get('left'))} still exiting {_closed.get('left')}" if _closed.get("left") else ""))
     except Exception as exc:  # noqa: BLE001
         log(f"!! browser close on shutdown failed: {type(exc).__name__}: {exc}")
 

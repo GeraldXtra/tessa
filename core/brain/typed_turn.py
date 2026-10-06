@@ -109,6 +109,10 @@ def run_typed_turn(
         answered = None
         said_log(f"typed: answer_confirmation failed {type(exc).__name__}: {exc}")
     if answered is not None:
+        take_note = getattr(executor, "take_plan_note", None)
+        note = take_note() if callable(take_note) else ""
+        if note:
+            answered = f"{note} {answered}".strip()
         conversation.add("user", typed)
         conversation.add("assistant", answered)
         return TypedTurn(heard=typed, said=answered, intent="tool",
@@ -192,7 +196,7 @@ def run_typed_turn(
     # ── 6. THE TOOL PATH. Every tool speaks, success or failure. ─────────────
     tools: list[str] = []
     awaiting = False
-    if routed.calls:
+    if routed.calls or routed.plan:
         state("working")
         results: list[str] = []
         for call in routed.calls:
@@ -203,10 +207,24 @@ def run_typed_turn(
                 results.append(action_failed(
                     f"{type(exc).__name__}: {exc}", "Say it again and I will retry."))
                 tools.append(f"{call.name}!failed")
-        routed.speech = " ".join(r for r in results if r).strip()
+        if routed.plan:
+            try:
+                line, ran = executor.start_plan(routed.plan)
+                results.append(line)
+                tools.extend(ran)
+            except Exception as exc:
+                results.append(action_failed(
+                    f"{type(exc).__name__}: {exc}", "Nothing was done. Say it again and I will retry."))
+                tools.append("agent.plan!failed")
         # A red-tier refusal is recognisable by the gate having raised a
         # request; the executor turns that into her refusal sentence.
         awaiting = bool(getattr(executor.approvals, "pending", None))
+        routed.speech = " ".join(r for r in results if r).strip()
+
+    take_note = getattr(executor, "take_plan_note", None)
+    note = take_note() if callable(take_note) else ""
+    if note:
+        routed.speech = f"{note} {routed.speech or ''}".strip()
 
     flagged: list[str] = []
     inj = getattr(executor, "last_injection", None)

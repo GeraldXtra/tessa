@@ -69,6 +69,9 @@ PID_FILE = PROFILE_ROOT / "chrome.pid"
 #: because he asked one question at lunchtime.
 IDLE_TIMEOUT_S = 300.0
 
+SHUTDOWN_GRACE_S = 5.0
+SHUTDOWN_POLITE_S = 2.0
+
 #: Page loads on a metered link with two cores are not fast. This is generous
 #: enough not to fail on a slow page and short enough that a dead link does not
 #: hold the daemon that owns his microphone.
@@ -265,6 +268,57 @@ def _reap_profile_chrome(profile: Path) -> str:
     except Exception:  # noqa: BLE001
         pass
     return ""
+
+
+def _own_chrome() -> list[Any]:
+    try:
+        import psutil
+
+        return [p for p in psutil.Process(os.getpid()).children(recursive=True)
+                if p.name().lower() == "chrome.exe"]
+    except Exception:
+        return []
+
+
+def _still_running(p: Any) -> bool:
+    try:
+        return bool(p.is_running()) and p.status() != "zombie"
+    except Exception:
+        return False
+
+
+def _post_close(procs: list[Any]) -> int:
+    if os.name != "nt":
+        return 0
+    import ctypes
+    import ctypes.wintypes as wt
+
+    u32 = ctypes.WinDLL("user32")
+    pids = {p.pid for p in procs}
+    hits: list[int] = []
+    proto = ctypes.WINFUNCTYPE(wt.BOOL, wt.HWND, wt.LPARAM)
+
+    def each(hwnd: Any, _l: Any) -> bool:
+        owner = wt.DWORD()
+        u32.GetWindowThreadProcessId(hwnd, ctypes.byref(owner))
+        if owner.value in pids and u32.IsWindowVisible(hwnd):
+            hits.append(hwnd)
+        return True
+
+    u32.EnumWindows(proto(each), 0)
+    for hwnd in hits:
+        u32.PostMessageW(hwnd, 0x0010, 0, 0)
+    return len(hits)
+
+
+def _wait_gone(procs: list[Any], seconds: float) -> list[Any]:
+    try:
+        import psutil
+
+        _gone, alive = psutil.wait_procs(procs, timeout=max(0.0, seconds))
+        return [p for p in alive if _still_running(p)]
+    except Exception:
+        return [p for p in procs if _still_running(p)]
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -667,6 +721,64 @@ class BrowserSession:
             self._ctx_gone = False
             return {"was_open": was_open, "reason": reason, "up_s": round(up, 1)}
 
+    def close_within(self, reason: str = "daemon shutdown", grace_s: float = SHUTDOWN_GRACE_S,
+                     polite_s: float = SHUTDOWN_POLITE_S) -> dict[str, Any]:
+        t0 = time.monotonic()
+        tree = _own_chrome()
+        was_open = self._ctx is not None or bool(tree)
+        up = time.monotonic() - self.launched_at if self.launched_at else 0.0
+        how = "graceful"
+        got = self._lock.acquire(timeout=grace_s)
+        try:
+            if got and self._ctx is not None:
+                ctx, pw = self._ctx, self._pw
+
+                def _graceful() -> None:
+                    try:
+                        ctx.close()
+                    except Exception:
+                        pass
+                    try:
+                        if pw is not None:
+                            pw.stop()
+                    except Exception:
+                        pass
+
+                try:
+                    if self._thread is not None and self._thread.is_alive():
+                        self.call(_graceful, timeout=max(0.1, grace_s - (time.monotonic() - t0)))
+                    else:
+                        _graceful()
+                except Exception:
+                    pass
+            alive = [p for p in tree + _own_chrome() if _still_running(p)]
+            alive = list({p.pid: p for p in alive}.values())
+            if alive:
+                how = "politely"
+                _post_close(alive)
+                alive = _wait_gone(alive, polite_s)
+            if alive:
+                how = f"forced ({len(alive)} process{'es' if len(alive) != 1 else ''})"
+                for p in alive:
+                    try:
+                        p.kill()
+                    except Exception:
+                        pass
+                alive = _wait_gone(alive, 1.0)
+            self._ctx = None
+            self._pw = None
+            try:
+                PID_FILE.unlink(missing_ok=True)
+            except OSError:
+                pass
+            self.chrome_pid = None
+            self._ctx_gone = False
+        finally:
+            if got:
+                self._lock.release()
+        return {"was_open": was_open, "reason": reason, "up_s": round(up, 1), "how": how,
+                "ms": round((time.monotonic() - t0) * 1000), "left": [p.pid for p in alive]}
+
     @property
     def is_open(self) -> bool:
         return self._ctx is not None
@@ -922,7 +1034,7 @@ def open_url(url: str) -> dict[str, Any]:
     }
 
 
-def close_browser(reason: str = "asked") -> dict[str, Any]:
+def close_browser(reason: str = "asked", limit_s: float | None = None) -> dict[str, Any]:
     """
     `reason` exists because server.py passes one on shutdown.
 
@@ -933,6 +1045,8 @@ def close_browser(reason: str = "asked") -> dict[str, Any]:
     leaving a stale runtime.json every clean exit. Found by review, confirmed by
     calling it.
     """
+    if limit_s is not None:
+        return SESSION.close_within(reason=reason, grace_s=limit_s)
     return SESSION.close(reason=reason)
 
 

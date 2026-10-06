@@ -136,7 +136,18 @@ export function themeForKey(code: string, key: string): ThemeId | null {
  *   body   the rim, and --accent: every label, marker and active state
  *   idle   the resting tone, and --accent-dim: hints and secondary marks
  */
-const THEMED = ['--accent', '--accent-dim', '--sphere-hot', '--sphere-cool', '--sphere-idle'] as const;
+const THEMED = [
+  '--accent',
+  '--accent-dim',
+  '--sphere-hot',
+  '--sphere-cool',
+  '--sphere-idle',
+  '--bg-void',
+  '--orb-deep',
+  '--orb-mid',
+  '--orb-hot',
+  '--orb-bg',
+] as const;
 
 /** What is on screen now. Read by the engine when it re-tints. */
 let current: ThemeId = DEFAULT_THEME;
@@ -153,11 +164,11 @@ export function currentTheme(): ThemeId {
  * and the surface is about to render with no accent at all, which is worth
  * being able to see in a log rather than on screen.
  */
-export function applyTheme(id: ThemeId): { core: string; body: string; idle: string } {
-  const core = tokenValue(`--theme-${id}-core`);
-  const body = tokenValue(`--theme-${id}-body`);
-  const idle = tokenValue(`--theme-${id}-idle`);
-  const void_ = tokenValue('--theme-void');
+export function applyTheme(id: ThemeId): { deep: string; mid: string; hot: string; bg: string } {
+  const deep = tokenValue(`--theme-${id}-deep`);
+  const mid = tokenValue(`--theme-${id}-mid`);
+  const hot = tokenValue(`--theme-${id}-hot`);
+  const bg = tokenValue(`--theme-${id}-bg`);
 
   const root = document.documentElement;
   const set = (name: string, value: string): void => {
@@ -165,23 +176,23 @@ export function applyTheme(id: ThemeId): { core: string; body: string; idle: str
     // to the generated default, silently mixing two palettes on one screen.
     if (value) root.style.setProperty(name, value);
   };
+  const dimmed = mid && bg ? `color-mix(in srgb, ${mid} 62%, ${bg})` : '';
 
-  set('--accent', body);
-  set('--accent-dim', idle);
-  set('--sphere-hot', core);
-  set('--sphere-cool', body);
-  set('--sphere-idle', idle);
-
-  // Pure black stage, per the brief. Overridden here rather than in tokens.json
-  // because `--bg-void` is SHARED with apps/console (CONTRACT §9) — its near-
-  // black is that surface's background too, and this session does not get to
-  // restyle the Console by editing a token they both read.
-  set('--bg-void', void_);
+  set('--accent', mid);
+  set('--accent-dim', dimmed);
+  set('--sphere-hot', hot);
+  set('--sphere-cool', mid);
+  set('--sphere-idle', dimmed);
+  set('--bg-void', bg);
+  set('--orb-deep', deep);
+  set('--orb-mid', mid);
+  set('--orb-hot', hot);
+  set('--orb-bg', bg);
 
   root.dataset['theme'] = id;
   current = id;
 
-  return { core, body, idle };
+  return { deep, mid, hot, bg };
 }
 
 /** Which properties this module owns. Exported for the report, not for logic. */

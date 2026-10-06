@@ -139,6 +139,64 @@ _DM_LIST = (r"@?[A-Za-z0-9_]{1,15}\s*(?:\band\b|&|\+)\s*@?[A-Za-z0-9_]{1,15}|"
 _SHARE_REF = (r"\d{5,25}|\d{1,2}|first|second|third|fourth|fifth|one|two|three|four|five|"
               r"that(?:\s+one)?")
 
+#: THE SENTENCES ROUND (2026-10-06) — fragments for the profile, follow-by-name
+#: and like-by-author rules. `_AT_HANDLE` is an @ that STARTS a word, so an
+#: e-mail address ("ada@example.com") and "remind me @ 5pm" are never a handle;
+#: `.format(g=...)` names its group. `_ACCOUNT_NAME` is a spoken name for the
+#: tool to resolve through X's people search — never a pronoun or an article,
+#: and never the start of "follow up", "follow the link", "follow the readme".
+_AT_HANDLE = r"(?<![\w.@])@(?P<{g}>[A-Za-z0-9_]{{1,15}})"
+_PROFILE_NOUN = (r"(?:bio|biography|profile\s+bio|profile\s+description|description|"
+                 r"about(?:\s+section)?|intro)\b")
+_ON_X = r"(?:\s+(?:on|for|in)\s+(?:x|twitter))?"
+_PROFILE_LEAD = r"(?:^|(?<=\s))"
+_ACCOUNT_NAME = (r"(?!(?:the|a|an|it|that|this|these|those|he|she|they|them|you|me|my|your|our|his|her|"
+                 r"up|along|through|suit|back|everyone|everybody|all|x|twitter)\b)[A-Za-z0-9][A-Za-z0-9 .'&_-]{0,40}?")
+#: "abeg", "pls", "help me", "make you", "can you" — how he opens a request.
+_ASK_LEAD = (r"^\s*(?:tessa[,\s]+)?(?:(?:abeg|pls|please)[,\s]+)?"
+             r"(?:(?:can|could|would|will)\s+you\s+(?:please\s+)?|help\s+me\s+|make\s+you\s+|go\s+(?:and\s+)?)?")
+_ASK_TAIL = r"(?:\s+(?:please|pls|abeg|for\s+me))*\s*[.!?]*\s*$"
+
+
+def _like_by_author(m: "re.Match[str]") -> dict[str, Any]:
+    """
+    "like the newest post from @premierleague" / "like their first 3 post" ->
+    x.like {author, nth[, count]}. No author and no possessive is NOT this
+    rule (ValueError = the rule did not fire): "like the first post" names a
+    post she read, and stays with the ordinal rule below.
+    """
+    author = (m["at"] or m["who"] or "").strip()
+    if not author and m["poss"]:
+        author = "their"
+    if not author:
+        raise ValueError("no author")
+    nth = {"second": 2, "2nd": 2, "third": 3, "3rd": 3, "fourth": 4, "4th": 4,
+           "fifth": 5, "5th": 5}.get((m["ord"] or "").lower(), 1)
+    out: dict[str, Any] = {"author": author, "nth": nth}
+    count = _count(m["n"])
+    if count > 1:
+        # intents.py turns a count into a plan — ONE hold now, the rest named.
+        out["count"] = count
+    return out
+
+
+_REPLY_TARGET = (r"(?:(?P<poss>their|his|her|its)\s+|(?P<at>@[A-Za-z0-9_]{1,15})(?:'s|s'|’s)\s+|the\s+)?"
+                 r"(?:(?P<ord>second|third|fourth|fifth|2nd|3rd|4th|5th)\s+)?"
+                 r"(?:newest|latest|last|most\s+recent|recent|new|first|top)\s+(?:post|tweet)"
+                 r"(?:\s+(?:from|by|of|on)\s+(?P<who>@[A-Za-z0-9_]{1,15}))?")
+
+
+def _reply_by_author(m: "re.Match[str]") -> dict[str, Any]:
+    author = (m["at"] or m["who"] or "").strip()
+    if not author and m["poss"]:
+        author = "their"
+    text = next((m[k] for k in ("t1", "t2", "t3", "t4", "t5") if m.groupdict().get(k)), "")
+    if not author or not text.strip():
+        raise ValueError("no author or no words")
+    nth = {"second": 2, "2nd": 2, "third": 3, "3rd": 3, "fourth": 4, "4th": 4,
+           "fifth": 5, "5th": 5}.get((m["ord"] or "").lower(), 1)
+    return {"text": " ".join(text.split()), "author": author, "nth": nth}
+
 
 def _post_args(ref: str | None) -> dict[str, Any]:
     """
@@ -831,6 +889,41 @@ _RULES: list[tuple[re.Pattern[str], str, Builder, str]] = [
      "x.read_dm", lambda m: {"handle": (m["h"] or m["h2"] or m["h3"] or "").lstrip("@")},
      "Reading your messages."),
 
+    # ── THE PROFILE HEADER (the sentences round, 2026-10-06). AN @HANDLE IS AN
+    #    X SIGNAL ON ITS OWN: his "read @mcityXtra_ bio and tell me what's in
+    #    the bio" reached fs.read + fs.list ("@mcityXtra_ bio is not there",
+    #    twice). A bio, a follower count, "who is @x" or "what does @x's
+    #    profile say" is x.read_profile — the HEADER, not the posts (x.read_user
+    #    keeps "read ada's profile" and "what has ada been posting"). Every
+    #    alternative needs an @ that starts a word (so "ada@example.com" and
+    #    "remind me @ 5pm" cannot match) AND one of the profile nouns or
+    #    questions, so "what does @echo off do" stays where it was. A NAME
+    #    without @ needs an explicit "on X" and is resolved by the tool.
+    (re.compile(_PROFILE_LEAD +
+                r"(?:(?:read|show(?:\s+me)?|check|get(?:\s+me)?|give\s+me|pull\s+up|open|see|tell\s+me|"
+                r"what(?:'s|\s+is|\s+does|\s+do)?(?:\s+in|\s+on)?)\s+(?:me\s+)?(?:the\s+)?)?"
+                rf"{_AT_HANDLE.format(g='h')}(?:'s|s'|’s)?(?:\s+(?:x|twitter))?\s+{_PROFILE_NOUN}"
+                rf"{_ON_X}(?:\s+(?:say|says|for\s+me|please|pls|abeg))?\s*[.!?]*\s*$|"
+                r"\b(?:read|show(?:\s+me)?|check|get(?:\s+me)?|give\s+me|tell\s+me|what(?:'s|\s+is))\s+(?:me\s+)?"
+                rf"(?:the\s+)?(?:bio|biography|description)\s+(?:of|for|on)\s+{_AT_HANDLE.format(g='h2')}"
+                rf"{_ON_X}\s*[.!?]*\s*$|"
+                rf"^\s*(?:tessa[,\s]+)?(?:who(?:'s|\s+is|\s+be)|wetin\s+be|tell\s+me\s+(?:about|who(?:\s+is)?))\s+"
+                rf"{_AT_HANDLE.format(g='h3')}{_ON_X}\s*[.!?]*\s*$|"
+                rf"\bhow\s+many\s+(?:followers|people)\s+(?:does|do|has|have|did)\s+{_AT_HANDLE.format(g='h4')}"
+                r"(?:\s+(?:have|got|get|follow))?\b|"
+                rf"\bhow\s+many\s+followers\s+{_AT_HANDLE.format(g='h5')}\s+(?:have|has|get|got)\b|"
+                rf"\bhow\s+many\s+people\s+(?:are\s+)?follow(?:s|ing)?\s+{_AT_HANDLE.format(g='h6')}|"
+                rf"{_AT_HANDLE.format(g='h7')}(?:'s|s'|’s)?\s+(?:followers?|following)\s+count\b|"
+                rf"\bwhat\s+(?:does|do)\s+{_AT_HANDLE.format(g='h8')}(?:'s|s'|’s)\s+(?:x\s+|twitter\s+)?profile\s+say\b|"
+                rf"\bwhat(?:'s|\s+is)\s+on\s+{_AT_HANDLE.format(g='h9')}(?:'s|s'|’s)\s+(?:x\s+|twitter\s+)?profile\b|"
+                rf"^\s*(?:tessa[,\s]+)?who(?:'s|\s+is)\s+(?P<n1>{_ACCOUNT_NAME})\s+on\s+(?:x|twitter)\s*[?.!]*\s*$|"
+                r"\b(?:read|show(?:\s+me)?|check|what(?:'s|\s+is)(?:\s+in)?)\s+(?:me\s+)?"
+                rf"(?P<n2>{_ACCOUNT_NAME})(?:'s|s'|’s)\s+(?:x\s+|twitter\s+)?bio\s+on\s+(?:x|twitter)\s*[.!?]*\s*$",
+                re.I),
+     "x.read_profile",
+     lambda m: {"handle": next(v for k, v in m.groupdict().items() if v).strip()},
+     "Reading their profile."),
+
     # ── X READS (the reading round, 2026-09-12): search, thread, profile.
     #    ABOVE the chrome-profile block because its list/show rule is keyed
     #    to the bare word `profile` and would swallow "show me ada's profile";
@@ -1068,6 +1161,21 @@ _RULES: list[tuple[re.Pattern[str], str, Builder, str]] = [
                 r"(?:the\s+)?(?:people|accounts)\s+who)\b[^.]*)", re.I),
      "x.follow", lambda m: {"handle": _clean(m["what"])},
      "One at a time."),
+    # LIKE BY AUTHOR (the sentences round, 2026-10-06): "like the newest post
+    # from @premierleague", "like @x's latest post", "like their first 3 post"
+    # (his U2). Needs an author or a possessive, so "like the first post"
+    # (a post she read) stays with the ordinal rule below. The tool reads their
+    # profile ONCE and holds on ONE status id; a count becomes a plan in
+    # intents.py — one hold now, the rest named.
+    (re.compile(_ASK_LEAD + r"(?:like|favou?rite)\s+(?:(?P<poss>their|his|her|its)\s+|"
+                r"(?P<at>@[A-Za-z0-9_]{1,15})(?:'s|s'|’s)\s+|the\s+)?"
+                r"(?:(?P<ord>second|third|fourth|fifth|2nd|3rd|4th|5th)\s+)?"
+                r"(?:newest|latest|last|most\s+recent|recent|new|first|top)"
+                r"(?:\s+(?P<n>\d|one|two|three|four|five))?\s+(?:post|tweet)s?"
+                rf"(?:\s+(?:from|by|of|on)\s+(?P<who>@[A-Za-z0-9_]{{1,15}}|{_ACCOUNT_NAME}))?"
+                rf"{_ON_X}{_ASK_TAIL}", re.I),
+     "x.like", _like_by_author,
+     "Finding it."),
     (re.compile(rf"\b(?:un-?like|unfavou?rite)\s+(?:the\s+|that\s+|this\s+)?(?:post\s+|tweet\s+)?"
                 rf"(?P<ref>{_ENGAGE_REF})(?:\s+(?:one|post|tweet))?\s*[.!?]*\s*$|"
                 r"\b(?:take|remove)\s+(?:my\s+|the\s+)?like\s+(?:off|from)\s+"
@@ -1075,7 +1183,10 @@ _RULES: list[tuple[re.Pattern[str], str, Builder, str]] = [
                 rf"(?P<ref2>{_ENGAGE_REF})(?:\s+(?:one|post|tweet))?\s*[.!?]*\s*$", re.I),
      "x.unlike", lambda m: _post_args(m["ref"] or m["ref2"]),
      "Unliking it."),
-    (re.compile(rf"\b(?:like|favou?rite)\s+(?:the\s+|that\s+|this\s+)?(?:post\s+|tweet\s+)?"
+    # A BARE "like this" is not a like (the sentences round, 2026-10-06): it is
+    # "make it like this" as often as anything, and a public act needs a post
+    # named — "like this one", "like this post", "like that", "like it" stay.
+    (re.compile(rf"\b(?:like|favou?rite)\s+(?!this\s*[.!?]*\s*$)(?:the\s+|that\s+|this\s+)?(?:post\s+|tweet\s+)?"
                 rf"(?P<ref>{_ENGAGE_REF})(?:\s+(?:one|post|tweet))?\s*[.!?]*\s*$", re.I),
      "x.like", lambda m: _post_args(m["ref"]),
      "Liking it."),
@@ -1091,6 +1202,20 @@ _RULES: list[tuple[re.Pattern[str], str, Builder, str]] = [
                 r"(?:\s+on\s+(?:x|twitter))?(?:\s+please)?\s*[.!?]*\s*$", re.I),
      "x.follow", lambda m: {"handle": m["h"]},
      "Following them."),
+    # FOLLOW / UNFOLLOW BY NAME (the sentences round, 2026-10-06): "follow
+    # premier league on X", "Follow Elon musk on X" (his U2, U3). A NAME is
+    # more than one word, so it needs an explicit X marker ("on X", "for X",
+    # "on twitter") — "follow up with ada tomorrow" and "follow the readme"
+    # never reach X. The tool resolves the name through X's people search and
+    # the hold names "@handle (Name, N followers)" before his yes. Unfollow first.
+    (re.compile(_ASK_LEAD + rf"unfollow\s+(?P<name>{_ACCOUNT_NAME})\s+(?:on|for|in)\s+(?:x|twitter){_ASK_TAIL}",
+                re.I),
+     "x.unfollow", lambda m: {"handle": _clean(m["name"])},
+     "Finding them."),
+    (re.compile(_ASK_LEAD + rf"follow\s+(?P<name>{_ACCOUNT_NAME})\s+(?:on|for|in)\s+(?:x|twitter){_ASK_TAIL}",
+                re.I),
+     "x.follow", lambda m: {"handle": _clean(m["name"])},
+     "Finding them."),
 
     # ── THE PUBLISHING ROUND 3 (2026-09-12): quote, thread, repost-by-id.
     #    ABOVE the timeline rule ("retweet every post on my timeline" must
@@ -1154,8 +1279,16 @@ _RULES: list[tuple[re.Pattern[str], str, Builder, str]] = [
      "Reposting it."),
     # X BEFORE the generic browser rules: "read my timeline" is an X read, not
     # a page read, and "tweet that" must never reach a file verb.
+    # THE SENTENCES ROUND (2026-10-06): his U1, "open X in chrome for me to
+    # log in", reached x.login only through the model's second opinion (a
+    # fuzzy "chrome" app match was doubted) — with Gemini down it would have
+    # opened his everyday Chrome instead. The open-to-log-in shape is now
+    # matched here: open X (in a browser) (for me) to / so I can log in.
     (re.compile(r"\b(?:log\s*(?:me\s*)?in(?:to)?\s+(?:to\s+)?(?:x|twitter)|"
-                r"open\s+(?:x|twitter)\s+so\s+i\s+can\s+log|sign\s+me\s+in(?:to)?\s+(?:to\s+)?(?:x|twitter))\b", re.I),
+                r"open\s+(?:x|twitter)\s+so\s+i\s+can\s+log|sign\s+me\s+in(?:to)?\s+(?:to\s+)?(?:x|twitter)|"
+                r"open\s+(?:up\s+)?(?:x|twitter)(?:\.com)?(?:\s+(?:in|on|with)\s+(?:chrome|the\s+browser|my\s+browser|"
+                r"your\s+browser|browser))?(?:\s+for\s+me)?\s+(?:to|so\s+(?:that\s+)?i\s+(?:can|could|fit)|"
+                r"make\s+i|for\s+me\s+to)\s+(?:log|sign)\s*-?\s*in)\b", re.I),
      "x.login", lambda m: {},
      "Opening it."),
     (re.compile(r"\b(?:my\s+)?(?:x\s+)?notifications\b|\bwho\s+replied\s+to\s+me\b", re.I),
@@ -1165,6 +1298,15 @@ _RULES: list[tuple[re.Pattern[str], str, Builder, str]] = [
                 rf"{_WHATS}\s+(?:on|happening\s+on)\s+(?:x|twitter))\b", re.I),
      "x.read_timeline", lambda m: {},
      "Reading it."),
+    (re.compile(_ASK_LEAD + r"(?:reply|respond)\s+(?:with\s+|saying\s+)?"
+                r"(?:'(?P<t1>[^']{1,280})'|\"(?P<t2>[^\"]{1,280})\"|“(?P<t3>[^”]{1,280})”|‘(?P<t4>[^’]{1,280})’)"
+                r"\s+to\s+" + _REPLY_TARGET + _ON_X + _ASK_TAIL, re.I),
+     "x.reply", _reply_by_author,
+     "Finding it."),
+    (re.compile(_ASK_LEAD + r"(?:reply|respond)\s+to\s+" + _REPLY_TARGET
+                + r"\s+(?:saying|with)\s+(?P<t5>\S.{0,279}?)" + _ASK_TAIL, re.I),
+     "x.reply", _reply_by_author,
+     "Finding it."),
     # REPLY BEFORE POST, and POST vetoes `reply`. "reply to post two with
     # thanks" contains the word `post` and was matching `x.post` with the text
     # "two with thanks" — which would have queued a public tweet reading "two
@@ -1190,6 +1332,15 @@ _RULES: list[tuple[re.Pattern[str], str, Builder, str]] = [
     #
     # So: any form of `tweet` is a tweet. `post` needs a companion signal —
     # "to x", "to twitter", or a demonstrative ("post this", "post that").
+    # POST WITH THE WORDS IN QUOTES (the sentences round, 2026-10-06): "post
+    # 'thanks @premierleague for the update'" is dictation — the quotes say
+    # where the words start and stop — so it is x.post (red, the card), never
+    # a profile read because an @name sits inside the words. Needs the quote
+    # marks: "post office opening times" stays where it was.
+    (re.compile(r"^\s*(?:tessa[,\s]+)?(?:please\s+)?(?:post|put\s+up|publish)\s*(?:this\s*)?(?:on\s+(?:x|twitter)\s*)?"
+                r"[:,]?\s*[\"'“‘](?P<text>[^\"“”]{1,300}?)[\"'”’]\s*(?:(?:on|to)\s+(?:x|twitter))?\s*[.!?]*\s*$", re.I),
+     "x.post", lambda m: {"text": _clean(m["text"] or "")},
+     "Reading it back."),
     (re.compile(r"(?!.*\breply\b)\btweets?\b\s*(?:this|that|the following)?\s*"
                 r"(?:to\s+(?:x|twitter))?\s*[:,]?\s*(?P<text>.+)$", re.I),
      "x.post", lambda m: {"text": _clean(m["text"] or "")},
@@ -2040,6 +2191,15 @@ def _is_nameable(value: str) -> bool:
     return not all(w in _NOT_A_NAME for w in words)
 
 
+#: A word-initial @name inside an argument (not "ada@example.com").
+_HANDLE_IN_ARG = re.compile(r"(?<![\w.@])@[A-Za-z0-9_]{1,15}\b")
+
+
+def _is_file_tool(name: str) -> bool:
+    """The tools whose target is a path on his disk."""
+    return (name.startswith(("fs.", "system.files.")) or name in ("app.open_folder", "system.code.open"))
+
+
 def match(clause: str) -> ToolCall | None:
     """First rule that fires. Returns None so the caller can fall through."""
     c = (clause or "").strip()
@@ -2062,6 +2222,14 @@ def match(clause: str) -> ToolCall | None:
         # argument.
         if any((name, k) in _MUST_NAME_A_THING and not _is_nameable(v)
                for k, v in args.items()):
+            continue
+        # AN @HANDLE IS NEVER A FILE (the sentences round, 2026-10-06). His
+        # "read @mcityXtra_ bio" became fs.read of a path called "@mcityXtra_
+        # bio". A file tool whose target holds a word-initial @name skips this
+        # rule; the profile rules above own those sentences, and anything they
+        # do not match falls through rather than reaching a file.
+        if _is_file_tool(name) and any(isinstance(v, str) and _HANDLE_IN_ARG.search(v)
+                                       for v in args.values()):
             continue
 
         from core.tools import REGISTRY

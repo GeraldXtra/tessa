@@ -53,6 +53,8 @@ import { join } from 'node:path';
 
 import { BrowserWindow, screen } from 'electron';
 
+import tokens from '@tessa/tokens';
+
 /**
  * Content size, in CSS px, at 1366x768.
  *
@@ -105,7 +107,7 @@ export function createWidgetWindow(options: WidgetOptions): BrowserWindow {
     transparent: true,
     // FULLY transparent. '#00000000' — eight hex digits, the last two alpha.
     // Six digits here means opaque black and the whole feature reads as broken.
-    backgroundColor: '#00000000',
+    backgroundColor: `${tokens.color['theme-void'].value}00`,
     skipTaskbar: true,
 
     alwaysOnTop: true,
@@ -191,7 +193,6 @@ export function createWidgetWindow(options: WidgetOptions): BrowserWindow {
    * round trip before first paint.
    */
   const params = new URLSearchParams();
-  if (process.argv.includes('--widget-cheap')) params.set('cheap', '1');
   const forced = process.argv.find((a) => a.startsWith('--widget-state='));
   if (forced) params.set('state', forced.slice('--widget-state='.length));
   const query = params.toString() ? `?${params.toString()}` : '';

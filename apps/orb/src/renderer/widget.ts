@@ -38,8 +38,7 @@ import '@tessa/tokens/css';
 
 import type { AgentState } from '@tessa/protocol';
 
-import type { SphereTier } from '../shared/ipc-contract.ts';
-import { createSphereEngine } from './scene/sphere-engine.ts';
+import { createPlasmaEngine } from './scene/plasma-engine.ts';
 import { applyTheme, currentTheme } from './theme.ts';
 
 /**
@@ -58,22 +57,6 @@ const LIVE_STATES: ReadonlySet<string> = new Set<AgentState>([
   'working',
   'blocked',
 ]);
-
-/**
- * ⚠ THE CHEAP-SPHERE TOGGLE.
- *
- * `?cheap=1` on the widget URL, or `--widget-cheap` on the command line, drops
- * the widget to the `low` tier — 6,800 particles instead of 15,600.
- *
- * It reuses the EXISTING tier machinery rather than introducing a second,
- * simpler sphere. A second sphere would be a second thing to keep looking like
- * the first one, and it would diverge the first time the real one was retuned.
- * `low` is already a measured, shipped configuration of the same shell.
- */
-function cheapRequested(): boolean {
-  const params = new URLSearchParams(window.location.search);
-  return params.get('cheap') === '1';
-}
 
 const found = document.getElementById('orb') as HTMLCanvasElement | null;
 if (!found) throw new Error('#orb is missing from widget.html');
@@ -94,27 +77,17 @@ applyTheme(currentTheme());
  */
 let agentState: AgentState = 'idle';
 
-const tier: SphereTier = cheapRequested() ? 'low' : 'med';
+const WIDGET_RADIUS = 0.33;
 
-const engine = createSphereEngine({
+const engine = createPlasmaEngine({
   canvas,
-  initialTier: tier,
   getState: () => agentState,
-  onTierChange: (next, reason) => {
-    console.log(`[widget] tier -> ${next} (${reason})`);
+  transparent: true,
+  radius: (w, h) => Math.min(w, h) * WIDGET_RADIUS,
+  onPath: (path, reason) => {
+    console.log(`[widget] ${path} (${reason})`);
   },
 });
-
-/**
- * FIT THE DISC INSIDE 132 px.
- *
- * At its natural size the sphere's projected radius is 43% of canvas height, so
- * the disc is 86% of the frame and its rim would touch the window edge — where,
- * on a transparent window with no border, it would simply be cut off. 0.82
- * leaves a margin of about 12 px all round, so the glow has somewhere to fall
- * off into instead of ending at a hard rectangle.
- */
-engine.setFit(0.82);
 
 /* ── the freeze, and the whole point of the widget ─────────────────────────── */
 
@@ -208,7 +181,4 @@ window.addEventListener('click', () => {
   window.tessa.widgetExpand();
 });
 
-console.log(
-  `[widget] ready — tier ${tier}${cheapRequested() ? ' (CHEAP)' : ''}, ` +
-    `frozen until she does something`,
-);
+console.log('[widget] ready — frozen until she does something');

@@ -23,7 +23,9 @@
 
 import { spawn, execFileSync } from 'node:child_process';
 import { createHmac, randomBytes, createHash } from 'node:crypto';
-import { existsSync, readFileSync, readdirSync, renameSync, statSync, writeFileSync } from 'node:fs';
+import {
+  closeSync, existsSync, openSync, readFileSync, readSync, readdirSync, renameSync, statSync, writeFileSync,
+} from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -40,11 +42,17 @@ const STOP_FILE = join(RUNTIME_DIR, 'stop-request.json');
 // Measured 2026-10-06 on this machine (alive round, alive-NUMBERS.md):
 //   clean stop WITH --voice: 353 ms -> wait 15 s (the floor), never kill.
 //   start (--now) to runtime.json WITH --voice: ~25.5 s -> twice that.
-const STOP_WAIT_MS = 15_000;
-const READY_WAIT_MS = 52_000;
+const STOP_WAIT_MS = 60_000;
+const READY_WAIT_MS = 120_000;
+const PROGRESS_MS = 10_000;
+const LAUNCH_SEEN_MS = 20_000;
+const LAUNCH_TRIES = 3;
+const LOG_FREE_MS = 15_000;
 const HANDSHAKE_MS = 5_000;
 
 const out = (s = '') => process.stdout.write(s + '\n');
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const secs = (ms) => Math.round(ms / 1000);
 
 function readRuntime() {
   if (!existsSync(RUNTIME_FILE)) return null;
@@ -146,6 +154,64 @@ function tail(n = 20) {
   for (const l of lines) out(`  ${l}`);
 }
 
+function logMark() {
+  const mark = {};
+  for (const f of logFiles()) {
+    try { mark[f] = statSync(f).size; } catch {}
+  }
+  return mark;
+}
+
+function linesSince(mark) {
+  const lines = [];
+  for (const f of logFiles()) {
+    let size;
+    try { size = statSync(f).size; } catch { continue; }
+    const from = mark[f] ?? 0;
+    if (size <= from) continue;
+    let fd;
+    try {
+      fd = openSync(f, 'r');
+      const buf = Buffer.alloc(size - from);
+      readSync(fd, buf, 0, buf.length, from);
+      lines.push(...buf.toString('utf8').split(/\r?\n/).filter((l) => l.trim() !== ''));
+    } catch {
+    } finally {
+      if (fd !== undefined) closeSync(fd);
+    }
+  }
+  return lines;
+}
+
+function dailyLog() {
+  const d = new Date();
+  const p = (n) => String(n).padStart(2, '0');
+  return join(LOG_DIR, `daemon-${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}.log`);
+}
+
+function logWritable() {
+  const f = dailyLog();
+  if (!existsSync(f)) return true;
+  try {
+    closeSync(openSync(f, 'a'));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function startedPid(lines) {
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const m = lines[i].match(/\] startup: pid (\d+) /);
+    if (m) return Number(m[1]);
+  }
+  return null;
+}
+
+function said(lines) {
+  return lines.length ? lines[lines.length - 1] : 'nothing new yet';
+}
+
 function startupLine(pid) {
   const lines = recentLines();
   for (let i = lines.length - 1; i >= 0; i--) {
@@ -209,11 +275,16 @@ function writeStopRequest(rt, restarting) {
   renameSync(tmp, STOP_FILE);
 }
 
-async function waitGone(pid, ms) {
+async function waitGone(pid, ms, mark) {
   const t0 = Date.now();
+  let note = t0 + PROGRESS_MS;
   while (Date.now() - t0 < ms) {
     if (!pidAlive(pid)) return Date.now() - t0;
-    await new Promise((r) => setTimeout(r, 100));
+    if (Date.now() >= note) {
+      out(`  ${secs(Date.now() - t0)} s: pid ${pid} is still stopping - the log says: ${said(linesSince(mark))}`);
+      note += PROGRESS_MS;
+    }
+    await sleep(100);
   }
   return -1;
 }
@@ -225,8 +296,9 @@ async function stopDaemon(restarting) {
     return { code: 3 };
   }
   const t0 = Date.now();
+  const mark = logMark();
   writeStopRequest(d.rt, restarting);
-  const ms = await waitGone(d.rt.pid, STOP_WAIT_MS);
+  const ms = await waitGone(d.rt.pid, STOP_WAIT_MS, mark);
   if (ms < 0) {
     out(`Asked pid ${d.rt.pid} to stop; it is still running after ${STOP_WAIT_MS / 1000} s. NOT killed.`);
     out(`If it must go, end pid ${d.rt.pid} yourself.`);
@@ -243,11 +315,11 @@ function launch() {
   if (process.env.TESSA_RUNTIME_DIR) {
     out('TESSA_RUNTIME_DIR is set (a test isolation variable). start-tessa.cmd clears it and starts');
     out('the REAL daemon, which this tcli would then not see. Unset it and run again.');
-    return false;
+    return null;
   }
   if (!existsSync(LAUNCHER)) {
     out(`Cannot find ${LAUNCHER}.`);
-    return false;
+    return null;
   }
   const env = Object.fromEntries(Object.entries(process.env).filter(([k]) => !/^TESSA_/i.test(k)));
   // NOT `detached`. DETACHED_PROCESS leaves cmd with no console at all, so any console program
@@ -258,21 +330,69 @@ function launch() {
   // so it is in no job and outlives this process and its shell (measured, T10).
   const child = spawn('cmd.exe', ['/d', '/c', LAUNCHER, '--now'],
     { cwd: REPO, env, stdio: 'ignore', windowsHide: true });
+  const run = { exited: false, code: null, error: null, at: 0 };
+  child.on('exit', (code) => { Object.assign(run, { exited: true, code, at: Date.now() }); });
+  child.on('error', (e) => { Object.assign(run, { exited: true, error: e.code || String(e), at: Date.now() }); });
   child.unref();
-  return true;
+  return run;
 }
 
-async function waitUp(oldPid) {
+async function launchVerified(mark) {
+  for (let attempt = 1; attempt <= LAUNCH_TRIES; attempt++) {
+    const t0 = Date.now();
+    while (!logWritable() && Date.now() - t0 < LOG_FREE_MS) await sleep(100);
+    if (!logWritable()) {
+      out(`${dailyLog()} is held by another process (no write sharing) after ${LOG_FREE_MS / 1000} s; ` +
+        'the launcher writes there, launching anyway.');
+    } else if (Date.now() - t0 >= 200) {
+      out(`${dailyLog()} was held by another process for ${Date.now() - t0} ms; launching now.`);
+    }
+    const run = launch();
+    if (!run) return { ok: false, refused: true };
+    while (Date.now() - t0 < LAUNCH_SEEN_MS) {
+      if (linesSince(mark).some((l) => l.startsWith('==== launcher'))) return { ok: true, attempt };
+      if (run.exited && Date.now() - run.at > 2_000) break;
+      await sleep(100);
+    }
+    if (linesSince(mark).some((l) => l.startsWith('==== launcher'))) return { ok: true, attempt };
+    const how = run.error ? `could not run (${run.error})` :
+      run.exited ? `exited ${run.code} and wrote nothing to the daemon log` :
+      `wrote nothing to the daemon log in ${LAUNCH_SEEN_MS / 1000} s`;
+    out(`Launch attempt ${attempt} of ${LAUNCH_TRIES}: the launcher ${how}; no daemon was started by it.` +
+      (attempt < LAUNCH_TRIES ? ' Launching again.' : ''));
+  }
+  return { ok: false };
+}
+
+async function waitUp(oldPid, mark) {
   const t0 = Date.now();
+  let note = t0 + PROGRESS_MS;
+  let refusedSaid = false;
   while (Date.now() - t0 < READY_WAIT_MS) {
     const rt = readRuntime();
     if (rt && rt.pid !== oldPid && pidAlive(rt.pid)) {
       const p = await ping(rt.pid);   // the run's ONE handshake
       return p.ok ? { ok: true, rt, ms: Date.now() - t0, pingMs: p.ms } : { ok: false, why: p.why };
     }
-    await new Promise((r) => setTimeout(r, 250));
+    const fresh = linesSince(mark);
+    const pid = startedPid(fresh);
+    if (pid !== null && pid !== oldPid && !pidAlive(pid)) {
+      const fresh2 = linesSince(mark);
+      const ended = fresh2.slice().reverse().find((l) => l.includes('] exit: '));
+      return { ok: false, why: `pid ${pid} started and then ended before it was ready - ` +
+        (ended ? ended.slice(ended.indexOf('exit: ')) : `no exit line; the log last said: ${said(fresh2)}`) };
+    }
+    if (!refusedSaid && fresh.some((l) => l.includes('] Tessa is already running'))) {
+      out('  a launch was refused because a daemon already holds the guard - waiting for that one.');
+      refusedSaid = true;
+    }
+    if (Date.now() >= note) {
+      out(`  ${secs(Date.now() - t0)} s: still starting${pid !== null ? ` (pid ${pid})` : ''} - the log says: ${said(fresh)}`);
+      note += PROGRESS_MS;
+    }
+    await sleep(250);
   }
-  return { ok: false, why: `no new runtime.json within ${READY_WAIT_MS / 1000} s` };
+  return { ok: false, why: `no new runtime.json within ${READY_WAIT_MS / 1000} s; the log last said: ${said(linesSince(mark))}` };
 }
 
 const digest = (t) => createHash('sha256').update(t).digest('hex').slice(0, 12);
@@ -290,8 +410,15 @@ async function start() {
     return 1;
   }
   const t0 = Date.now();
-  if (!launch()) return 1;
-  const up = await waitUp(d.rt?.pid ?? -1);
+  const mark = logMark();
+  const l = await launchVerified(mark);
+  if (l.refused) return 1;
+  if (!l.ok) {
+    out(`Tessa was NOT started: the launcher never ran to its first log line in ${LAUNCH_TRIES} attempts.`);
+    tail();
+    return 1;
+  }
+  const up = await waitUp(d.rt?.pid ?? -1, mark);
   if (!up.ok) {
     out(`Tessa did not come up: ${up.why}.`);
     tail();
@@ -307,8 +434,16 @@ async function restart() {
   const s = await stopDaemon(true);
   if (s.code === 1) return 1;
   if (s.code === 3) out('Starting it.');
-  if (!launch()) return 1;
-  const up = await waitUp(s.old?.pid ?? -1);
+  const mark = logMark();
+  const l = await launchVerified(mark);
+  if (l.refused) return 1;
+  if (!l.ok) {
+    out(`She is STOPPED and was NOT restarted: the launcher never ran to its first log line in ${LAUNCH_TRIES} attempts. ` +
+      'Run tcli daemon start.');
+    tail();
+    return 1;
+  }
+  const up = await waitUp(s.old?.pid ?? -1, mark);
   if (!up.ok) {
     out(`The new daemon did not come up: ${up.why}.`);
     tail();

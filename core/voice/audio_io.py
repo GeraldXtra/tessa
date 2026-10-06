@@ -29,6 +29,7 @@ the wire and then throwing most of them away on a 2-core machine.
 
 from __future__ import annotations
 
+import os
 import threading
 import time
 import wave
@@ -42,6 +43,34 @@ import sounddevice as sd
 SAMPLE_RATE = 16_000
 CHANNELS = 1
 DTYPE = "int16"
+
+
+def _resync_stderr() -> None:
+    if os.name != "nt":
+        return
+    try:
+        import ctypes
+        import msvcrt
+
+        k32 = ctypes.WinDLL("kernel32")
+        k32.SetStdHandle.argtypes = [ctypes.c_uint32, ctypes.c_void_p]
+        k32.SetStdHandle(ctypes.c_uint32(-12 & 0xFFFFFFFF), ctypes.c_void_p(msvcrt.get_osfhandle(2)))
+    except Exception:
+        pass
+
+
+_resync_stderr()
+
+
+def rescan_devices() -> None:
+    try:
+        sd._terminate()
+    except Exception:
+        pass
+    try:
+        sd._initialize()
+    finally:
+        _resync_stderr()
 
 
 @dataclass(frozen=True)
@@ -269,6 +298,16 @@ class ArmedMicrophone:
             self._stream.stop()
             self._stream.close()
             self._stream = None
+
+    @property
+    def is_open(self) -> bool:
+        return self._stream is not None
+
+    def reopen(self) -> None:
+        if self._stream is not None:
+            return
+        rescan_devices()
+        self.open()
 
     def flush_ring(self) -> int:
         """

@@ -44,6 +44,11 @@ export const IPC = {
   agentStateChanged: 'tessa:agent-state-changed',
   /** main → renderer, push. evt.turn.timing — one turn's stage breakdown. */
   turnTiming: 'tessa:turn-timing',
+  machineLoad: 'tessa:machine-load',
+  jobs: 'tessa:jobs',
+  voiceLevel: 'tessa:voice-level',
+  voiceWords: 'tessa:voice-words',
+  transcriptPartial: 'tessa:transcript-partial',
 
   /**
    * widget renderer → main, send. The sphere was clicked: open the full Orb.
@@ -210,6 +215,33 @@ export const IPC = {
 export interface AgentStatePush {
   state: string;
   detail: { tool?: string; target?: string; note?: string } | null;
+  ts: string;
+  arrivedAt: number;
+}
+
+export interface MachineLoad {
+  cpu: number;
+  mem: number;
+}
+
+export interface JobView {
+  jobId: string;
+  title: string;
+  status: string;
+  progress: number;
+}
+
+export interface VoiceWords {
+  messageId: string;
+  startedAt: number;
+  words: readonly { text: string; offsetMs: number }[];
+}
+
+export interface TranscriptPartial {
+  messageId: string;
+  role: string;
+  text: string;
+  done: boolean;
 }
 
 /**
@@ -549,26 +581,12 @@ export interface AgentCancelReply {
   message: string;
 }
 
-/* ──────────────────────────────────────────────────────────── sphere tiers */
-
-/**
- * Render rungs for the sphere, worst-case last.
- *
- * Four rungs rather than "WebGL or not" because the failure mode on this
- * machine is not a clean absence — an HD 620 on a legacy driver can hand back a
- * working WebGL2 context that is actually SwiftShader on the CPU, which would
- * quietly eat one of two physical cores.
- */
-export type SphereTier = 'high' | 'med' | 'low' | 'dom';
-
 export interface GpuHint {
   /** Raw `app.getGPUFeatureStatus()` value, e.g. 'enabled', 'disabled_software'. */
   webgl2: string;
   gpuCompositing: string;
   /** True when the status strings themselves say software rendering. */
   softwareSuspected: boolean;
-  /** `--force-tier=<tier>` on the command line. Dev/verification aid. */
-  forcedTier: SphereTier | null;
 }
 
 export interface BootstrapInfo {
@@ -577,25 +595,10 @@ export interface BootstrapInfo {
   /** Gates the state cycler and the frame-time overlay. */
   isDev: boolean;
   gpu: GpuHint;
-  /**
-   * DEV ONLY, 0 = off. Sampling periods for the two buffer read-back probes,
-   * from `--probe-geometry=<ms>` and `--probe-pulse=<ms>`.
-   *
-   * They are separate flags rather than one because they want opposite
-   * cadences and cannot share a run: geometry reads the whole buffer and is
-   * far too expensive to do at the rate the pulse needs, and doing it anyway
-   * would perturb the frame timing of the animation being measured.
-   */
-  probeGeometryMs: number;
-  probePulseMs: number;
-  /**
-   * DEV ONLY, 0 = off. `--probe-limb=<ms>`. Reads an 80x160 patch on the
-   * sphere's limb, which is cheap enough to sustain a 50 ms cadence and is the
-   * one place the spin does not swamp the turbulence. See PROBE_LIMB_W.
-   */
-  probeLimbMs: number;
-  /** DEV ONLY, 0 = off. `--probe-centre=<ms>`. Same patch at the disc centre. */
-  probeCentreMs: number;
+  devKeys: boolean;
+  forceFallback: boolean;
+  clock: { hours: number; raw: boolean } | null;
+  contextLoss: { atMs: number; restoreMs: number } | null;
   /**
    * DEV ONLY. `--dev-overlay` shows the frame-metrics overlay at launch.
    *
@@ -627,83 +630,6 @@ export interface BootstrapInfo {
   theme: string;
   /** Why that theme. Logged, so a silent fallback to cyan cannot look chosen. */
   themeReason: string;
-  /**
-   * DEV ONLY. `--force-depth=<0..1>` — §R.1 depth shading's falloff, or null
-   * for the engine default.
-   *
-   * 1.0 disables the depth term and reproduces the shell exactly as it was
-   * before it existed, so a before/after comparison is one flag on one binary
-   * at one window size rather than two builds.
-   */
-  forcedDepth: number | null;
-  /**
-   * DEV ONLY. `--force-sphere=<rimGain>,<rimSize>,<bodyBright>,<bodySize>`.
-   *
-   * The four numbers that decide whether the shell reads as a surface or as a
-   * translucent cloud. The rim was measured against the reference's own direct
-   * capture rather than judged by eye, and a cold build takes ~100 s — this
-   * flag is what makes a twelve-point sweep affordable. `bodyBright` and
-   * `bodySize` are multipliers on the per-state values, so a sweep cannot
-   * disturb the ordering between the six states.
-   */
-  forcedSphere: {
-    gain: number;
-    size: number;
-    bodyBright: number;
-    bodySize: number;
-    darkSide: number;
-    lambertPow: number;
-    jitter: number;
-    rimPow: number;
-    spreadPow: number;
-  } | null;
-  /**
-   * DEV ONLY. `--force-aura=<0..1>` pins the resource aura's load.
-   *
-   * The aura is driven by the daemon's own cpuPct, which idles at 0-2.8%.
-   * Making that climb means making her work, which needs a voice turn. This
-   * exists so the instrument's visible range can be rendered and measured
-   * rather than argued about.
-   */
-  forcedAura: number | 'cycle' | null;
-  /**
-   * DEV ONLY.
-   * `--force-count=<mainParticles>[,<companionParticles>[,<companionSizeMul>]]`.
-   *
-   * The count is the one sphere parameter that could not be swept without a
-   * rebuild, and it is the parameter the whole particle finding turns on. Point
-   * SIZE already sweeps through `--force-sphere`'s `bodySize` multiplier, so a
-   * count override completes the pair: one build, then a grid of
-   * (count x size) launches measured per-particle rather than by eye.
-   *
-   * It overrides PARTICLE_COUNT for whatever tier is active, so a governor
-   * demotion during a sweep would silently change the thing being measured —
-   * which is why sweeps run focused, short, and are read back from the engine's
-   * own `stats().particles` rather than assumed.
-   */
-  forcedCount: { main: number; companion: number | null; companionSize: number | null } | null;
-  /**
-   * DEV ONLY. `--force-facesat=<0..1>` and `--force-pgain=<0|1>`.
-   *
-   * The two mechanisms added at the end of the last round — the face
-   * desaturation and the palette-luminance normalisation — were the only shell
-   * parameters with NO command-line override, so the only way to test whether
-   * either caused a regression was to edit and rebuild. That is exactly the
-   * class of parameter that needs a flag: one that changes every pixel and that
-   * nobody can bisect without one.
-   *
-   * `facesat` at 1.0 disables the desaturation entirely and reproduces the
-   * pre-faceSat shell. `pgain` at 0 disables the palette normalisation.
-   */
-  forcedFaceSat: number | null;
-  forcedPaletteGain: boolean | null;
-  /**
-   * DEV ONLY. `--force-deform=<0|1>` (Orb round U). 0 renders round T's ROUND
-   * main shell from the same binary — the before/after for the deformation,
-   * taken the way `--force-depth=1` takes the depth term's. Null: the
-   * engine's own default (on).
-   */
-  forcedDeform: boolean | null;
 }
 
 /* ───────────────────────────────────────────────────── the bridge, in types */
@@ -744,6 +670,11 @@ export interface TessaBridge {
   /** Returns an unsubscribe function. Daemon-authoritative agent state. */
   onAgentState(listener: (payload: AgentStatePush) => void): () => void;
   onTurnTiming(listener: (timing: TurnTiming) => void): () => void;
+  onMachineLoad(listener: (load: MachineLoad) => void): () => void;
+  onJobs(listener: (jobs: JobView[]) => void): () => void;
+  onVoiceLevel(listener: (level: number) => void): () => void;
+  onVoiceWords(listener: (words: VoiceWords) => void): () => void;
+  onTranscriptPartial(listener: (partial: TranscriptPartial) => void): () => void;
 
   /** The ambient widget's sphere was clicked — open the full Orb. */
   widgetExpand(): void;

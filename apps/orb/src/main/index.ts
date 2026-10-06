@@ -41,6 +41,8 @@ import {
   type PttMode,
 } from '../shared/ipc-contract.ts';
 import { gpuFeatureSummary, probeGpu } from './gpu-probe.ts';
+import { JobTable, KEEP_TERMINAL_MS } from './job-table.ts';
+import { MachineLoadSampler } from './machine-load.ts';
 import { PttController } from './ptt-controller.ts';
 import { DEFAULT_THEME, isThemeId, loadTheme, orbThemePath, saveTheme } from './theme-state.ts';
 import { createOrbWindow, hardenWebContents, isInstrumentedLaunch } from './window.ts';
@@ -242,14 +244,10 @@ const echoDelayMs = (() => {
   return Number.isFinite(ms) && ms > 0 ? Math.min(ms, 30_000) : 0;
 })();
 
-/** Dev-only. `--probe-geometry=<ms>` / `--probe-pulse=<ms>`; 0 when absent. */
-function probeFlagMs(name: string): number {
-  if (!isDev) return 0;
-  const prefix = `--${name}=`;
+function devFlagValue(prefix: string): string | null {
+  if (!isDev) return null;
   const flag = process.argv.find((a) => a.startsWith(prefix));
-  if (!flag) return 0;
-  const ms = Number.parseFloat(flag.slice(prefix.length));
-  return Number.isFinite(ms) && ms > 0 ? ms : 0;
+  return flag ? flag.slice(prefix.length) : null;
 }
 
 function log(message: string): void {
@@ -403,11 +401,10 @@ if (!instrumentedDevLaunch && !app.requestSingleInstanceLock()) {
 
     // Must be after whenReady — before that the GPU process has not reported in
     // and every feature reads as 'unknown'.
-    const gpu = probeGpu(process.argv);
+    const gpu = probeGpu();
     log(
       `gpu: webgl2=${gpu.webgl2} compositing=${gpu.gpuCompositing}` +
-        `${gpu.softwareSuspected ? ' (software suspected)' : ''}` +
-        `${gpu.forcedTier ? ` forced=${gpu.forcedTier}` : ''}`,
+        `${gpu.softwareSuspected ? ' (software suspected)' : ''}`,
     );
     // The full table, because the key names are not stable across Electron
     // majors and a missing key reads as 'unknown' rather than announcing itself.
@@ -468,113 +465,30 @@ if (!instrumentedDevLaunch && !app.requestSingleInstanceLock()) {
       gpu,
       theme,
       themeReason,
-      forcedAura: (() => {
-        if (!isDev) return null;
-        const flag = process.argv.find((a) => a.startsWith('--force-aura='));
-        if (!flag) return null;
-        const raw = flag.slice('--force-aura='.length);
-        if (raw === 'cycle') return 'cycle' as const;
-        const value = Number.parseFloat(raw);
-        return Number.isFinite(value) && value >= 0 && value <= 1 ? value : null;
-      })(),
-      forcedDepth: (() => {
-        if (!isDev) return null;
-        const flag = process.argv.find((a) => a.startsWith('--force-depth='));
-        if (!flag) return null;
-        const value = Number.parseFloat(flag.slice('--force-depth='.length));
-        return Number.isFinite(value) && value >= 0 && value <= 1 ? value : null;
-      })(),
-      forcedSphere: (() => {
-        if (!isDev) return null;
-        const flag = process.argv.find((a) => a.startsWith('--force-sphere='));
-        if (!flag) return null;
-        const parts = flag.slice('--force-sphere='.length).split(',').map(Number);
-        if (parts.length !== 9 || parts.some((n) => !Number.isFinite(n) || n < 0)) {
-          log(`!! --force-sphere needs nine non-negative numbers, got "${flag}"`);
+      devKeys: isDev && process.argv.includes('--dev-keys'),
+      forceFallback: isDev && process.argv.includes('--force-fallback'),
+      clock: (() => {
+        const raw = devFlagValue('--force-clock-hours=');
+        if (raw === null) return null;
+        const [h, mode] = raw.split(',');
+        const hours = Number.parseFloat(h ?? '');
+        if (!Number.isFinite(hours) || hours <= 0 || hours > 24 * 365) {
+          log(`!! --force-clock-hours needs 0..8760, got "${raw}"`);
           return null;
         }
-        const [gain, size, bodyBright, bodySize, darkSide, lambertPow, jitter, rimPow, spreadPow] =
-          parts as [
-          number,
-          number,
-          number,
-          number,
-          number,
-          number,
-          number,
-          number,
-          number,
-        ];
-        log(
-          `sphere: rimGain=${gain} rimSize=${size} bodyBright=${bodyBright}` +
-            ` bodySize=${bodySize} darkSide=${darkSide} lambertPow=${lambertPow}` +
-            ` latticeJitter=${jitter} rimPow=${rimPow} spreadPow=${spreadPow}`,
-        );
-        return {
-          gain,
-          size,
-          bodyBright,
-          bodySize,
-          darkSide,
-          lambertPow,
-          jitter,
-          rimPow,
-          spreadPow,
-        };
+        log(`plasma: clock offset ${hours} h${mode === 'raw' ? ' RAW (phases not wrapped)' : ''}`);
+        return { hours, raw: mode === 'raw' };
       })(),
-      forcedCount: (() => {
-        if (!isDev) return null;
-        const flag = process.argv.find((a) => a.startsWith('--force-count='));
-        if (!flag) return null;
-        const parts = flag.slice('--force-count='.length).split(',').map(Number);
-        const inRange = (n: number | undefined, lo: number, hi: number): number | null =>
-          typeof n === 'number' && Number.isFinite(n) && n >= lo && n <= hi ? n : null;
-        const main = inRange(parts[0], 64, 200_000);
-        if (main === null) {
-          log(`!! --force-count needs 64..200000, got "${flag}"`);
+      contextLoss: (() => {
+        const raw = devFlagValue('--force-context-loss=');
+        if (raw === null) return null;
+        const [a, b] = raw.split(',').map(Number);
+        if (!Number.isFinite(a) || (a as number) < 0 || !Number.isFinite(b)) {
+          log(`!! --force-context-loss needs <atMs>,<restoreMs|-1>, got "${raw}"`);
           return null;
         }
-        const companionRaw = inRange(parts[1], 16, 200_000);
-        const companion = companionRaw === null ? null : Math.round(companionRaw);
-        const companionSize = inRange(parts[2], 0.05, 8);
-        log(
-          `sphere: forced particle count main=${Math.round(main)} ` +
-            `companion=${companion ?? 'default'} companionSize=${companionSize ?? 'default'}`,
-        );
-        return { main: Math.round(main), companion, companionSize };
+        return { atMs: a as number, restoreMs: b as number };
       })(),
-      forcedFaceSat: (() => {
-        if (!isDev) return null;
-        const flag = process.argv.find((a) => a.startsWith('--force-facesat='));
-        if (!flag) return null;
-        const v = Number.parseFloat(flag.slice('--force-facesat='.length));
-        if (!Number.isFinite(v) || v < 0 || v > 1) {
-          log(`!! --force-facesat needs 0..1, got "${flag}"`);
-          return null;
-        }
-        log(`sphere: forced faceSat=${v}`);
-        return v;
-      })(),
-      forcedPaletteGain: (() => {
-        if (!isDev) return null;
-        const flag = process.argv.find((a) => a.startsWith('--force-pgain='));
-        if (!flag) return null;
-        const on = flag.slice('--force-pgain='.length) !== '0';
-        log(`sphere: forced paletteGain ${on ? 'ON' : 'OFF'}`);
-        return on;
-      })(),
-      forcedDeform: (() => {
-        if (!isDev) return null;
-        const flag = process.argv.find((a) => a.startsWith('--force-deform='));
-        if (!flag) return null;
-        const on = flag.slice('--force-deform='.length) !== '0';
-        log(`sphere: forced deform ${on ? 'ON' : 'OFF (round T shell)'}`);
-        return on;
-      })(),
-      probeGeometryMs: probeFlagMs('probe-geometry'),
-      probePulseMs: probeFlagMs('probe-pulse'),
-      probeLimbMs: probeFlagMs('probe-limb'),
-      probeCentreMs: probeFlagMs('probe-centre'),
       devOverlay: isDev && process.argv.includes('--dev-overlay'),
       forcedState: forcedState(),
       devScript: (() => {
@@ -583,12 +497,22 @@ if (!instrumentedDevLaunch && !app.requestSingleInstanceLock()) {
         return flag ? flag.slice('--dev-drive='.length) : null;
       })(),
     };
-    if (bootstrap.probeGeometryMs || bootstrap.probePulseMs || bootstrap.forcedState) {
+    if (bootstrap.forcedState || bootstrap.devKeys || bootstrap.forceFallback) {
       log(
-        `probe: geometry=${bootstrap.probeGeometryMs}ms pulse=${bootstrap.probePulseMs}ms` +
-          ` state=${bootstrap.forcedState ?? 'live'}`,
+        `dev: state=${bootstrap.forcedState ?? 'live'} keys=${bootstrap.devKeys} ` +
+          `fallback=${bootstrap.forceFallback}`,
       );
     }
+
+    if (isDev && process.argv.includes('--dev-netlog')) {
+      session.defaultSession.webRequest.onBeforeRequest((details, callback) => {
+        log(`NET ${details.resourceType} ${details.url.slice(0, 140)}`);
+        callback({});
+      });
+    }
+
+    const jobTable = new JobTable();
+    let jobPrune: NodeJS.Timeout | null = null;
 
     const broadcast = (channel: string, payload: unknown): void => {
       for (const window of BrowserWindow.getAllWindows()) {
@@ -734,9 +658,31 @@ if (!instrumentedDevLaunch && !app.requestSingleInstanceLock()) {
       }
     };
 
+    const publishJobs = (): void => {
+      const view = jobTable.view(Date.now());
+      broadcast(IPC.jobs, view);
+      if (jobPrune) clearTimeout(jobPrune);
+      jobPrune = view.some((j) => ['succeeded', 'failed', 'cancelled', 'needsReview'].includes(j.status))
+        ? setTimeout(publishJobs, KEEP_TERMINAL_MS + 100)
+        : null;
+    };
+
     connection = new DaemonConnection({
       surfaceVersion: bootstrap.surfaceVersion,
       log,
+      logOutgoing: bootstrap.devKeys,
+
+      onJobEvent: (event) => {
+        log(`job ${event.kind} ${event.jobId}${'status' in event ? ` ${event.status}` : ''}`);
+        jobTable.apply(event, Date.now());
+        publishJobs();
+      },
+      onVoiceLevel: (level) => broadcast(IPC.voiceLevel, level),
+      onVoiceWords: (words) => {
+        log(`voice words: ${words.words.length} for ${words.messageId || '(no id)'}`);
+        broadcast(IPC.voiceWords, words);
+      },
+      onTranscriptPartial: (partial) => broadcast(IPC.transcriptPartial, partial),
 
       onHealth: (health: DaemonHealth) => {
         // Dev-only beat log. The equatorial pulse fires once per arrival, so the
@@ -832,14 +778,14 @@ if (!instrumentedDevLaunch && !app.requestSingleInstanceLock()) {
       // evt.agent.state today, so in practice the Alt+1…6 dev cycler still owns
       // the sphere — but the wiring is live, and the moment core/ grows a brain
       // this takes over with no further change here.
-      onAgentState: (state, detail) => {
+      onAgentState: (state, detail, ts) => {
         // The detail is logged as a COUNT, not as its contents. It has already
         // passed the daemon's redact() and this side's sanitiser, and it is
         // still the field most likely to carry a path or a URL — the process
         // log is a file on disk that outlives the window.
         const n = detail ? Object.values(detail).filter(Boolean).length : 0;
         log(`agent state: ${state}${n ? ` (+${n} detail field${n === 1 ? '' : 's'})` : ''}`);
-        broadcast(IPC.agentStateChanged, { state, detail: detail ?? null });
+        broadcast(IPC.agentStateChanged, { state, detail: detail ?? null, ts, arrivedAt: Date.now() });
       },
 
       // Item 9. Straight through: main validated the closed stage vocabulary
@@ -958,6 +904,10 @@ if (!instrumentedDevLaunch && !app.requestSingleInstanceLock()) {
           const from = lastPhase;
           lastPhase = status.phase;
           log(`connection: ${status.phase}${status.detail ? ` — ${status.detail}` : ''}`);
+          if (status.phase !== 'connected' && jobTable.view(Date.now()).length > 0) {
+            jobTable.clear();
+            publishJobs();
+          }
 
           /**
            * A DROPPED SOCKET NO LONGER CLEARS ANYTHING, and that reversal is
@@ -1318,6 +1268,10 @@ if (!instrumentedDevLaunch && !app.requestSingleInstanceLock()) {
     let orbWindow: BrowserWindow | null = widgetOnly
       ? null
       : createOrbWindow({ isDev, rendererUrl });
+    if (orbWindow && isDev && process.argv.includes('--dev-ontop')) {
+      orbWindow.setAlwaysOnTop(true, 'floating');
+      log('dev: --dev-ontop — this window stays above others for the measurement');
+    }
 
     const showOrb = (): BrowserWindow => {
       if (!orbWindow || orbWindow.isDestroyed()) {
@@ -1341,7 +1295,7 @@ if (!instrumentedDevLaunch && !app.requestSingleInstanceLock()) {
      * that sits over his screen all day, and that is his decision to make, not
      * a surprise on next launch.
      */
-    const wantWidget = process.argv.includes('--widget');
+    const wantWidget = widgetOnly || process.argv.includes('--widget');
     let widgetWindow: BrowserWindow | null = null;
 
     /**
@@ -1753,6 +1707,23 @@ if (!instrumentedDevLaunch && !app.requestSingleInstanceLock()) {
         }, linkDrop.dur);
       }, linkDrop.after);
     }
+
+    const machine = new MachineLoadSampler();
+    const pinnedLoad = (() => {
+      const raw = devFlagValue('--force-load=');
+      if (raw === null) return null;
+      const v = Number.parseFloat(raw);
+      if (!Number.isFinite(v) || v < 0 || v > 1) {
+        log(`!! --force-load needs 0..1, got "${raw}"`);
+        return null;
+      }
+      log(`dev: --force-load=${v} — the load glow is pinned, machine load is NOT shown`);
+      return v;
+    })();
+    setInterval(() => {
+      if (BrowserWindow.getAllWindows().every((w) => w.isDestroyed() || w.isMinimized() || !w.isVisible())) return;
+      broadcast(IPC.machineLoad, pinnedLoad === null ? machine.sample() : { cpu: pinnedLoad, mem: pinnedLoad });
+    }, 1000);
 
     connection.start();
   });

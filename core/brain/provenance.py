@@ -80,6 +80,16 @@ class ExternalContent:
         )
 
 
+_TESSA_ACT = (
+    r"(?:please\s+)?(?:follow|unfollow|retweet|repost|quote|reply|post|tweet|send|dm|message|email|"
+    r"open|read|visit|go\s+to|navigate|browse|click|type|press|download|upload|install|uninstall|"
+    r"run|execute|launch|start|stop|kill|close|shut\s*down|restart|reboot|log\s*(?:off|out|in)|"
+    r"delete|remove|erase|wipe|move|rename|copy|save|write|create|set|change|enable|disable|turn|"
+    r"block|unblock|mute|report|bookmark|share|forward|transfer|pay|buy|approve|confirm|grant|allow|"
+    r"ignore|forget|remember|store|tell|show|give|list|find|search|fetch|add|subscribe|unsubscribe|"
+    r"export|print|sign|use|call|like\s+(?:this|that|the|my|his|her|their|it|every|all|@|https?://))\b"
+)
+
 #: Reported, not relied upon. Detection is a signal for the audit log and for
 #: telling Gerald what the page tried; the REFUSAL comes from the flag, so a
 #: novel phrasing that slips past this list still cannot act.
@@ -98,6 +108,9 @@ _INJECTION_PATTERNS = [
     re.compile(r"ignore\s+(all\s+)?(your|the|these)\s+(rules|instructions|guidelines)", re.I),
     re.compile(r"\b(remember|store|save|note)\s+(this\s+|that\s+|it\s+)?as\s+(a\s+)?(fact|truth)\b", re.I),
     re.compile(r"\b(is|am|are)\s+(a\s+|an\s+)?(trusted|authori[sz]ed)\s+(source|user|admin|account)\b", re.I),
+    re.compile(r"\btessa\s*[,:]\s*" + _TESSA_ACT, re.I),
+    re.compile(r"\b(?:hey|hi|hello|ok|okay|yo)\s+tessa\b[\s,:!.]*" + _TESSA_ACT, re.I),
+    re.compile(r"@tessa\w*[\s,:]+" + _TESSA_ACT, re.I),
 ]
 
 

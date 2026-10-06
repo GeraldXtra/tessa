@@ -14,24 +14,7 @@
 
 import { app } from 'electron';
 
-import type { GpuHint, SphereTier } from '../shared/ipc-contract.ts';
-
-const TIERS: readonly SphereTier[] = ['high', 'med', 'low', 'dom'];
-
-/**
- * `--force-tier=<high|med|low|dom>`.
- *
- * Exists so the fallback rungs can actually be verified. A fallback path that
- * has never been executed is a guess, and this one only triggers on hardware we
- * cannot reproduce on demand.
- */
-export function parseForcedTier(argv: readonly string[]): SphereTier | null {
-  const flag = argv.find((arg) => arg.startsWith('--force-tier='));
-  if (!flag) return null;
-
-  const value = flag.slice('--force-tier='.length);
-  return TIERS.includes(value as SphereTier) ? (value as SphereTier) : null;
-}
+import type { GpuHint } from '../shared/ipc-contract.ts';
 
 /**
  * Must be called after `app.whenReady()` — the GPU process has not reported in
@@ -43,7 +26,7 @@ export function parseForcedTier(argv: readonly string[]): SphereTier | null {
  */
 const SOFTWARE_STATUS = /software|disabled|unavailable/i;
 
-export function probeGpu(argv: readonly string[]): GpuHint {
+export function probeGpu(): GpuHint {
   // Cast rather than lean on Electron's GPUFeatureStatus interface: the field
   // set has changed between major versions, and an unknown key should degrade
   // to 'unknown' rather than fail to compile on the next upgrade.
@@ -71,7 +54,6 @@ export function probeGpu(argv: readonly string[]): GpuHint {
     webgl2,
     gpuCompositing,
     softwareSuspected,
-    forcedTier: parseForcedTier(argv),
   };
 }
 

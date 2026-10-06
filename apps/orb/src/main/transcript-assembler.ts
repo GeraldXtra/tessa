@@ -97,6 +97,14 @@ export class TranscriptAssembler {
     };
   }
 
+  contiguous(messageId: string): string {
+    const entry = this.open.get(messageId);
+    if (!entry) return '';
+    let text = '';
+    for (let seq = 0; entry.parts.has(seq); seq++) text += entry.parts.get(seq) ?? '';
+    return text;
+  }
+
   /** Messages still streaming. Used only for diagnostics. */
   get openCount(): number {
     return this.open.size;

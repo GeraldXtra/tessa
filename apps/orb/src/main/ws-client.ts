@@ -41,6 +41,7 @@ import type { RawData } from 'ws';
 
 import {
   AGENT_STATES,
+  JOB_STATUSES,
   CLOSE_CODES,
   HANDSHAKE_DEADLINE_MS,
   MAX_FRAME_BYTES,
@@ -70,8 +71,11 @@ import {
   type PtySession,
   type CalendarToday,
   type TranscriptLine,
+  type TranscriptPartial,
   type TurnTiming,
+  type VoiceWords,
 } from '../shared/ipc-contract.ts';
+import type { JobEvent } from './job-table.ts';
 import { readRuntimeFile, type RuntimeInfo } from './runtime-file.ts';
 import { TranscriptAssembler, type TranscriptDelta } from './transcript-assembler.ts';
 
@@ -99,7 +103,23 @@ const TOPICS = [
   // it would see only the pending error, or hear the spoken refusal, and look
   // like the card was broken.
   'permission.*',
+  'job.*',
+  'voice.*',
 ] as const;
+
+function cleanText(v: unknown, max: number): string {
+  if (typeof v !== 'string') return '';
+  let out = '';
+  for (const ch of v.slice(0, max)) {
+    const code = ch.codePointAt(0) ?? 0;
+    out += code < 0x20 || code === 0x7f ? ' ' : ch;
+  }
+  return out;
+}
+
+function finiteOrNull(v: unknown): number | null {
+  return typeof v === 'number' && Number.isFinite(v) ? v : null;
+}
 
 /** How much audit history SENTINEL asks for on connect. */
 const AUDIT_HISTORY_LIMIT = 100;
@@ -219,7 +239,12 @@ export interface DaemonConnectionOptions {
   surfaceVersion: string;
   onStatus: (status: ConnectionStatus) => void;
   onHealth: (health: DaemonHealth) => void;
-  onAgentState: (state: AgentState, detail: AgentDetailIn | null) => void;
+  onAgentState: (state: AgentState, detail: AgentDetailIn | null, ts: string) => void;
+  onJobEvent: (event: JobEvent) => void;
+  onVoiceLevel: (level: number) => void;
+  onVoiceWords: (words: VoiceWords) => void;
+  onTranscriptPartial: (partial: TranscriptPartial) => void;
+  logOutgoing?: boolean;
   onTurnTiming: (timing: TurnTiming) => void;
   onCalendarToday: (today: CalendarToday) => void;
   onAuditHistory: (entries: AuditEntry[]) => void;
@@ -397,8 +422,13 @@ export class DaemonConnection {
       return false;
     }
     this.pendingVoice.set(frame.id, action);
-    this.socket.send(JSON.stringify(frame));
+    this.transmit(this.socket, frame.type, JSON.stringify(frame));
     return true;
+  }
+
+  private transmit(socket: WebSocket, type: string, wire: string): void {
+    if (this.opts.logOutgoing) this.opts.log(`WIRE-OUT ${type} bytes=${wire.length}`);
+    socket.send(wire);
   }
 
   /**
@@ -460,7 +490,7 @@ export class DaemonConnection {
       return { ok: false, detail: 'the edited payload makes the frame too large to send' };
     }
     this.pendingPermission.set(frame.id, requestId);
-    this.socket.send(text);
+    this.transmit(this.socket, frame.type, text);
     return { ok: true, frame: text };
   }
 
@@ -516,7 +546,7 @@ export class DaemonConnection {
         });
       }, AGENT_ACK_TIMEOUT_MS);
       this.pendingAgent.set(frame.id, { resolve, timer, sentAt });
-      socket.send(wire);
+      this.transmit(socket, frame.type, wire);
       // Identity and size only — never the text. It is whatever he typed to
       // her, and the process log is a file on disk that outlives the window.
       this.opts.log(
@@ -564,7 +594,7 @@ export class DaemonConnection {
         });
       }, AGENT_ACK_TIMEOUT_MS);
       this.pendingCancel.set(frame.id, { resolve, timer, messageId });
-      socket.send(JSON.stringify(frame));
+      this.transmit(socket, frame.type, JSON.stringify(frame));
       this.opts.log(`CANCEL-OUT id=${frame.id} messageId=${messageId} t=${Date.now()}`);
     });
   }
@@ -655,7 +685,7 @@ export class DaemonConnection {
       protocolVersion: PROTOCOL_VERSION,
     });
     this.helloId = frame.id;
-    this.socket?.send(JSON.stringify(frame));
+    if (this.socket) this.transmit(this.socket, frame.type, JSON.stringify(frame));
 
     // The daemon closes us at 3 s (CONTRACT §2.1). Mirror it client-side so a
     // daemon that accepts the socket and then never answers does not leave the
@@ -1041,7 +1071,21 @@ export class DaemonConnection {
     if (parsed.type === 'evt.transcript.delta') {
       const d = parsed.payload as unknown as TranscriptDelta;
       const finished = this.assembler.push(d);
+      if (!finished && typeof d.messageId === 'string' && d.messageId) {
+        this.opts.onTranscriptPartial({
+          messageId: cleanText(d.messageId, 64),
+          role: cleanText(d.role, 16),
+          text: cleanText(this.assembler.contiguous(d.messageId), 4000),
+          done: false,
+        });
+      }
       if (finished) {
+        this.opts.onTranscriptPartial({
+          messageId: cleanText(finished.messageId, 64),
+          role: cleanText(finished.role, 16),
+          text: cleanText(finished.text, 4000),
+          done: true,
+        });
         if (finished.gaps.length > 0) {
           this.opts.log(
             `transcript ${finished.messageId} completed with ${finished.gaps.length} missing ` +
@@ -1181,7 +1225,7 @@ export class DaemonConnection {
           : undefined;
         const any = detail && (detail.tool || detail.target || detail.note);
 
-        this.opts.onAgentState(evt.state, any ? detail : null);
+        this.opts.onAgentState(evt.state, any ? detail : null, typeof parsed.ts === 'string' ? parsed.ts : '');
       } else {
         this.opts.log(`ignored evt.agent.state with unknown state '${String(evt.state)}'`);
       }
@@ -1223,6 +1267,57 @@ export class DaemonConnection {
           turnId: typeof evt.turnId === 'string' ? evt.turnId : '',
           stages,
         });
+      }
+      return;
+    }
+
+    if (parsed.type.startsWith('evt.job.')) {
+      const p = parsed.payload as Record<string, unknown>;
+      const jobId = cleanText(p['jobId'], 64);
+      if (!jobId) return;
+      const status = typeof p['status'] === 'string' && (JOB_STATUSES as readonly string[]).includes(p['status']) ? p['status'] : null;
+      if (parsed.type === 'evt.job.created') {
+        this.opts.onJobEvent({
+          kind: 'created',
+          jobId,
+          title: cleanText(p['title'], 120),
+          steps: Array.isArray(p['steps']) ? p['steps'].length : 0,
+        });
+      } else if (parsed.type === 'evt.job.progress') {
+        this.opts.onJobEvent({
+          kind: 'progress',
+          jobId,
+          stepIndex: finiteOrNull(p['stepIndex']),
+          pct: finiteOrNull(p['pct']),
+        });
+      } else if (parsed.type === 'evt.job.updated' && status) {
+        this.opts.onJobEvent({ kind: 'updated', jobId, status, stepIndex: finiteOrNull(p['stepIndex']) });
+      } else if (parsed.type === 'evt.job.completed' && status) {
+        this.opts.onJobEvent({ kind: 'completed', jobId, status });
+      }
+      return;
+    }
+
+    if (parsed.type === 'evt.voice.amplitude') {
+      const level = finiteOrNull((parsed.payload as Record<string, unknown>)['level']);
+      if (level !== null) this.opts.onVoiceLevel(Math.max(0, Math.min(1, level)));
+      return;
+    }
+
+    if (parsed.type === 'evt.voice.words') {
+      const p = parsed.payload as Record<string, unknown>;
+      const startedAt = typeof p['startedAt'] === 'string' ? Date.parse(p['startedAt']) : Number.NaN;
+      const rows = Array.isArray(p['words']) ? (p['words'] as unknown[]) : [];
+      const words: { text: string; offsetMs: number }[] = [];
+      for (const row of rows.slice(0, 400)) {
+        const r = row as Record<string, unknown>;
+        const offsetMs = finiteOrNull(r['offsetMs']);
+        const text = cleanText(r['text'], 64);
+        if (offsetMs === null || offsetMs < 0 || !text) continue;
+        words.push({ text, offsetMs });
+      }
+      if (Number.isFinite(startedAt) && words.length > 0) {
+        this.opts.onVoiceWords({ messageId: cleanText(p['messageId'], 64), startedAt, words });
       }
       return;
     }
@@ -1291,13 +1386,13 @@ export class DaemonConnection {
     // holds it in per-connection state, not per-surface.
     const frame = makeEnvelope('cmd.subscribe', { topics: [...TOPICS] });
     this.subscribeId = frame.id;
-    this.socket?.send(JSON.stringify(frame));
+    if (this.socket) this.transmit(this.socket, frame.type, JSON.stringify(frame));
 
     // Subscription only delivers what happens NEXT. SENTINEL needs the log that
     // already exists, so ask for it once per connection.
     const query = makeEnvelope('cmd.audit.query', { limit: AUDIT_HISTORY_LIMIT });
     this.auditQueryId = query.id;
-    this.socket?.send(JSON.stringify(query));
+    if (this.socket) this.transmit(this.socket, query.type, JSON.stringify(query));
 
     // Today's calendar, once per connection, for the TODAY panel. Read-only
     // and answered by Session 1's producer; an older daemon that does not know
@@ -1328,7 +1423,7 @@ export class DaemonConnection {
       payload: {},
     };
     this.calendarQueryId = cal.id;
-    this.socket?.send(JSON.stringify(cal));
+    if (this.socket) this.transmit(this.socket, cal.type, JSON.stringify(cal));
   }
 
   /**

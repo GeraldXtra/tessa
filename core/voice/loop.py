@@ -633,6 +633,10 @@ class VoiceLoop:
         answered = self.executor.answer_confirmation(heard)
         if answered is not None:
             self._stage("confirm.resolved", t0)
+            take_note = getattr(self.executor, "take_plan_note", None)
+            note = take_note() if callable(take_note) else ""
+            if note:
+                answered = f"{note} {answered}".strip()
             if self._on_message is not None:
                 self._on_message("user", heard)
             syn = self.tts.synthesise(answered)
@@ -796,7 +800,7 @@ class VoiceLoop:
         # silently is indistinguishable from one that failed, which is why
         # Gerald pressed the chord three times — he had no way to tell.
         tool_results: list[str] = []
-        if routed.calls:
+        if routed.calls or routed.plan:
             for call in routed.calls:
                 try:
                     self._stage(f"execute.entered {call.name}", t0)
@@ -809,7 +813,22 @@ class VoiceLoop:
                     tool_results.append(action_failed(
                         f"{type(exc).__name__}: {exc}", "Say it again and I will retry."))
                     self.tool_outcomes.append((call.name, False, f"{type(exc).__name__}: {exc}"))
+            if routed.plan:
+                try:
+                    self._stage(f"plan.entered {[s.call.name for s in routed.plan]}", t0)
+                    line, ran = self.executor.start_plan(routed.plan)
+                    tool_results.append(line)
+                    self._stage(f"plan.returned {ran}", t0)
+                    self.tool_outcomes.append(("agent.plan", True, ""))
+                except Exception as exc:
+                    tool_results.append(action_failed(
+                        f"{type(exc).__name__}: {exc}", "Nothing was done. Say it again and I will retry."))
+                    self.tool_outcomes.append(("agent.plan", False, f"{type(exc).__name__}: {exc}"))
             routed.speech = " ".join(r for r in tool_results if r).strip()
+        take_note = getattr(self.executor, "take_plan_note", None)
+        note = take_note() if callable(take_note) else ""
+        if note:
+            routed.speech = f"{note} {routed.speech or ''}".strip()
         # The tool boundary, so `tts_s` stops absorbing execution time.
         t_tools = time.perf_counter()
 

@@ -19,14 +19,14 @@
  * actually shrinks; the sphere is offset inside the scene instead.
  */
 
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 
 import { AGENT_STATES, type AgentState } from '@tessa/protocol';
 
-import type { BootstrapInfo, SphereTier } from '../shared/ipc-contract.ts';
+import type { BootstrapInfo } from '../shared/ipc-contract.ts';
 import { parseDevScript, runDevScript } from './dev-drive.ts';
+import { installDevKeys } from './dev-keys.ts';
 import { tokenPx } from './design-tokens.ts';
-import { applyAura, auraState, auraSweep, setForcedAuraLoad } from './aura.ts';
 import { applyTheme, currentTheme, isThemeId, themeForKey, type ThemeId } from './theme.ts';
 import {
   approvalArrived,
@@ -44,8 +44,8 @@ import {
 } from './state/compose-store.ts';
 import { ApprovalStack } from './layout/ApprovalCard.tsx';
 import { Calendar } from './layout/Calendar.tsx';
+import { Caption } from './layout/Caption.tsx';
 import { Clock } from './layout/Clock.tsx';
-import { CompanionSwitcher } from './layout/CompanionSwitcher.tsx';
 import { Today } from './layout/Today.tsx';
 import { Drawer } from './layout/Drawer.tsx';
 import { startTick } from './state/tick.ts';
@@ -56,10 +56,10 @@ import { Rail } from './layout/Rail.tsx';
 import { StateChip } from './layout/StateChip.tsx';
 import { StatusBar } from './layout/StatusBar.tsx';
 import { railById } from './rails/rails.tsx';
-import { DomSphere } from './scene/DomSphere.tsx';
 import { Sphere } from './scene/Sphere.tsx';
-import { probeSphereTier } from './scene/gpu-tier.ts';
-import type { ProbeReading, SphereEngine } from './scene/sphere-engine.ts';
+import type { MarkReport, PlasmaEngine, RenderPath } from './scene/plasma-engine.ts';
+import { STAGE_BANDS, plasmaLayout, type Box } from './scene/plasma-layout.ts';
+import { captionText, captionWords, jobsStore } from './state/plasma-inputs.ts';
 import {
   agentDetailStore,
   agentStateStore,
@@ -73,7 +73,6 @@ import {
   pushHealthSample,
   pushNotification,
   railStore,
-  tierStore,
   transcriptStore,
   turnTimingStore,
   TRANSCRIPT_MAX,
@@ -94,136 +93,23 @@ import {
 
 /** Status bar height. The column's own width lives in CSS (`--col-w`). */
 const STATUS_H = 28;
+const CARD_MAX_W = 460;
 
-
-/**
- * Widths of the two floating panels, and the window widths they need.
- *
- * CONTRACT §9 sizes them: `--panel-left-w` 240, `--panel-right-w` 280. §R.7
- * forbids a rounded card ON THE CENTRE STAGE and these are rounded cards, so
- * it is worth saying plainly rather than leaving it to look like a rule was
- * broken quietly: the prohibition is about the stage, which is the sphere's
- * ground and must stay void. These sit at the frame's edges, outside the
- * sphere's clear space, which is where §9's own layout rails put a left and a
- * right panel in the first place.
- *
- * Two panels need far more room than the one column did, so they collapse in a
- * stated order rather than all at once. See LAYOUT_STEPS in the report.
- */
-
-/**
- * The largest fraction of the stage's SHORT side the sphere's diameter may
- * take, and the clearance it keeps from a panel.
- *
- * At its natural size the sphere's projected radius is 43% of the canvas
- * height — an 86%-of-height disc, which clipped top and bottom against the
- * inset border in the owner's screenshot. 0.74 is judged, not measured: it
- * leaves a margin wide enough that breath and turbulence, which push the shell
- * a few percent beyond its nominal radius, cannot reach the edge either.
- */
-/**
- * The bands the sphere may not enter, in px.
- *
- * TOP_ROW_H is the state chip and the clock; BOTTOM_CONTROLS_H is the arrows,
- * the wordmark, the indicator and the pill. Both are measured off the rendered
- * elements rather than guessed, and both are subtracted from the height the
- * sphere is fitted into — leaving them out is precisely how it came to be
- * clipped top and bottom.
- */
-const TOP_ROW_H = 52;
-/**
- * 104 -> 68, AND THE 36 px COMES FROM THE REFERENCE'S OWN COMPOSITION.
- *
- * 104 was not padding: measured off a capture, the bottom controls occupy
- * y=624..696 of a 720 px window, which is 72 px of real content plus a 24 px
- * margin, and the sphere's lower edge sat at 613 against a boundary of 616.
- * There were eight pixels of slack in the whole band. So the sphere could not
- * grow by leaving the controls alone, and reporting "37.6% is the honest
- * ceiling" was true only under an assumption nobody had checked.
- *
- * The assumption is that the controls sit BELOW the sphere. The reference does
- * not do that. In image11 the wordmark and the two arrows sit INSIDE the disc's
- * lower region — the sphere's bottom edge is at y=1012 and the wordmark's ink
- * is at y=945..965, about 7% of the diameter inboard — and that overlap is
- * exactly where its extra size comes from.
- *
- * 68 is solved for, not chosen: it is the value that puts the disc at 549 px of
- * 1366, which is the reference's measured 40.2%. The switcher then overlaps the
- * disc's lower edge by ~16 px, which is less overlap than the reference has.
- */
-const BOTTOM_CONTROLS_H = 68;
-
-/**
- * The largest fraction of the stage's short side the sphere's diameter may take.
- *
- * 0.74 -> 0.96, MEASURED not chosen, and it still does not reach the reference.
- *
- * The reference's sphere is 549 window-px of 1366, i.e. 40.2% of the width. On
- * this stage the binding constraint is the HEIGHT, not the width: the clear
- * vertical band is 692 - 52 (top row) - 104 (bottom controls) = 536 px, so the
- * largest disc that fits is 536 px = 39.2% — and that one touches both bands.
- * 0.96 gives 514 px = 37.6%, which clears them with the breath and turbulence
- * overhang included.
- *
- * AND THEN 40.2% TURNED OUT TO BE REACHABLE AFTER ALL, which corrects the
- * paragraph that used to stand here. It read: "40.2% is not reachable at
- * 1366x720... on a 720 px work area the same proportion would put the sphere
- * through the wordmark." The second half is true and is not an obstacle — the
- * reference PUTS the sphere through its own wordmark, which is where its size
- * comes from. See BOTTOM_CONTROLS_H, now 68 rather than 104. At that band the
- * same 0.96 gives 549 px = 40.2%, the reference's figure exactly, and the
- * fill fraction does not move.
- *
- * A CORRECTION TO THE BRIEF, which read the reference as "nearer two thirds".
- * It is not: two thirds of 1366 is 911 px, which does not fit a 692 px stage in
- * any arrangement.
- *
- * It still may not exceed the natural projected size, so this is a ceiling
- * raise rather than a licence to inflate.
- */
-const SPHERE_FILL = 0.96;
-const PANEL_CLEARANCE = 28;
-
-/**
- * The sphere's natural projected radius, as a fraction of canvas height.
- *
- * Derived, not measured: the silhouette of a sphere of radius R at distance d
- * subtends asin(R/d), so its projected radius is
- * `tan(asin(R/CAMERA_Z)) * h / (2 tan(fov/2))`. With R=1, CAMERA_Z=3.2 and
- * fov=42 that is 0.4285 * h. A least-squares circle fitted to a capture's own
- * silhouette measured 297.7 px at h=692, i.e. 0.4302 — 0.4% from the algebra,
- * which is the check that this constant is the real one and not a guess.
- */
-const SPHERE_NATURAL_R = 0.4285;
-
-/**
- * One probe reading as a log line. Three decimals on the offsets: the pass
- * condition for the instrument is that a motionless sphere reads the SAME every
- * time, and a tolerance stated to 0.001 px is a claim that can fail.
- */
-function describeProbe(r: ProbeReading): string {
-  return (
-    `buf=${r.bufW}x${r.bufH} css=${r.cssW}x${r.cssH} ` +
-    `c=${r.cx.toFixed(3)},${r.cy.toFixed(3)} ` +
-    `dx=${r.dx.toFixed(3)} dy=${r.dy.toFixed(3)} ` +
-    `lit=${r.lit} sum=${r.sum} uPulse=${r.uPulse.toFixed(4)} ` +
-    `spin=${r.spinRad.toFixed(4)} ` +
-    `sway=${r.swayYawDeg.toFixed(2)}/${r.swayPitchDeg.toFixed(2)}/${r.swayRollDeg.toFixed(2)} ` +
-    `state=${agentStateStore.get()} resize=${r.resizeReason}`
-  );
+function sameBox(a: Box | null, b: Box | null): boolean {
+  if (a === null || b === null) return a === b;
+  return a.left === b.left && a.top === b.top && a.right === b.right && a.bottom === b.bottom;
 }
 
 export function App() {
-  const tier = useStore(tierStore);
   const rail = useStore(railStore);
   const mic = useStore(micStore);
 
   const [bootstrap, setBootstrap] = useState<BootstrapInfo | null>(null);
-  const [tierReason, setTierReason] = useState('probing…');
-  const [rendererName, setRendererName] = useState('probing…');
-  const [engine, setEngine] = useState<SphereEngine | null>(null);
+  const [engine, setEngine] = useState<PlasmaEngine | null>(null);
   const readStats = engine ? engine.stats : null;
   const [showOverlay, setShowOverlay] = useState(false);
+  const [calBox, setCalBox] = useState<Box | null>(null);
+  const calRef = useRef<HTMLElement>(null);
 
   /**
    * Window size, tracked so the composition can collapse rather than overflow.
@@ -266,7 +152,10 @@ export function App() {
     arrivedAt: number;
     /** How long the dwell held it. */
     queuedMs: number;
+    ts: string;
+    mainAt: number;
   } | null>(null);
+  const arrivals = useRef(new Map<string, { ts: string; mainAt: number }>());
   const lastArrivedState = useRef<string | null>(null);
 
   /* ── bootstrap: GPU tier, then the connection feed ─────────────────────── */
@@ -291,26 +180,16 @@ export function App() {
        * here is the second half of that, because a main that sent something
        * unexpected must produce a NAMED fallback rather than an unset accent.
        */
-      // Before the first heartbeat can arrive, so a forced run never renders
-      // one real frame at the real load first.
-      setForcedAuraLoad(info.forcedAura);
-
       const wanted: ThemeId = isThemeId(info.theme) ? info.theme : 'cyan';
       const steps = applyTheme(wanted);
       window.tessa.reportMetrics(
-        `THEME applied=${wanted} core=${steps.core} body=${steps.body} idle=${steps.idle} ` +
+        `THEME applied=${wanted} mid=${steps.mid} hot=${steps.hot} deep=${steps.deep} bg=${steps.bg} ` +
           `reason="${info.themeReason}"${isThemeId(info.theme) ? '' : ` FALLBACK from ${JSON.stringify(info.theme)}`}`,
       );
 
       // Validated against AGENT_STATES in main before it got here.
       if (info.forcedState) agentStateStore.set(info.forcedState as AgentState);
       if (info.devOverlay) setShowOverlay(true);
-
-      const probe = probeSphereTier(info.gpu);
-      tierStore.set(probe.tier);
-      setTierReason(probe.reason);
-      setRendererName(probe.renderer);
-      console.log(`[orb] sphere tier=${probe.tier} — ${probe.reason} (${probe.renderer})`);
     });
 
     // Pull everything main has already seen, THEN follow the push channels.
@@ -325,7 +204,6 @@ export function App() {
       if (snap.health) {
         healthStore.set(snap.health);
         pushHealthSample(snap.health);
-        applyAura(snap.health);
       }
       if (snap.audit.length > 0) auditStore.set([...snap.audit].reverse().slice(0, AUDIT_MAX));
       if (snap.ptySessions.length > 0) ptySessionsStore.set(snap.ptySessions);
@@ -344,14 +222,17 @@ export function App() {
       // in the shape of a reading.
       if (status.phase !== 'connected') {
         healthStore.set(null);
-        applyAura(null);
       }
     });
     const offHealth = window.tessa.onHealth((health) => {
       healthStore.set(health);
       pushHealthSample(health);
-      applyAura(health);
     });
+    const offJobs = window.tessa.onJobs((jobs) => jobsStore.set(jobs));
+    const offPartial = window.tessa.onTranscriptPartial((partial) => {
+      if (partial.role === 'assistant') captionText(partial.messageId, partial.text, partial.done);
+    });
+    const offWords = window.tessa.onVoiceWords((words) => captionWords(words));
 
     // SENTINEL's two real sources. History seeds the list; the live stream
     // prepends onto it, newest first, bounded so a long-running surface cannot
@@ -386,6 +267,7 @@ export function App() {
       // Her answer closes the typed turn in flight. Bookkeeping for Escape,
       // not a rendering — the line itself is drawn by TRACE from the store.
       composeNoteLine(line);
+      if (line.role === 'assistant') captionText(line.messageId, line.text, true);
     });
 
     // What the daemon said to a cancel. `res.ok` ends the turn; anything
@@ -409,13 +291,15 @@ export function App() {
         // other is a delay this surface chose. Collapsing them into a single
         // "state change → visible" number would quietly turn spec §4's budget
         // into a measurement of my own timer.
-        pendingState.current = { state, at: performance.now(), arrivedAt, queuedMs };
+        const wire = arrivals.current.get(state) ?? { ts: '', mainAt: 0 };
+        pendingState.current = { state, at: performance.now(), arrivedAt, queuedMs, ts: wire.ts, mainAt: wire.mainAt };
         agentStateStore.set(state as AgentState);
       },
     });
 
-    const offAgentState = window.tessa.onAgentState(({ state, detail }) => {
+    const offAgentState = window.tessa.onAgentState(({ state, detail, ts, arrivedAt }) => {
       const at = performance.now();
+      arrivals.current.set(state, { ts, mainAt: arrivedAt });
       const repeat = state === lastArrivedState.current;
       lastArrivedState.current = state;
       window.tessa.reportMetrics(
@@ -443,6 +327,9 @@ export function App() {
       alive = false;
       offConnection();
       offHealth();
+      offJobs();
+      offPartial();
+      offWords();
       offAgentState();
       offTiming();
       offAuditHistory();
@@ -465,6 +352,7 @@ export function App() {
   /* ── keyboard ──────────────────────────────────────────────────────────── */
 
   const isDev = bootstrap?.isDev ?? false;
+  const devKeys = bootstrap?.devKeys ?? false;
 
   /**
    * A dead global chord is news, and it must not depend on winning a race.
@@ -511,12 +399,11 @@ export function App() {
       // renderer owns what is on screen, main owns what survives a restart, and
       // main refuses to write on an instrumented launch.
       window.tessa.setTheme(next);
-      window.tessa.reportMetrics(
-        `THEME switched=${next} core=${steps.core} body=${steps.body} idle=${steps.idle}`,
-      );
+      window.tessa.reportMetrics(`THEME switched=${next} mid=${steps.mid} hot=${steps.hot} bg=${steps.bg}`);
       // The sphere's colours are uniforms resolved once at construction, not
       // CSS. Without this the chrome changes and the sphere does not.
       engine?.retint();
+      engine?.mark(`Theme ${next}`, event.timeStamp, 0);
     }
     window.addEventListener('keydown', onThemeKey);
     return () => window.removeEventListener('keydown', onThemeKey);
@@ -537,11 +424,6 @@ export function App() {
         window.tessa.reportMetrics(
           `APPROVAL-EXPIRED ${requestId} — invalidated locally, nothing sent (CONTRACT §5.1)`,
         );
-      }
-      // One timer, not two. The aura goes flat if the beats stop while the
-      // socket stays up — a held value would be the frozen-instrument lie.
-      if (auraSweep()) {
-        window.tessa.reportMetrics('AURA-STALE no heartbeat in 15s — aura flattened');
       }
     }, 1000);
     return () => window.clearInterval(id);
@@ -701,7 +583,7 @@ export function App() {
 
       const digit =
         /^Digit([1-6])$/.exec(event.code)?.[1] ?? (/^[1-6]$/.test(event.key) ? event.key : null);
-      if (!digit) return;
+      if (!digit || !devKeys) return;
 
       const index = Number.parseInt(digit, 10) - 1;
       const next = AGENT_STATES[index];
@@ -713,110 +595,54 @@ export function App() {
 
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [isDev]);
+  }, [isDev, devKeys]);
 
   /* ── dev metrics → main process log ────────────────────────────────────── */
 
   useEffect(() => {
-    if (!isDev || !readStats) return;
+    if (!isDev || !readStats || !engine) return;
     const id = window.setInterval(() => {
       const s = readStats();
-      if (s.publishedAt === 0) return;
+      const hist = engine.takeIntervals();
+      const bins: string[] = [];
+      hist.forEach((count, ms) => {
+        if (count > 0) bins.push(`${ms}:${count}`);
+      });
+      window.tessa.reportMetrics(`PLASMA-IV ${bins.join(',')}`);
       window.tessa.reportMetrics(
-        `tier=${s.tier} pts=${s.particles} pgain=${s.paletteGain.toFixed(3)} ` +
-      `glow=${s.glowGain.toFixed(3)} ` +
-          `focused=${s.focused} n=${s.samples} ` +
-          `cost=${s.cost.p50.toFixed(2)}/${s.cost.p95.toFixed(2)} ` +
-          `raf=${s.raf.p50.toFixed(1)}/${s.raf.p95.toFixed(1)} ` +
-          `shown=${s.present.p50.toFixed(1)}/${s.present.p95.toFixed(1)} ` +
-          `fps=${s.fps.toFixed(1)} state=${agentStateStore.get()} aura[${auraState()}] ` +
-          `canvas=${s.canvas.cssW}x${s.canvas.cssH}css/${s.canvas.bufW}x${s.canvas.bufH}buf`,
+        `PLASMA path=${s.path} fps=${s.fps.toFixed(1)} target=${s.targetFps.toFixed(0)} ` +
+          `iv=${s.intervalP50.toFixed(2)}/${s.intervalP95.toFixed(2)} dropped=${s.dropped}/${s.samples} ` +
+          `scale=${s.scale.toFixed(2)} gpu=${s.gpuP50.toFixed(2)}/${s.gpuP90.toFixed(2)} ` +
+          `cost=${s.costP50.toFixed(2)}/${s.costP95.toFixed(2)} frames=${s.framesDrawn} ` +
+          `focused=${s.focused} refresh=${s.refreshMs.toFixed(2)} R=${s.radius.toFixed(1)} ` +
+          `maxInput=${s.maxShaderInput.toFixed(2)} load=${s.load.toFixed(3)} cpu=${s.cpu.toFixed(3)} mem=${s.mem.toFixed(3)} heap=${((performance as unknown as { memory?: { usedJSHeapSize: number } }).memory?.usedJSHeapSize ?? 0)} ` +
+          `state=${agentStateStore.get()} canvas=${s.canvas.cssW}x${s.canvas.cssH}css/${s.canvas.bufW}x${s.canvas.bufH}buf ` +
+          `gpuName="${s.rendererShort}" reason="${s.reason}" vis=${document.visibilityState}`,
       );
     }, 5000);
     return () => window.clearInterval(id);
-  }, [isDev, readStats]);
+  }, [isDev, readStats, engine]);
 
-  /* ── dev probes: read the drawing buffer, not the screen ───────────────── */
-
-  const geometryMs = bootstrap?.probeGeometryMs ?? 0;
-  const pulseMs = bootstrap?.probePulseMs ?? 0;
-
-  /**
-   * Geometry (§R.8 item 18f). One full-buffer read per tick.
-   *
-   * Every value the reader needs is on the line, including the buffer and CSS
-   * sizes. A resize that did not take is then self-evident in the data rather
-   * than something to be cross-checked against a window rectangle read from
-   * outside — the previous run reported a 144×20 client and there was no way to
-   * tell from the numbers alone that the leg was void.
-   */
   useEffect(() => {
-    if (!isDev || geometryMs <= 0 || !engine) return;
-    const id = window.setInterval(() => {
-      const r = engine.probeFrame('full');
-      if (r) window.tessa.reportMetrics(`PROBE-GEO ${describeProbe(r)}`);
-    }, geometryMs);
-    return () => window.clearInterval(id);
-  }, [isDev, geometryMs, engine]);
+    if (!devKeys || !engine) return;
+    return installDevKeys({
+      engine,
+      report: (line) => window.tessa.reportMetrics(line),
+      toggleOverlay: () => setShowOverlay((v) => !v),
+    });
+  }, [devKeys, engine]);
 
-  /**
-   * Pulse (§R.1). One centred full-height column per tick.
-   *
-   * `sum` is total luminance over the column, which rises and falls as the band
-   * travels regardless of WHERE it currently is — the failure of the previous
-   * attempt, which watched a ±10 px strip at the equator that the band leaves
-   * almost immediately. `uPulse` rides along as the ground truth: the
-   * brightness series says what is on screen, the uniform says what the engine
-   * thinks it is drawing, and §R.1 needs both to agree.
-   */
+  const contextLoss = bootstrap?.contextLoss ?? null;
   useEffect(() => {
-    if (!isDev || pulseMs <= 0 || !engine) return;
-    const id = window.setInterval(() => {
-      const r = engine.probeFrame('column');
-      if (!r) return;
+    if (!contextLoss || !engine) return;
+    const id = window.setTimeout(() => {
+      const ok = engine.loseContextForTest(contextLoss.restoreMs);
       window.tessa.reportMetrics(
-        `PROBE-PULSE t=${performance.now().toFixed(0)} uPulse=${r.uPulse.toFixed(4)} ` +
-          `sum=${r.sum} dpx=${Number.isFinite(r.pixelDelta) ? r.pixelDelta.toFixed(3) : 'na'} ` +
-          `lit=${r.lit} col=${r.x0}..${r.x1} h=${r.bufH} ` +
-          `held=${Math.round(r.heldMs)} focus=${r.focus.toFixed(3)} ` +
-          `state=${agentStateStore.get()}`,
+        `CONTEXT-LOSS forced=${ok} restoreMs=${contextLoss.restoreMs} t=${performance.now().toFixed(1)}`,
       );
-    }, pulseMs);
-    return () => window.clearInterval(id);
-  }, [isDev, pulseMs, engine]);
-
-  /**
-   * Turbulence RATE (§R.1's intensification). One small limb patch per tick.
-   *
-   * Separate from the pulse probe because it answers a different question with
-   * a different region and a much shorter interval. `pixelDelta` is the whole
-   * point here: the pulse cares about total brightness, this cares about how
-   * fast the picture is changing, and over the wide column the spin decorrelated
-   * the field within a frame and pinned that number.
-   */
-  useEffect(() => {
-    // One probe, two regions. `--probe-limb` reads the silhouette, where
-    // rotation contributes least and radial turbulence most; `--probe-centre`
-    // reads the disc centre, where rotation contributes most. Same 80x160 patch
-    // and the same cost, aimed at opposite questions.
-    const limbMs = bootstrap?.probeLimbMs ?? 0;
-    const centreMs = bootstrap?.probeCentreMs ?? 0;
-    const limbMode = limbMs > 0;
-    const ms = limbMode ? limbMs : centreMs;
-    if (!isDev || ms <= 0 || !engine) return;
-    const id = window.setInterval(() => {
-      const r = engine.probeFrame(limbMode ? 'limb' : 'centre');
-      if (!r) return;
-      window.tessa.reportMetrics(
-        `PROBE-${limbMode ? 'LIMB' : 'CENTRE'} t=${performance.now().toFixed(0)} ` +
-          `dpx=${Number.isFinite(r.pixelDelta) ? r.pixelDelta.toFixed(4) : 'na'} ` +
-          `sum=${r.sum} lit=${r.lit} rect=${r.x0}..${r.x1} ` +
-          `held=${Math.round(r.heldMs)} focus=${r.focus.toFixed(4)} ` +
-          `spin=${r.spinRad.toFixed(4)} state=${agentStateStore.get()}`,
-      );
-    }, ms);
-    return () => window.clearInterval(id);
-  }, [isDev, bootstrap, engine]);
+    }, contextLoss.atMs);
+    return () => window.clearTimeout(id);
+  }, [contextLoss, engine]);
 
   /* ── the drawer, and what it does to the sphere ────────────────────────── */
 
@@ -841,8 +667,6 @@ export function App() {
 
   const canvasW = Math.max(1, viewport.w - railW);
   const canvasH = Math.max(1, viewport.h - STATUS_H);
-  const leftPanelW = tokenPx('--panel-left-w', 240);
-  const rightPanelW = tokenPx('--panel-right-w', 280);
 
   /**
    * BOTH COLUMNS TOGETHER, OR NEITHER.
@@ -875,163 +699,41 @@ export function App() {
     hadCard.current = cardPresent;
   }, [cardPresent]);
 
-  /**
-   * THE STAGE IS BARE BY DEFAULT. His ruling, and it changes the whole view.
-   *
-   * The only permanent panel is the calendar, docked bottom-left. Everything
-   * else lives behind a rail. So the sphere's clear space is the whole stage
-   * minus three things, each of which it must actually avoid:
-   *
-   *   the calendar dock, bottom-left and always there;
-   *   the drawer, when a rail is open;
-   *   the approval card, which is opaque and must never cover the sphere —
-   *     a red-tier approval is exactly when he most needs to read her state.
-   */
-  const calDockW = leftPanelW;
-  const calDockH = 300;
+  useLayoutEffect(() => {
+    const el = calRef.current;
+    const stage = el?.parentElement;
+    if (!el || !stage) return;
+    const measure = (): void => {
+      const a = el.getBoundingClientRect();
+      const s = stage.getBoundingClientRect();
+      const next: Box = {
+        left: Math.round(a.left - s.left),
+        top: Math.round(a.top - s.top),
+        right: Math.round(a.right - s.left),
+        bottom: Math.round(a.bottom - s.top),
+      };
+      setCalBox((prev) => (sameBox(prev, next) ? prev : next));
+    };
+    measure();
+    const ro = new ResizeObserver(measure);
+    ro.observe(el);
+    ro.observe(stage);
+    return () => ro.disconnect();
+  }, []);
 
-  /**
-   * THE RAIL IS ON THE RIGHT NOW, and every x in this function moved with it.
-   *
-   * His ruling, and it settles a collision rather than a preference: the rails
-   * used to sit on the LEFT and open rightward, so PULSE's drawer rendered over
-   * the calendar — the one permanent panel, docked bottom-left. Moving the rail
-   * to the far right puts the rail, its drawer and the approval card into ONE
-   * right-hand column and leaves the whole left side to the calendar.
-   *
-   * Three things had to move together and any one left behind is a bug:
-   *   the stage now starts at x = 0 and ends at viewport.w - railW, so every
-   *     `railW + …` that meant "the left inside edge" became a bare clearance
-   *     and every right-hand bound gained a `- railW`;
-   *   the drawer shift REVERSED — the sphere used to dodge right, away from a
-   *     left drawer, and must now dodge LEFT;
-   *   the canvas origin moved, so `--sphere-cx` and `offsetPx` no longer
-   *     subtract railW.
-   */
-
-  const naturalR = canvasH * SPHERE_NATURAL_R;
-
-  /**
-   * THE SPHERE IS BUILT TO A MEASURED SIZE, not to a guess.
-   *
-   * Measured off reference/v2/image7 with a perspective correction the
-   * measurement validates itself against: the reference's left panel comes out
-   * at 240 window-px and its right panel at ~280, which are exactly this
-   * build's `--panel-left-w` and `--panel-right-w`. Two independent landmarks
-   * landing on known values is what makes the third trustworthy —
-   *
-   *   reference sphere   549 window-px of 1366  =  40.2%
-   *   previous build     396 window-px          =  29.0%
-   *
-   * A CORRECTION TO THE BRIEF, which read the reference as "nearer two thirds".
-   * It is not: two thirds of 1366 is 911 px, which would not fit the 692 px
-   * stage at all. 40% is what the pixels say, and the pixels win.
-   */
-  /**
-   * The approval card SHRINKS the sphere as well as shifting it.
-   *
-   * Shifting alone left 14 px between the two — measured — because the sphere
-   * is now 30% larger than when that arithmetic was written and it simply ran
-   * out of room to move into. A red-tier approval is the one moment he most
-   * needs to read her state, so the sphere gives up size for it rather than
-   * crowding the card.
-   */
-  const cardW = Math.min(460, viewport.w - 32);
-  const clearW =
-    canvasW - 2 * PANEL_CLEARANCE - (cardPresent ? cardW + PANEL_CLEARANCE : 0);
-  const clearH = canvasH - TOP_ROW_H - BOTTOM_CONTROLS_H;
-  const allowedR = Math.min(
-    (clearH * SPHERE_FILL) / 2,
-    (Math.max(140, clearW) * SPHERE_FILL) / 2,
-    naturalR,
-  );
-  const fit = allowedR / naturalR;
-  const sphereR = allowedR;
-
-  /**
-   * The vertical placement, computed before the horizontal one because the
-   * dock test needs it and it does not depend on x.
-   */
-  const targetCyPre = Math.max(
-    STATUS_H + TOP_ROW_H + sphereR,
-    Math.min(
-      STATUS_H + TOP_ROW_H + clearH / 2,
-      viewport.h - BOTTOM_CONTROLS_H - sphereR,
-    ),
-  );
-
-  /**
-   * The sphere centres in what is actually free.
-   *
-   * With the columns gone it has the whole frame — which is the view he will
-   * look at most and the one to get right. The calendar dock is bottom-left and
-   * the sphere sits above and right of it rather than being pushed off centre
-   * by it; only the card and the drawer move it horizontally.
-   */
-  /**
-   * THE CALENDAR DOCK IS A LEFT-SIDE OCCUPANT WHENEVER THE SPHERE REACHES IT.
-   *
-   * At 1366x720 the sphere's lower edge stops above the dock's band and the two
-   * never meet, so the sphere keeps the whole width. At 900x600 they do meet —
-   * measured, `dockClash=true` — and the sphere sat over the calendar, which is
-   * the exact fault he reported in the previous build ("the calendar is
-   * blocking it") arriving from the other direction.
-   *
-   * Not circular: the test uses `targetCy` and `sphereR`, neither of which
-   * depends on the horizontal placement being computed here.
-   */
-  const dockRight = PANEL_CLEARANCE + calDockW;
-  const dockTop = viewport.h - PANEL_CLEARANCE - calDockH;
-  // Where the sphere WOULD sit with the dock ignored…
-  const bareLeft = PANEL_CLEARANCE;
-  const bareRight =
-    viewport.w - railW - (cardPresent ? cardW + PANEL_CLEARANCE : PANEL_CLEARANCE);
-  const cxIfCentred = (bareLeft + bareRight) / 2;
-  // …and whether that actually overlaps the dock's box, in BOTH axes. Testing
-  // only the vertical band pushed the sphere right at 1366x720, where the two
-  // are nowhere near each other.
-  const dockReached =
-    cxIfCentred - sphereR < dockRight && targetCyPre + sphereR > dockTop;
-  const clearLeft = dockReached ? dockRight + PANEL_CLEARANCE : bareLeft;
-  const clearRight = bareRight;
-  /**
-   * THE DRAWER SHIFT FLIPPED WITH THE RAIL — Math.max became Math.min.
-   *
-   * The old line pushed the sphere RIGHT until it cleared a LEFT-hand drawer.
-   * The drawer is on the right now, so the same intent is the mirror: pull the
-   * sphere LEFT until its right edge clears the drawer's left edge. Leaving the
-   * max in place would have shoved the sphere straight into the panel it is
-   * supposed to be avoiding, and it would have looked like the drawer was
-   * "pushing" correctly right up until someone measured the overlap.
-   */
-  const wantCx = rail
-    ? Math.min(
-        (clearLeft + clearRight) / 2,
-        viewport.w - railW - drawerWidth - sphereR - PANEL_CLEARANCE,
-      )
-    : (clearLeft + clearRight) / 2;
-  const targetCx = Math.max(
-    sphereR + PANEL_CLEARANCE,
-    Math.min(wantCx, viewport.w - railW - sphereR - PANEL_CLEARANCE),
-  );
-  /**
-   * Vertically the sphere sits in the band between the top row and the bottom
-   * controls. The calendar dock does NOT push it up: the dock is bottom-LEFT
-   * and the sphere is centred, so at the sizes this runs at they clear each
-   * other in x. `calDockW`/`calDockH` exist so the no-clip proof can state that
-   * rather than leave it to be noticed later.
-   */
-  const targetCy = targetCyPre;
-  /** Does the disc reach into the calendar dock's box? Reported, not assumed. */
-  const dockClash =
-    targetCx - sphereR < PANEL_CLEARANCE + calDockW &&
-    targetCy + sphereR > viewport.h - PANEL_CLEARANCE - calDockH;
-
-  // Engine convention: positive x moves LEFT by x/2, positive y moves UP by y/2.
-  // The canvas starts at x = 0 now that the rail is on the right, so there is
-  // no railW to subtract.
-  const offsetPx = -2 * (targetCx - canvasW / 2);
-  const offsetYPx = -2 * (targetCy - STATUS_H - canvasH / 2);
+  const cardLeft = cardPresent
+    ? canvasW - tokenPx('--sp-5', 24) - Math.min(CARD_MAX_W, canvasW - tokenPx('--sp-6', 32))
+    : null;
+  const layout = plasmaLayout({
+    width: canvasW,
+    height: canvasH,
+    calendar: calBox,
+    drawerLeft: rail ? canvasW - drawerWidth : null,
+    cardLeft,
+  });
+  const offsetPx = layout.offsetX;
+  const offsetYPx = layout.offsetY;
+  const fit = layout.fit;
 
   /**
    * Published to CSS so the aura, the floor and the wordmark track the sphere
@@ -1046,27 +748,30 @@ export function App() {
    * standing on it rather than leaving a stripe behind.
    */
   const stageVars = {
-    '--sphere-cx': `${targetCx.toFixed(1)}px`,
-    '--sphere-cy': `${(targetCy - STATUS_H).toFixed(1)}px`,
-    '--sphere-r': `${sphereR.toFixed(1)}px`,
+    '--sphere-cx': `${layout.cx.toFixed(1)}px`,
+    '--sphere-cy': `${layout.cy.toFixed(1)}px`,
+    '--sphere-r': `${layout.r.toFixed(1)}px`,
+    '--readout-top': `${layout.readoutTop.toFixed(1)}px`,
+    '--readout-w': `${layout.readoutWidth.toFixed(1)}px`,
   } as React.CSSProperties;
 
-  const onTierChange = useCallback((next: SphereTier, reason: string) => {
-    tierStore.set(next);
-    setTierReason(reason);
-    console.warn(`[orb] sphere demoted to ${next}: ${reason}`);
-  }, []);
-
-  const onEngineReady = useCallback((next: SphereEngine) => {
+  const onEngineReady = useCallback((next: PlasmaEngine) => {
     setEngine(next);
   }, []);
 
-  // The fit is a layout consequence, so it is pushed on every layout change
-  // rather than passed as a prop — passing it would re-run Sphere's mount
-  // effect and rebuild the WebGL context, which is the most expensive thing
-  // this app can do (see the note on the depthFar prop).
+  const onPath = useCallback((path: RenderPath, reason: string) => {
+    window.tessa.reportMetrics(`PLASMA-PATH ${path} — ${reason}`);
+  }, []);
+
+  const onMark = useCallback((mark: MarkReport) => {
+    window.tessa.reportMetrics(
+      `MARK "${mark.label}" first=${mark.firstMs.toFixed(2)}ms` +
+        `${mark.budgetMs > 0 ? ` settle=${mark.settleMs === null ? 'none' : `${mark.settleMs.toFixed(2)}ms`} budget=${mark.budgetMs}` : ''}` +
+        `${mark.dropped ? ' DROPPED' : ''}`,
+    );
+  }, []);
+
   useEffect(() => {
-    engine?.setFit(fit);
     // The layout's own numbers, reported so a disagreement between what this
     // computes and what the sphere renders is visible in a log rather than
     // inferred from a screenshot. It was inferred once and the inference was
@@ -1074,50 +779,16 @@ export function App() {
     if (isDev) {
       window.tessa.reportMetrics(
         `LAYOUT canvas=${canvasW}x${canvasH} rail=${rail ?? 'none'} card=${cardPresent} ` +
-          `left=${leftPanelW} right=${rightPanelW} clearW=${clearW.toFixed(0)} ` +
-          `clearH=${clearH.toFixed(0)} naturalR=${naturalR.toFixed(1)} ` +
-          `allowedR=${allowedR.toFixed(1)} fit=${fit.toFixed(3)} ` +
-          `cx=${targetCx.toFixed(0)} cy=${targetCy.toFixed(0)} dockClash=${dockClash}`,
+          `cal=${calBox ? `${calBox.left},${calBox.top}..${calBox.right},${calBox.bottom}` : 'none'} ` +
+          `naturalR=${layout.naturalR.toFixed(1)} R=${layout.r.toFixed(1)} fit=${layout.fit.toFixed(3)} ` +
+          `cx=${layout.cx.toFixed(1)} cy=${layout.cy.toFixed(1)} ` +
+          `ribbon=${layout.ribbonLeft.toFixed(0)}..${layout.ribbonRight.toFixed(0)}x${layout.ribbonTop.toFixed(0)}..${layout.ribbonBottom.toFixed(0)} ` +
+          `readout=${layout.readoutTop.toFixed(0)}+${STAGE_BANDS.readout} w${layout.readoutWidth.toFixed(0)} ` +
+          `calendarClash=${layout.calendarClash}`,
       );
     }
-  }, [
-    engine,
-    fit,
-    canvasW,
-    canvasH,
-    rail,
-    cardPresent,
-    leftPanelW,
-    rightPanelW,
-    clearW,
-    clearH,
-    naturalR,
-    allowedR,
-    targetCx,
-    targetCy,
-    dockClash,
-  ]);
+  }, [isDev, canvasW, canvasH, rail, cardPresent, calBox, layout]);
 
-  /**
-   * The two background companions, placed in the top corners BEHIND the panels.
-   *
-   * ─── what putting them behind the panels costs, measured before, not now ───
-   * The approval-card round measured a transparent panel over a bright sphere
-   * and found it unreadable; these panels carry text he must read. Three things
-   * keep that from repeating, and none of them is luck:
-   *
-   *   the companions are DIM by construction (uBrightness 0.46 against the main
-   *   sphere's 1.10) — see companions.ts;
-   *   the panel fill measured off the reference is within four levels of the
-   *   void — very nearly opaque black — and the panels use --panel, which
-   *   composites to the same neighbourhood;
-   *   they are placed so their CENTRES sit in the gap between the rail and the
-   *   column, so it is their dim outer edge that goes under the panel, never
-   *   their lit limb.
-   *
-   * Fractions of the CANVAS, which is what the engine expects. Recomputed on
-   * every layout change so a resize or a drawer moves them with everything else.
-   */
   /**
    * JOBS OPENS ITSELF WHEN THERE IS SOMETHING IN IT.
    *
@@ -1148,39 +819,6 @@ export function App() {
     if (!jobsActive) openedFor.current.jobs = false;
   }, [jobsActive]);
 
-  useEffect(() => {
-    if (!engine) return;
-    /**
-     * A QUARTER of the main sphere's diameter, measured off image7: the left
-     * companion spans ~110 photo-px and the right ~135 against the main's 480,
-     * i.e. 0.23 and 0.28. They read unmistakably as spheres there and as
-     * slivers here, which was his complaint.
-     *
-     * Expressed against `sphereR` so they grow with it — a fixed world radius
-     * would have them shrink relative to the main sphere every time it grew.
-     *
-     * 0.42 first, which MEASURED at 0.42-0.48 of the main diameter against the
-     * reference's 0.23-0.28 — overshot by nearly two. 0.23 is the corrected
-     * coefficient, and the measurement is why it is not a guess in either
-     * direction.
-     */
-    /**
-     * THE TWO ARE NOT THE SAME SIZE, and in the reference they never were.
-     * Measured on image7, where both are fully in shot: the left companion is
-     * 0.244 of the main disc and the right is 0.320. One shared coefficient was
-     * an averaging error, not a simplification — two identical balls either
-     * side of the sphere read as a symmetrical ornament, which is the opposite
-     * of three companions with their own identities.
-     */
-    const fit = sphereR / Math.max(1, naturalR);
-    const left = Math.max(0.14, Math.min(0.42, fit * 0.24));
-    const right = Math.max(0.14, Math.min(0.42, fit * 0.30));
-    engine.setCompanions([
-      { side: 'left', fx: rail ? 0.34 : 0.17, fy: 0.21, scale: left },
-      { side: 'right', fx: cardPresent ? 0.62 : 0.85, fy: 0.2, scale: right },
-    ]);
-  }, [engine, rail, cardPresent, sphereR, naturalR]);
-
   /**
    * Spec §4: "sphere state change → visible, p95 80 ms, hard fail 200 ms".
    *
@@ -1201,11 +839,15 @@ export function App() {
     // only one comparable to the pre-dwell figures; `queued` is the deliberate
     // wait; `total` is what the owner actually experiences. Reported apart so
     // nobody can read the sum as a rendering result.
+    const wall = performance.timeOrigin + at;
+    const sentAt = pending.ts ? Date.parse(pending.ts) : Number.NaN;
     window.tessa.reportMetrics(
       `STATE-VISIBLE state=${state} ` +
         `queuedMs=${pending.queuedMs.toFixed(2)} ` +
         `drawnMs=${(at - pending.at).toFixed(2)} ` +
-        `totalMs=${(at - pending.arrivedAt).toFixed(2)}`,
+        `totalMs=${(at - pending.arrivedAt).toFixed(2)} ` +
+        `tsToFrameMs=${Number.isFinite(sentAt) ? (wall - sentAt).toFixed(1) : 'na'} ` +
+        `mainToFrameMs=${pending.mainAt > 0 ? (wall - pending.mainAt).toFixed(1) : 'na'}`,
     );
   }, []);
 
@@ -1226,22 +868,17 @@ export function App() {
               axis's "-3m -2m -1m" ruler plus its second rule across the bottom
               cut the composition in half — his words. The telemetry those
               served now lives in the PULSE rail. */}
-          {!bootstrap ? null : tier === 'dom' ? (
-            <DomSphere offsetPx={offsetPx} offsetYPx={offsetYPx} />
-          ) : (
+          {!bootstrap ? null : (
             <Sphere
-              tier={tier}
               offsetPx={offsetPx}
-              onTierChange={onTierChange}
+              offsetYPx={offsetYPx}
+              fit={fit}
+              forceFallback={bootstrap.forceFallback}
+              clock={bootstrap.clock}
               onEngineReady={onEngineReady}
               onStateRendered={onStateRendered}
-              depthFar={bootstrap.forcedDepth}
-              rim={bootstrap.forcedSphere}
-              counts={bootstrap.forcedCount}
-              faceSat={bootstrap.forcedFaceSat}
-              paletteGain={bootstrap.forcedPaletteGain}
-              deform={bootstrap.forcedDeform}
-              offsetYPx={offsetYPx}
+              onMark={onMark}
+              onPath={onPath}
             />
           )}
 
@@ -1251,18 +888,16 @@ export function App() {
           <StateChip />
           <Clock />
 
-          {/* Bottom centre: the arrows he kept pointing at, her name, the
-              indicator, and the pill. See CompanionSwitcher for why the arrows
-              are present-but-disabled rather than absent or fake. */}
-          <CompanionSwitcher />
-
           {/* §R.2 — the HUD sits over the stage, never inside a drawer.
               The approval stack is FIRST and above the others: it interrupts
               where they are ambient, and a toast must never cover the buttons
               of a red action. */}
           <ApprovalStack />
           <NotificationStack />
-          <LastLine />
+          <div className="readout">
+            <Caption />
+            <LastLine />
+          </div>
 
           {/* THE CALENDAR IS THE ONLY PERMANENT PANEL, bottom-left.
               His ruling: nothing else shows until it has something to say or he
@@ -1274,7 +909,7 @@ export function App() {
               It is the one panel always on screen because the month with today
               marked is true without a producer, and because a glanceable
               always-on surface at 2am should say the date. */}
-          <aside className="cal-dock">
+          <aside className="cal-dock" ref={calRef}>
             <Calendar />
             <Today />
           </aside>
@@ -1299,16 +934,7 @@ export function App() {
           owner runs `npm run dev`, so it was true for him, and the overlay sat
           over the lower-left of his sphere every day. --dev-overlay shows it at
           launch; Alt+0 toggles it. */}
-      {isDev && showOverlay ? (
-        <DevOverlay
-          tier={tier}
-          // The DOM rung has no engine; passing the disposed one's closure would
-          // keep the overlay quoting frame times that stopped being measured.
-          readStats={tier === 'dom' ? null : readStats}
-          tierReason={tierReason}
-          rendererName={rendererName}
-        />
-      ) : null}
+      {isDev && showOverlay ? <DevOverlay readStats={readStats} devKeys={devKeys} /> : null}
     </div>
   );
 }

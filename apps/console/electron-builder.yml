@@ -112,6 +112,8 @@ npmRebuild: false
 extraResources:
   - from: resources/tcli.cmd
     to: tcli.cmd
+  - from: resources/tcli-daemon.mjs
+    to: tcli-daemon.mjs
 
 win:
   target:

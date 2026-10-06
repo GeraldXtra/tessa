@@ -23,7 +23,6 @@ import {
   type MicState,
   type OrbNotification,
   type PtySession,
-  type SphereTier,
   type CalendarToday,
   type TranscriptLine,
   type TurnTiming,
@@ -243,9 +242,6 @@ export const calendarStore = createStore<CalendarToday | null>(null);
 /** TRACE: completed transcript lines, oldest first. */
 export const transcriptStore = createStore<readonly TranscriptLine[]>([]);
 export const TRANSCRIPT_MAX = 200;
-
-/** What the sphere actually settled on, after probe and any demotions. */
-export const tierStore = createStore<SphereTier>('med');
 
 /**
  * THE ACTIVE COMPANION — the one the switcher shows and the compose box

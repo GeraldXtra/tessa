@@ -605,6 +605,10 @@ def read_user(handle: str, limit: int = 20) -> dict[str, Any]:
     """
     _require_signed_in()
     clean = str(handle or "").strip().lstrip("@")
+    if " " in clean:
+        # A NAME ("elon musk") resolves through X's people search first — the
+        # sentences round, 2026-10-06; the model may name a person, not a handle.
+        clean = _target_account(clean)[0]
     if not clean or not re.fullmatch(r"[A-Za-z0-9_]{1,15}", clean):
         raise ToolError(f"{handle!r} is not a usable X handle",
                         "Give me the @name as it appears on the profile.")
@@ -953,7 +957,8 @@ def _engage_post(post_id: str, action: str) -> dict[str, Any]:
     return {"post_id": post_id, "who": who, "already": False, "note": ""}
 
 
-def like(post_id: str = "", index: int = 0, confirmed: bool = False) -> dict[str, Any]:
+def like(post_id: str = "", index: int = 0, author: str = "", nth: int = 0,
+         confirmed: bool = False) -> dict[str, Any]:
     """
     AMBER. Like ONE post, by status id.
 
@@ -962,7 +967,31 @@ def like(post_id: str = "", index: int = 0, confirmed: bool = False) -> dict[str
     id and his "yes" acts on that id whatever the page shows by then.
     `confirmed` is set only by the executor after the ledger accepted his yes
     or his repeat; the key is stripped from any caller's args before this.
+
+    BY AUTHOR (the sentences round, 2026-10-06): "like the newest post from
+    @premierleague" arrives as {author, nth}. `_own_newest` reads their
+    profile ONCE and picks their nth newest OWN post — never pinned, never a
+    repost, never an ad — refuses one he already likes, and the hold is raised
+    on that STATUS ID, the ordinal path's shape exactly. The post she named is
+    then the last read, so "unlike it" means that same id.
     """
+    if str(author or "").strip() and not str(post_id or "").strip() and not index:
+        if confirmed:
+            # His yes always re-runs the HELD args, which carry the id. An
+            # author on a confirmed call is not the post he was shown.
+            raise ToolError("that like was not the post you confirmed", "Say it again and I will look again.")
+        n = max(1, int(nth or 1))
+        p, acct = _own_newest(author, n)
+        which, who = _NTH_WORDS.get(n, f"number {n}"), f"@{acct['handle']}"
+        if p.get("liked") is True:
+            raise ToolError(f"you already like {who}'s {which} post {p['id']} (\"{_excerpt(p['text'])}\")",
+                            f"Nothing changed. Say like the {_NTH_WORDS.get(n + 1, 'next')} post from {who} "
+                            f"for the one before it.")
+        _remember([p])
+        when = _when(p.get("ts"))
+        raise ToolHold(f"liking {who}'s {which} post {p['id']} (\"{_excerpt(p['text'])}\""
+                       + (f", {when}" if when else "") + "), publicly, as you",
+                       resolved={"post_id": p["id"]})
     target, who = _resolve_post(post_id, index)
     if not confirmed:
         raise ToolHold(f"liking {who}'s post {target}, publicly, as you" if who
@@ -1165,18 +1194,34 @@ def follow(handle: str = "", confirmed: bool = False) -> dict[str, Any]:
 
     The hold is raised BEFORE any navigation and names the handle he said,
     normalised (no @), which is what the ledger is armed on and what runs.
+
+    A NAME (the sentences round, 2026-10-06) — "follow premier league on X" —
+    is resolved first through X's people search (`_resolve_name`, one read,
+    nothing pressed) and the hold then names "@premierleague (Premier League,
+    46,263,234 followers)": a wrong pick is visible before his yes, and the
+    RESOLVED handle is what is frozen and what his yes runs. An account the
+    search shows he already follows is said, not held.
     """
-    clean = _one_handle(handle)
+    clean, who, rec = _target_account(handle)
     if not confirmed:
-        raise ToolHold(f"following @{clean} on X, publicly, as you", resolved={"handle": clean})
+        if rec is not None and rec.get("following") is True:
+            raise ToolError(f"you already follow {who}", "Nothing changed.")
+        if rec is not None and rec.get("pending"):
+            raise ToolError(f"your follow request to {who} is already pending",
+                            "They approve follows by hand. Nothing changed.")
+        if rec is None:
+            _remember_account({"handle": clean})
+        raise ToolHold(f"following {who} on X, publicly, as you", resolved={"handle": clean})
     return _engage_user(clean, "follow")
 
 
 def unfollow(handle: str = "", confirmed: bool = False) -> dict[str, Any]:
-    """AMBER. The reverse of `follow`, same target rule, same hold, same boundary."""
-    clean = _one_handle(handle)
+    """AMBER. The reverse of `follow`, same target rule (a name is resolved), same hold, same boundary."""
+    clean, who, rec = _target_account(handle)
     if not confirmed:
-        raise ToolHold(f"unfollowing @{clean} on X", resolved={"handle": clean})
+        if rec is not None and rec.get("following") is False and not rec.get("pending"):
+            raise ToolError(f"you do not follow {who}", "Nothing changed.")
+        raise ToolHold(f"unfollowing {who} on X", resolved={"handle": clean})
     return _engage_user(clean, "unfollow")
 
 
@@ -2834,6 +2879,663 @@ def _save_hls(target: str, who: str, stem_who: str, playlists: list[str], fields
             "resolution": "stream", "renditions": [], "ffmpeg": True, "spoken": spoken,
             "external_text": _fenced_text(who, fields, videos), "external_source": "x.save_video"}
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# THE SENTENCES ROUND (2026-10-06): his words reach the tools. Three gaps his
+# own attempts hit on 22 Sep, closed here — all READS, all before any hold:
+#
+#   "Follow Elon musk on X"     -> a NAME is not a handle. `_resolve_name` asks
+#                                  X's own people search and ranks what it
+#                                  finds; the hold then names
+#                                  "@handle (Display Name, N followers)", so a
+#                                  wrong pick is visible BEFORE his yes, and
+#                                  the RESOLVED handle is what is frozen.
+#   "read @mcityXtra_ bio"      -> `read_profile` reads the profile HEADER (bio,
+#                                  counts, his follow state from the page's own
+#                                  button) before it waits for any post.
+#   "like their first 3 post"   -> `like(author=...)` turns "the newest post
+#                                  from @x" into ONE frozen status id: their own
+#                                  newest post, never pinned, never a repost,
+#                                  never an ad, and never one he already likes.
+#
+# WHERE THE NUMBERS COME FROM, seen live 2026-10-06 (signed in, read-only):
+# X's people-search cells carry a name, a handle and a button — no follower
+# count. The page fetches its results as its own data answer (`SearchTimeline`)
+# and a profile as `UserByScreenName`; each user there carries `core.name`,
+# `core.screen_name`, `relationship_counts.followers`, `relationship_
+# perspectives.following`, `parody_commentary_fan_label`, `privacy.protected`
+# and `pinned_items`. `_UserCapture` records those answers while the page loads
+# — the page requested them, not this code — exactly as `_MediaCapture` does
+# for a post's media, and detaches before the call returns.
+# ─────────────────────────────────────────────────────────────────────────────
+
+#: The data answers that carry user records.
+_USER_OPS = ("SearchTimeline", "UserByScreenName")
+#: People results are there in 2.6-2.9 s live; the ceiling allows this machine
+#: under load (a profile header took 13.7 s on 2026-10-06).
+PEOPLE_RESULTS_S = 25.0
+#: How many results are ranked. X's first page returns twenty.
+PEOPLE_MAX = 20
+#: A spoken name is short. Anything longer is a sentence, not a name.
+MAX_NAME_CHARS = 50
+_NAME_SHAPE = re.compile(r"[A-Za-z0-9][A-Za-z0-9 .'&_-]{0,49}")
+#: X's self-declared labels for an account that is NOT the thing it names.
+#: Never picked by a resolution, whatever its followers.
+_NOT_THE_REAL_ONE = frozenset({"parody", "commentary", "fan"})
+#: Profile reads: the HEADER first, then the posts on their own ceiling.
+#: The header hydrates before the posts (live: 2.5 s, and 13.7 s under load).
+PROFILE_HEADER_S = 30.0
+PROFILE_POSTS_S = 15.0
+_PROFILE_HEADER = '[data-testid="UserName"]'
+_PROFILE_EMPTY = '[data-testid="empty_state_header_text"]'
+_PROFILE_NO_POSTS = ("hasn’t posted", "hasn't posted", "has not posted", "no posts yet")
+_PROFILE_PROTECTED = ("these posts are protected", "posts are protected", "only approved followers")
+_PROFILE_SUSPENDED = ("account suspended", "has been suspended")
+_PROFILE_MISSING = ("doesn’t exist", "doesn't exist", "does not exist")
+#: "their" / "them" in "like their newest post": the account she last
+#: resolved, read or looked up FOR HIM — set from the handle he named or the
+#: account a resolution of his words picked, never from text on a page.
+_LAST_ACCOUNT: dict[str, Any] = {}
+_THEIR = frozenset({"their", "them", "they", "his", "her", "its", "theirs"})
+#: How many of an account's posts are looked at to find its newest own post.
+OWN_POSTS_SCAN = 12
+
+
+class _UserCapture(_MediaCapture):
+    """`_MediaCapture`'s shape for the two answers that carry USER records."""
+
+    def _on_response(self, resp: Any) -> None:
+        try:
+            url = str(resp.url)
+        except Exception:  # noqa: BLE001
+            return
+        if "/graphql/" in url and any(f"/{op}" in url for op in _USER_OPS):
+            self.responses.append(resp)
+
+
+def _norm_name(s: Any) -> str:
+    """'Premier League' == 'premier league' == 'PremierLeague': letters and digits only."""
+    return re.sub(r"[^a-z0-9]", "", str(s or "").casefold())
+
+
+def _user_record(u: dict[str, Any]) -> dict[str, Any] | None:
+    """One user out of X's data answer, or None. The old `legacy` block is read as a fallback."""
+    core = u.get("core") if isinstance(u.get("core"), dict) else {}
+    leg = u.get("legacy") if isinstance(u.get("legacy"), dict) else {}
+    handle = str(core.get("screen_name") or leg.get("screen_name") or "")
+    if not re.fullmatch(r"[A-Za-z0-9_]{1,15}", handle):
+        return None
+    counts = u.get("relationship_counts") if isinstance(u.get("relationship_counts"), dict) else {}
+    try:
+        followers: int | None = int(counts.get("followers", leg.get("followers_count")))
+    except (TypeError, ValueError):
+        followers = None
+    rel = u.get("relationship_perspectives") if isinstance(u.get("relationship_perspectives"), dict) else {}
+    ver = u.get("verification") if isinstance(u.get("verification"), dict) else {}
+    priv = u.get("privacy") if isinstance(u.get("privacy"), dict) else {}
+    pinned = (u.get("pinned_items") or {}).get("tweet_ids_str") if isinstance(u.get("pinned_items"), dict) else None
+    following = rel.get("following", leg.get("following"))
+    return {
+        "handle": handle,
+        "name": " ".join(str(core.get("name") or leg.get("name") or "").split())[:60],
+        "followers": followers,
+        "verified": bool(u.get("is_blue_verified") or ver.get("verified")),
+        "label": str(u.get("parody_commentary_fan_label") or "None"),
+        "protected": bool(priv.get("protected", leg.get("protected", False))),
+        "following": following if isinstance(following, bool) else None,
+        "pending": bool(u.get("follow_request_sent")),
+        "pinned": [str(p) for p in (pinned or []) if _POST_ID.fullmatch(str(p))],
+    }
+
+
+def _user_records(bodies: list[Any]) -> list[dict[str, Any]]:
+    """Every distinct user in the answers, in the order X listed them."""
+    out: list[dict[str, Any]] = []
+    seen: set[str] = set()
+
+    def walk(obj: Any) -> None:
+        if isinstance(obj, dict):
+            if obj.get("__typename") == "User" and ("core" in obj or "legacy" in obj):
+                rec = _user_record(obj)
+                if rec is not None and rec["handle"].lower() not in seen:
+                    seen.add(rec["handle"].lower())
+                    out.append(rec)
+            for v in obj.values():
+                walk(v)
+        elif isinstance(obj, list):
+            for v in obj:
+                walk(v)
+
+    for body in bodies:
+        walk(body)
+    return out
+
+
+def _rank(cands: list[dict[str, Any]], query: str) -> list[dict[str, Any]]:
+    """
+    EXACT NAME FIRST, THEN FOLLOWERS. A verification badge only breaks a tie:
+    a paid badge is cheap and impostors carry them. An account X labels
+    parody, commentary or fan is never picked — it says itself it is not the
+    one he named (live: four "Not Elon Musk" parody accounts, 1.6-2.4M followers).
+    """
+    q = _norm_name(query)
+    pool = [c for c in cands if c.get("label", "None").strip().lower() not in _NOT_THE_REAL_ONE]
+
+    def key(c: dict[str, Any]) -> tuple[int, int, int]:
+        exact = _norm_name(c.get("name")) == q or c["handle"].lower() == q
+        return (0 if exact else 1, -(c["followers"] if c.get("followers") is not None else -1),
+                0 if c.get("verified") else 1)
+
+    return sorted(pool, key=key)
+
+
+def _who_line(rec: dict[str, Any]) -> str:
+    """'@premierleague (Premier League, 46,263,234 followers)' — what he reads before his yes."""
+    n = rec.get("followers")
+    count = f"{n:,} follower{'s' if n != 1 else ''}" if isinstance(n, int) else "followers not shown"
+    name = rec.get("name") or rec["handle"]
+    return f"@{rec['handle']} ({name}, {count})"
+
+
+def _remember_account(rec: dict[str, Any]) -> None:
+    _LAST_ACCOUNT.clear()
+    _LAST_ACCOUNT.update(rec)
+
+
+def _resolve_name(raw: Any) -> dict[str, Any]:
+    """
+    A NAME HE SAID -> ONE ACCOUNT, through X's own people search. READ ONLY:
+    one page load, nothing pressed. Zero results is a question back to him,
+    never a guess; the picked account is returned whole so the hold can SHOW
+    it. Raises ToolError on anything it will not resolve.
+    """
+    name = " ".join(str(raw or "").split()).strip(" .,?!\"'")
+    if not name:
+        raise ToolError("there was no account to look for", "Give me the @name.")
+    if _BULK_WORDS.search(name):
+        raise ToolError(f"that names more than one account: {name[:60]!r}",
+                        "I follow or unfollow ONE account at a time, by its @name. Name one.")
+    if len(name) > MAX_NAME_CHARS or not _NAME_SHAPE.fullmatch(name):
+        raise ToolError(f"{name[:60]!r} is not a name I can look up",
+                        "Give me the @name as it appears on the profile.")
+    _require_signed_in()
+    page = _page()
+    cells = '[data-testid="primaryColumn"] [data-testid="UserCell"]'
+    with _UserCapture(page) as cap:
+        _goto(page, f"{X_SEARCH}?{urlencode({'q': name, 'src': 'typed_query', 'f': 'user'})}")
+        _await_present(page, lambda: page.locator(cells), timeout_s=PEOPLE_RESULTS_S)
+        try:
+            n_cells = int(page.locator(cells).count())
+        except Exception:  # noqa: BLE001
+            n_cells = 0
+        if n_cells == 0:
+            _check_reachable(page)
+        bodies = cap.bodies()
+    found = _user_records(bodies)[:PEOPLE_MAX]
+    if not found:
+        raise ToolError(f"X's people search found no account for {name!r}",
+                        "Give me their @name and I will use that.")
+    ranked = _rank(found, name)
+    if not ranked:
+        raise ToolError(f"every account X found for {name!r} is labelled parody, commentary or fan",
+                        "Give me their @name and I will use that.")
+    pick = dict(ranked[0])
+    pick["query"] = name
+    print(f"  x people search {name!r}: {len(found)} user(s), {n_cells} cell(s); picked {_who_line(pick)}"
+          f" following={pick.get('following')}", file=__import__("sys").stderr, flush=True)
+    _remember_account(pick)
+    return pick
+
+
+def _target_account(raw: Any) -> tuple[str, str, dict[str, Any] | None]:
+    """
+    (handle, who-line, record or None) for follow / unfollow / read_profile.
+    An @name or one handle-shaped word is used as he said it (no page load);
+    a NAME is resolved; bulk and junk are refused by `_one_handle`'s rules.
+    """
+    s = " ".join(str(raw or "").split()).strip(" .,?!\"'")
+    # A NAME is more than one word ("premier league", "Elon musk"): a single
+    # token is a handle as he said it, and one that is not handle-shaped is
+    # refused by `_one_handle` — never sent to a people search.
+    if (not s or "@" in s or " " not in s or re.fullmatch(r"[A-Za-z0-9_]{1,15}", s)
+            or _BULK_WORDS.search(s) or not _NAME_SHAPE.fullmatch(s)):
+        clean = _one_handle(s)
+        return clean, f"@{clean}", None
+    rec = _resolve_name(s)
+    return rec["handle"], _who_line(rec), rec
+
+
+def _text_of(node: Any, selector: str) -> str:
+    """One element's text, whitespace-collapsed, or "" — never raises."""
+    try:
+        loc = node.locator(selector)
+        if loc.count():
+            return " ".join((loc.first.inner_text() or "").split())
+    except Exception:  # noqa: BLE001
+        pass
+    return ""
+
+
+def _has(node: Any, selector: str) -> bool:
+    try:
+        return int(node.locator(selector).count()) > 0
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _hard_wall(page: Any) -> None:
+    """`_check_reachable` minus the two phrases X shows TRANSIENTLY in a sidebar."""
+    url = (page.url or "").lower()
+    low = _body(page).lower()
+    if any(m in url for m in _LOGGED_OUT_URL) or any(t in low for t in _LOGGED_OUT_TEXT):
+        raise ToolError("your X session has expired — the browser has a stale cookie",
+                        "Say open X and sign in again. It only takes the once.")
+    wall = next((w for w in _WALL_TEXT if w in low and w not in _TRANSIENT_WALL), None)
+    if wall:
+        raise ToolError(f"X is not letting me read right now — the page says {wall!r}",
+                        "That is their rate limit, not a fault here. Give it a few minutes.")
+
+
+def _post_flags(art: Any) -> dict[str, Any]:
+    """
+    What the page itself says about one post, for the like path: has HE
+    liked it (X's own button flips `like` -> `unlike`), and is it pinned, a
+    repost or an ad (the social-context line / the "Ad" label).
+    """
+    ctx = _text_of(art, '[data-testid="socialContext"]').lower()
+    liked: bool | None = None
+    if _has(art, '[data-testid="unlike"]'):
+        liked = True
+    elif _has(art, '[data-testid="like"]'):
+        liked = False
+    try:
+        lines = [ln.strip() for ln in (art.inner_text() or "").splitlines()]
+    except Exception:  # noqa: BLE001
+        lines = []
+    return {"liked": liked, "pinned": "pinned" in ctx, "repost": "repost" in ctx,
+            "ad": any(ln in ("Ad", "Promoted") for ln in lines)}
+
+
+def _await_header(page: Any) -> float:
+    """Wait for the profile HEADER (or X's empty state). Returns ms, -1 on the ceiling."""
+    t0 = time.monotonic()
+    n = _await_present(page, lambda: page.locator(_PROFILE_HEADER), lambda: page.locator(_PROFILE_EMPTY),
+                       timeout_s=PROFILE_HEADER_S, settle_ms=0)
+    return round((time.monotonic() - t0) * 1000, 1) if n else -1.0
+
+
+def _profile_state(page: Any, handle: str) -> dict[str, Any]:
+    """The header, read off the page. Every field individually guarded."""
+    blob = _text_of(page, _PROFILE_HEADER)
+    m = re.match(r"^(.*?)\s*@([A-Za-z0-9_]{1,15})\b", blob)
+    name, shown = (m.group(1).strip(), m.group(2)) if m else (blob, handle)
+    follow_re, following_re = _follow_names(shown)
+    you_follow = "unknown"
+    try:
+        if page.get_by_role("button", name=following_re).count() == 1:
+            you_follow = "yes"
+        elif page.get_by_role("button", name=follow_re).count() == 1:
+            you_follow = "no"
+        elif page.get_by_role("button", name=_PENDING_NAME).count() == 1:
+            you_follow = "pending"
+    except Exception:  # noqa: BLE001
+        pass
+    followers = (_text_of(page, f'a[href="/{shown}/verified_followers"]')
+                 or _text_of(page, f'a[href="/{shown}/followers"]'))
+    return {
+        "handle": shown, "name": name[:60],
+        "verified": _has(page, f'{_PROFILE_HEADER} [data-testid="icon-verified"]')
+        or _has(page, f'{_PROFILE_HEADER} svg[aria-label="Verified account"]'),
+        "protected": _has(page, f'{_PROFILE_HEADER} [data-testid="icon-lock"]')
+        or _has(page, f'{_PROFILE_HEADER} svg[aria-label="Protected account"]'),
+        "follows_you": bool(_text_of(page, '[data-testid="userFollowIndicator"]')),
+        "bio": _text_of(page, '[data-testid="UserDescription"]')[:400],
+        "location": _text_of(page, '[data-testid="UserLocation"]')[:80],
+        "link": _text_of(page, '[data-testid="UserUrl"]')[:80],
+        "joined": _text_of(page, '[data-testid="UserJoinDate"]')[:40],
+        "followers": followers[:40],
+        "following": _text_of(page, f'a[href="/{shown}/following"]')[:40],
+        "you_follow": you_follow,
+    }
+
+
+def read_profile(handle: str) -> dict[str, Any]:
+    """
+    GREEN. One account's profile HEADER — name, @handle, bio, location, link,
+    joined, followers, following, whether HE follows them (the page's own
+    button), protected / suspended — and whether it has posts. READ ONLY:
+    nothing here clicks, fills or types (AST-checked in core/tests).
+
+    THREE OUTCOMES, never "either X changed or nothing loaded":
+      (i)  header read, posts present;
+      (ii) header read, no posts — said as the page says it: no posts,
+           protected or suspended;
+      (iii) no header after PROFILE_HEADER_S — a refusal that names what the
+           page DID show (X's empty state, a sign-in wall, or a blank page).
+
+    THE BIO IS A STRANGER'S TEXT. It is returned as `external_text`, so the
+    executor fences it and counts any instruction shape in it (INJECTION-SEEN);
+    nothing in it is ever an instruction, and it is not handed to the claim or
+    style stores (no `posts` list is returned).
+    """
+    clean, _who, rec = _target_account(handle)
+    _require_signed_in()
+    page = _page()
+    _goto(page, f"https://x.com/{clean}")
+    header_ms = _await_header(page)
+    _hard_wall(page)
+    low = _body(page).lower()
+    if header_ms < 0 or not _has(page, _PROFILE_HEADER):
+        shown = _text_of(page, _PROFILE_EMPTY)
+        body = _text_of(page, '[data-testid="empty_state_body_text"]')
+        if shown or any(t in low for t in _PROFILE_MISSING + _PROFILE_SUSPENDED):
+            what = f"X's own page says: {shown or 'the account is not there'}" + (f" — {body}" if body else "")
+            raise ToolError(f"@{clean} has no profile to read. {what}",
+                            "Check the spelling and say it again.")
+        col = _text_of(page, '[data-testid="primaryColumn"]')
+        raise ToolError(
+            f"@{clean}'s profile header did not appear within {PROFILE_HEADER_S:.0f} seconds; "
+            f"the page showed " + (f"only: {col[:120]!r}" if col else "a blank page"),
+            "X may be slow right now. Ask me again in a minute. Nothing was clicked.")
+    t1 = time.monotonic()
+    n_posts = _await_posts(page, PROFILE_POSTS_S)
+    posts_ms = round((time.monotonic() - t1) * 1000, 1) if n_posts else -1.0
+    st = _profile_state(page, clean)
+    low = _body(page).lower()
+    suspended = any(t in low for t in _PROFILE_SUSPENDED)
+    if n_posts:
+        state = "posts"
+    elif st["protected"] or any(t in low for t in _PROFILE_PROTECTED):
+        state = "protected"
+    elif suspended:
+        state = "suspended"
+    elif any(t in low for t in _PROFILE_NO_POSTS):
+        state = "no posts"
+    else:
+        state = "posts not loaded"
+    _remember_account({"handle": st["handle"], "name": st["name"]})
+    # THE WAITS, in the daemon log (network waits, not frames): how long X took
+    # to show the header and then the posts — the number U5's "no posts" hid.
+    print(f"  x.read_profile @{st['handle']}: header {header_ms:.0f} ms, posts {posts_ms:.0f} ms, "
+          f"{n_posts} article(s), {state}", file=__import__("sys").stderr, flush=True)
+
+    bits = [f"{st['name'] or st['handle']}, @{st['handle']}" + (", verified" if st["verified"] else "") + "."]
+    bits.append(f"Bio: {st['bio']}." if st["bio"] else "No bio.")
+    counts = ", ".join(x for x in (st["followers"], st["following"]) if x)
+    if counts:
+        bits.append(counts + ".")
+    if st["location"]:
+        bits.append(f"{st['location']}.")
+    if st["joined"]:
+        bits.append(f"{st['joined']}.")
+    bits.append({"yes": "You follow them", "no": "You do not follow them",
+                 "pending": "Your follow request is pending"}.get(st["you_follow"], "I could not see whether you follow them")
+                + (", and they follow you." if st["follows_you"] else "."))
+    bits.append({"posts": "", "protected": "Their posts are protected.", "suspended": "The account is suspended.",
+                 "no posts": "They have no posts.",
+                 "posts not loaded": f"Their posts did not load within {PROFILE_POSTS_S:.0f} seconds."}[state])
+    spoken = " ".join(b for b in bits if b)
+    return {
+        **st, "state": state, "n_posts": n_posts, "header_ms": header_ms, "posts_ms": posts_ms,
+        "resolved_from": rec.get("query", "") if rec else "",
+        "spoken": spoken,
+        # UNTRUSTED: the name, bio, location and link are the account owner's
+        # own words. Fenced like every read in this file.
+        "external_source": f"x.com profile @{st['handle']}",
+        "external_text": "\n".join(x for x in (st["name"], st["bio"], st["location"], st["link"]) if x),
+    }
+
+
+def _account_from(author: Any) -> dict[str, Any]:
+    """'@premierleague' / 'premier league' / 'their' -> one account record (handle at least)."""
+    a = " ".join(str(author or "").split()).strip(" .,?!\"'")
+    if a.lower() in _THEIR:
+        if not _LAST_ACCOUNT.get("handle"):
+            raise ToolError("I do not know whose posts you mean yet",
+                            "Say the @name: like the newest post from @name.")
+        return dict(_LAST_ACCOUNT)
+    clean, _who, rec = _target_account(a)
+    return rec or {"handle": clean}
+
+
+def _own_posts(author: Any) -> tuple[list[dict[str, Any]], dict[str, Any], str]:
+    acct = _account_from(author)
+    handle = acct["handle"]
+    _require_signed_in()
+    page = _page()
+    with _UserCapture(page) as cap:
+        _goto(page, f"https://x.com/{handle}")
+        _await_header(page)
+        _await_posts(page, PROFILE_POSTS_S)
+        bodies = cap.bodies()
+    _check_reachable(page)
+    pinned: set[str] = set()
+    for u in _user_records(bodies):
+        if u["handle"].lower() == handle.lower():
+            pinned.update(u["pinned"])
+            acct = {**u, **{k: v for k, v in acct.items() if k == "query"}}
+    arts = page.get_by_role("article")
+    try:
+        total = int(arts.count())
+    except Exception:  # noqa: BLE001
+        total = 0
+    if total == 0:
+        raise ToolError(f"I cannot find any posts on @{handle}'s profile",
+                        "They may have none, or X has not loaded them. Nothing was pressed.")
+    own: list[dict[str, Any]] = []
+    for i in range(min(total, OWN_POSTS_SCAN)):
+        art = arts.nth(i)
+        p: dict[str, Any] = {**_one_post(art), **_post_flags(art)}
+        if (p["id"] and p["handle"].lstrip("@").lower() == handle.lower() and p["id"] not in pinned
+                and not p["pinned"] and not p["repost"] and not p["ad"]):
+            own.append(p)
+    own.sort(key=lambda p: p.get("ts") or "", reverse=True)
+    print(f"  x own posts @{handle}: {total} article(s) seen, {len(own)} own (pinned {sorted(pinned)}); "
+          f"newest {[(p['id'], p.get('liked')) for p in own[:3]]}", file=__import__("sys").stderr, flush=True)
+    return own, acct, handle
+
+
+def _own_newest(author: Any, nth: int) -> tuple[dict[str, str], dict[str, Any]]:
+    """
+    Their nth newest OWN post — never pinned, never a repost, never an ad —
+    read off their profile (one page load), with HIS like state from the
+    page's own button. READ ONLY. Returns (post, account).
+    """
+    nth = max(1, int(nth or 1))
+    own, acct, handle = _own_posts(author)
+    if len(own) < nth:
+        raise ToolError(f"I can see only {len(own)} post{'s' if len(own) != 1 else ''} of @{handle}'s own "
+                        f"on their profile, not a number {nth}",
+                        "Pinned posts, reposts and ads are never counted. Nothing was pressed.")
+    _remember_account(acct)
+    return own[nth - 1], acct
+
+
+_NTH_WORDS = {1: "newest", 2: "second newest", 3: "third newest", 4: "fourth newest", 5: "fifth newest"}
+
+
+def _excerpt(text: Any, n: int = 50) -> str:
+    t = " ".join(str(text or "").split())
+    return (t[:n].rstrip() + "…") if len(t) > n else t
+
+
+def _when(ts: Any) -> str:
+    """'10:00 today' / '5 Oct' from X's ISO timestamp, in local time; "" if unreadable."""
+    try:
+        from datetime import datetime
+        dt = datetime.fromisoformat(str(ts).replace("Z", "+00:00")).astimezone()
+    except Exception:  # noqa: BLE001
+        return ""
+    now = datetime.now().astimezone()
+    if dt.date() == now.date():
+        return f"{dt:%H:%M} today"
+    return f"{dt.day} {dt:%b}"
+
+
+_PLAN_ACCOUNT = frozenset({"x.follow", "x.unfollow"})
+_PLAN_POST = {"x.like": "liking", "x.unlike": "unliking", "x.repost": "reposting",
+              "x.unrepost": "undoing the repost of", "x.bookmark": "bookmarking",
+              "x.unbookmark": "removing the bookmark on"}
+_PLAN_PUBLIC = frozenset({"x.like", "x.repost"})
+_PLAN_IT = re.compile(r"\b(?:it|that(?:\s+one)?|this(?:\s+one)?|the\s+same\s+(?:one|post))\s*[.!?]*\s*$", re.I)
+_PLAN_OTHER = {"x.post": "posting it", "x.quote": "quoting it", "x.thread": "posting the thread",
+               "x.send_dm": "sending the message", "x.reply": "replying"}
+_COUNT_NAMES = {2: "two", 3: "three", 4: "four", 5: "five"}
+
+
+def _post_words(p: dict[str, Any]) -> str:
+    bits = ", ".join(x for x in ((f"\"{p['excerpt']}\"" if p.get("excerpt") else ""), p.get("when") or "") if x)
+    who = f"{p['who']}'s " if p.get("who") else ""
+    which = f"{p['which']} " if p.get("which") else ""
+    return f"{who}{which}post {p['id']}" + (f" ({bits})" if bits else "")
+
+
+def _post_label(verb: str, p: dict[str, Any]) -> str:
+    if p.get("who") and p.get("which"):
+        return f"{verb} {p['who']}'s {p['which']} post"
+    if p.get("who"):
+        return f"{verb} {p['who']}'s post {p['id']}"
+    return f"{verb} post {p['id']}"
+
+
+def _likes_line(who: str, kept: list[int], first: int, want: int) -> str:
+    if not kept:
+        return ""
+    if len(kept) == want and first == 1 and want > 1:
+        return f"liking {who}'s {_COUNT_NAMES.get(want, str(want))} newest posts"
+    words = [_NTH_WORDS.get(n, f"number {n}") for n in kept]
+    if len(words) == 1:
+        return f"liking {who}'s {words[0]} post"
+    return f"liking {who}'s {', '.join(words[:-1])} and {words[-1]} posts"
+
+
+def plan_targets(asked: list[tuple[str, dict[str, Any], str, int]]) -> tuple[list[dict[str, Any]], list[str]]:
+    steps: list[dict[str, Any]] = []
+    account: dict[str, Any] = {}
+    last: dict[str, Any] = {}
+    profiles: dict[str, tuple[list[dict[str, Any]], dict[str, Any]]] = {}
+    likes: dict[int, tuple[str, int, int]] = {}
+    named: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+
+    def add(group: int, tool: str, args: dict[str, Any], say: str, label: str, skip: str = "") -> dict[str, Any]:
+        key = (tool, json.dumps(args, sort_keys=True))
+        if not skip and key in seen:
+            skip = f"{label[:1].upper()}{label[1:]} is already a step — skipping the repeat."
+        seen.add(key)
+        step = {"tool": tool, "args": args, "say": say, "label": label, "skip": skip, "group": group}
+        steps.append(step)
+        return step
+
+    def whose(author: Any) -> str:
+        a = " ".join(str(author or "").split()).strip(" .,?!\"'")
+        if a.lower() in _THEIR:
+            handle = account.get("handle") or _LAST_ACCOUNT.get("handle")
+            if not handle:
+                raise ToolError("I do not know whose posts you mean yet",
+                                "Say the @name: like the newest post from @name.")
+            return str(handle)
+        clean, who, rec = _target_account(a)
+        account.clear()
+        account.update(handle=clean, who=who, rec=rec)
+        return clean
+
+    def own(handle: str) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        key = handle.lower()
+        if key not in profiles:
+            posts, acct, _said = _own_posts(f"@{handle}")
+            profiles[key] = (posts, acct)
+            _remember_account(acct)
+            following = acct.get("following")
+            for s in steps:
+                if not s.get("unknown") or s["skip"] or str(s["args"].get("handle", "")).lower() != key:
+                    continue
+                if s["tool"] == "x.follow" and following is True:
+                    s["skip"] = f"You already follow @{s['args']['handle']} — skipping that."
+                elif s["tool"] == "x.follow" and acct.get("pending"):
+                    s["skip"] = f"Your follow request to @{s['args']['handle']} is already pending — skipping that."
+                elif s["tool"] == "x.unfollow" and following is False and not acct.get("pending"):
+                    s["skip"] = f"You do not follow @{s['args']['handle']} — skipping that."
+            print(f"  x plan read @{handle}: following={following}; own posts "
+                  f"{[(p['id'], p.get('liked')) for p in posts]}", file=__import__("sys").stderr, flush=True)
+        return profiles[key]
+
+    for g, (tool, args, clause, count) in enumerate(asked):
+        a = dict(args or {})
+        if tool in _PLAN_ACCOUNT:
+            clean, who, rec = _target_account(a.get("handle", ""))
+            account.clear()
+            account.update(handle=clean, who=who, rec=rec)
+            following = rec.get("following") if rec else None
+            pending = bool(rec and rec.get("pending"))
+            if tool == "x.follow":
+                skip = (f"You already follow {who} — skipping that." if following is True
+                        else f"Your follow request to {who} is already pending — skipping that." if pending else "")
+                step = add(g, tool, {"handle": clean}, f"following {who} on X, publicly, as you",
+                           f"following @{clean}", skip)
+            else:
+                skip = f"You do not follow {who} — skipping that." if following is False and not pending else ""
+                step = add(g, tool, {"handle": clean}, f"unfollowing {who} on X", f"unfollowing @{clean}", skip)
+            step["unknown"] = rec is None
+            continue
+        if tool in ("x.like", "x.reply") and a.get("author"):
+            handle = whose(a["author"])
+            posts, acct = own(handle)
+            shown = str(acct.get("handle") or handle)
+            first = max(1, int(a.get("nth") or 1))
+            want = 1 if tool == "x.reply" else max(1, int(count or 1))
+            if len(posts) < first + want - 1:
+                raise ToolError(f"I can see only {len(posts)} of @{shown}'s own posts on their profile, "
+                                f"not {first + want - 1}",
+                                "Pinned posts, reposts and ads are never counted. Nothing was done.")
+            for n in range(first, first + want):
+                raw = posts[n - 1]
+                p = {"id": raw["id"], "who": f"@{shown}", "which": _NTH_WORDS.get(n, f"number {n}"),
+                     "excerpt": _excerpt(raw.get("text")), "when": _when(raw.get("ts")), "liked": raw.get("liked")}
+                last.clear()
+                last.update(p)
+                named.append(raw)
+                if tool == "x.like":
+                    skip = f"You already like @{shown}'s {p['which']} post — skipping that." if p["liked"] is True else ""
+                    step = add(g, tool, {"post_id": p["id"]}, f"liking {_post_words(p)}, publicly, as you",
+                               _post_label("liking", p), skip)
+                    step["nth"] = n
+                else:
+                    text = " ".join(str(a.get("text") or "").split())
+                    add(g, tool, {"text": text, "reply_to_id": p["id"]},
+                        f"replying \"{text}\" to {_post_words(p)}, publicly, as you", _post_label("replying to", p))
+            if tool == "x.like":
+                likes[g] = (f"@{shown}", first, want)
+            continue
+        if tool in _PLAN_POST:
+            if _PLAN_IT.search(clause or "") and last:
+                p = dict(last)
+            else:
+                target, who = _resolve_post(a.get("post_id", ""), a.get("index", 0))
+                fields = next((x for x in _LAST_READ if x.get("id") == target), {})
+                p = {"id": target, "who": f"@{str(who).lstrip('@')}" if who else "", "which": "",
+                     "excerpt": _excerpt(fields.get("text")), "when": _when(fields.get("ts")), "liked": None}
+                last.clear()
+                last.update(p)
+            verb = _PLAN_POST[tool]
+            add(g, tool, {"post_id": p["id"]},
+                f"{verb} {_post_words(p)}" + (", publicly, as you" if tool in _PLAN_PUBLIC else ""),
+                _post_label(verb, p))
+            continue
+        add(g, tool, a, "", _PLAN_OTHER.get(tool, tool))
+    if named:
+        _remember(named)
+    groups: list[str] = []
+    for g in range(len(asked)):
+        live = [s for s in steps if s["group"] == g and not s["skip"]]
+        if not live:
+            groups.append("")
+        elif g in likes:
+            who, first, want = likes[g]
+            groups.append(_likes_line(who, [s["nth"] for s in live], first, want))
+        else:
+            groups.append(" and ".join(s["label"] for s in live))
+    return steps, groups
 
 def open_for_login() -> dict[str, Any]:
     """

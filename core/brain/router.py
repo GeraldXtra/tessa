@@ -90,6 +90,7 @@ class Routed:
     #: confirms still meets the same fence, hold and card as one the regex
     #: chose, and carries origin="agent" on the way.
     doubt: str = ""
+    plan: list = field(default_factory=list)
 
     @property
     def handled_locally(self) -> bool:
@@ -566,7 +567,7 @@ class Router:
         parsed = self._tools.parse(raw)
         if parsed.question:
             return Routed(Intent.TOOL, parsed.question, score=1.0, doubt=parsed.doubt)
-        if parsed.calls:
+        if parsed.calls or parsed.plan:
             # STAMPED HERE, AT THE ONE CHOKE POINT, rather than at each of the
             # ~40 `ToolCall(...)` sites in intents.py. Everything that reaches
             # this line was parsed out of HIS utterance by the regex router, so
@@ -583,7 +584,8 @@ class Router:
             from .intent_model import doubt_for
 
             return Routed(Intent.TOOL, "", score=1.0, calls=calls,
-                          doubt=parsed.doubt or doubt_for(calls))
+                          doubt=parsed.doubt or doubt_for(calls),
+                          plan=[replace(s, call=replace(s.call, origin="human")) for s in parsed.plan])
 
         ranked = score_intents(norm)
         if not ranked:
@@ -703,9 +705,10 @@ _FAILED = [
 ]
 
 _DESTRUCTIVE_HOLD = [
-    "That is destructive, sir. {detail} Say it again and I will do it.",
-    "Hold on, sir. {detail} Confirm once more and it is done.",
+    "That ends a running program, sir. {detail} Anything unsaved in it is lost — yes or no?",
 ]
+
+_KILLS = frozenset({"proc.kill"})
 
 
 def action_done(*, he_did_it_himself: bool = False) -> str:
@@ -723,6 +726,13 @@ def action_failed(reason: str, alternative: str) -> str:
 
 def destructive_hold(detail: str) -> str:
     return _pick(_DESTRUCTIVE_HOLD).format(detail=detail.rstrip(".") + ".")
+
+
+def hold_line(tool: str, detail: str) -> str:
+    if tool in _KILLS or tool.endswith(".kill"):
+        return destructive_hold(detail)
+    what = detail.strip().rstrip(". ")
+    return f"{what[:1].upper()}{what[1:]} — yes or no?"
 
 
 def ambiguous(names: list[str]) -> str:

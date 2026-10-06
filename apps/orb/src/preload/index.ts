@@ -34,9 +34,13 @@ import {
   type Snapshot,
   type AgentStatePush,
   type CalendarToday,
+  type JobView,
+  type MachineLoad,
   type TranscriptLine,
+  type TranscriptPartial,
   type TurnTiming,
   type TessaBridge,
+  type VoiceWords,
 } from '../shared/ipc-contract.ts';
 
 /**
@@ -129,6 +133,11 @@ const bridge: TessaBridge = {
     };
   },
 
+  onMachineLoad: subscribe<MachineLoad>(IPC.machineLoad),
+  onJobs: subscribe<JobView[]>(IPC.jobs),
+  onVoiceLevel: subscribe<number>(IPC.voiceLevel),
+  onVoiceWords: subscribe<VoiceWords>(IPC.voiceWords),
+  onTranscriptPartial: subscribe<TranscriptPartial>(IPC.transcriptPartial),
   onAuditAppended: subscribe<AuditEntry>(IPC.auditAppended),
   onAuditHistory: subscribe<AuditEntry[]>(IPC.auditHistory),
   onPtySessions: subscribe<PtySession[]>(IPC.ptySessions),

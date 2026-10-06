@@ -52,6 +52,7 @@ class Parse:
     #: decide whether a tool is ALLOWED; it only decides whether the parse
     #: is TRUSTED.
     doubt: str = ""
+    plan: list["PlanStep"] = field(default_factory=list)
 
     @property
     def ok(self) -> bool:
@@ -198,6 +199,81 @@ def strip_lead(text: str) -> str:
     return t
 
 
+# ── one sentence, one plan (the sentences round, 2026-10-06) ─────────────────
+
+#: A CLAUSE THAT ONLY ASKS TO BE TOLD THE RESULT of the one before it — "and
+#: tell me what's in the bio", "and read it to me", "and let me know". His U4
+#: ("read @mcityXtra_ bio and tell me what's in the bio") split into two
+#: commands and she answered twice. The action's own answer IS the report, so
+#: a tail like this is dropped — never the first clause, and only the shapes
+#: that point BACK at it: "and tell me what's in my downloads" names its own
+#: target and stays a command.
+_REPORT_TAIL = re.compile(
+    r"^(?:(?:and|then|also)\s+)*(?:"
+    r"(?:tell|show|give)\s+me\s+(?:what\s+(?:it|they|that|she|he)\s+says?|"
+    r"what\s+you\s+(?:find|see|get|got|found)|"
+    r"what(?:'s|\s+is)\s+(?:in|on)\s+(?:it|there|them|the\s+(?:bio|profile|page|post|tweet))|"
+    r"about\s+(?:it|them|that)|the\s+(?:result|answer|bio|details|gist)|"
+    r"if\s+it\b|whether\s+it\b)|"
+    r"read\s+(?:it|that|them|this)\s+(?:out\s+)?(?:to\s+me|aloud|out|back)|"
+    r"let\s+me\s+know|say\s+what\s+(?:it|they)\s+says?|report\s+back)\b", re.I)
+
+#: The X tools whose every call HOLDS or raises a card. One hold at a time is
+#: the ledger's rule (core/brain/confirm.py), so a sentence with two of these
+#: runs the first and NAMES the rest.
+_X_WRITES = frozenset({
+    "x.follow", "x.unfollow", "x.like", "x.unlike", "x.repost", "x.unrepost",
+    "x.bookmark", "x.unbookmark", "x.post", "x.reply", "x.quote", "x.thread", "x.send_dm",
+})
+MAX_PLAN_WRITES = 5
+
+
+@dataclass
+class PlanStep:
+    call: ToolCall
+    clause: str
+    count: int = 1
+
+
+def _plan(out: "Parse", clauses: list[str]) -> None:
+    """
+    Run only up to the FIRST X write; name the rest in one line (`preface`)
+    and hand him the words for the next step (`after`). A like with a count
+    ("their first 3 post") is the same plan on its own: one hold now, the
+    next one named. Every other sentence is left exactly as it was parsed.
+    """
+    counts = [1] * len(out.calls)
+    for i, c in enumerate(out.calls):
+        if c.name == "x.like" and "count" in (c.args or {}):
+            counts[i] = max(1, int(c.args.pop("count") or 0))
+    writes = [i for i, c in enumerate(out.calls) if c.name in _X_WRITES]
+    total = sum(counts[i] for i in writes)
+    by_author = any(c.name == "x.reply" and (c.args or {}).get("author") for c in out.calls)
+    if len(writes) < 2 and total < 2 and not by_author:
+        return
+    if total > MAX_PLAN_WRITES:
+        out.calls = []
+        out.question = (f"That is {total} actions on X in one sentence, Emperor. I take at most "
+                        f"{MAX_PLAN_WRITES} per sentence, each with its own yes, so I did nothing. "
+                        f"Ask for {MAX_PLAN_WRITES} or fewer.")
+        return
+    first = writes[0]
+    out.plan = [PlanStep(c, clauses[i], counts[i]) for i, c in enumerate(out.calls) if i >= first]
+    out.calls = out.calls[:first]
+
+
+#: "open VS Code and Spotify": a later clause with no verb of its own borrows
+#: the first clause's launch verb. Only these three — a launch is green and
+#: reversible; "delete x and y" must never grow a second delete this way.
+_LAUNCH_VERB = re.compile(r"^\s*(open|launch|start)\b", re.I)
+_ANY_VERB = re.compile(
+    r"^\s*(?:open|launch|start|close|read|show|play|pause|stop|kill|delete|remove|move|copy|rename|make|"
+    r"create|find|search|like|unlike|follow|unfollow|post|tweet|reply|send|dm|message|set|turn|tell|give|"
+    r"what|who|how|check|save|download|share|bookmark|repost|retweet|run|type|click|lock|go|take|switch|"
+    r"bring|focus|minimi[sz]e|maximi[sz]e|restore|snap|mute|unmute|install|uninstall|shut|restart|sleep|"
+    r"hibernate|log|sign|list|reveal|screenshot|record)\b", re.I)
+
+
 # ── the parser ───────────────────────────────────────────────────────────────
 
 _VERSION_TOOLS = {"node": "node", "npm": "npm", "python": "python", "git": "git"}
@@ -266,9 +342,21 @@ class IntentParser:
 
     def parse(self, utterance: str) -> Parse:
         out = Parse()
-        for clause in split_clauses(strip_lead(utterance)):
+        # A TRAILING "and tell me what's in it" REPORTS the action before it;
+        # it is not a second command (see `_REPORT_TAIL`). Never the first.
+        clauses = [c for i, c in enumerate(split_clauses(strip_lead(utterance)))
+                   if i == 0 or not _REPORT_TAIL.match(c)]
+        parsed: list[str] = []
+        lead = _LAUNCH_VERB.match(clauses[0]) if clauses else None
+        for i, clause in enumerate(clauses):
             self.doubt = ""
             call, question = self._parse_one(clause)
+            if (call is None and question is None and i > 0 and lead is not None
+                    and not _ANY_VERB.match(clause)):
+                # "open VS Code and Spotify" — the second clause has no verb of
+                # its own; it borrows the first one's open/launch/start. It was
+                # dropped silently before (one launch, not two).
+                call, question = self._parse_one(f"{lead.group(1)} {clause}")
             if self.doubt and not out.doubt:
                 out.doubt = self.doubt
             if question:
@@ -276,8 +364,10 @@ class IntentParser:
                 return out
             if call is None:
                 out.unrouted_text = clause
-                return out
+                break
             out.calls.append(call)
+            parsed.append(clause)
+        _plan(out, parsed)
         return out
 
     def _parse_one(self, clause: str) -> tuple[ToolCall | None, str | None]:

@@ -1,113 +1,72 @@
-/**
- * Dev-only instrumentation. Never rendered in a packaged build.
- *
- * Rebuilt after the first version produced a number that could not be acted on.
- * It showed a single `FRAME` figure that was really the pacer's own output
- * interval — bounded below by the frame target, so it could never read healthy —
- * and it never indicated that a window had gone stale, which it does the moment
- * the app loses focus. Three separate rows now, because they answer three
- * different questions and only one of them is a verdict:
- *
- *   COST     our own work per frame. The only row a tier change can move.
- *   RAF      how often the browser offers a frame at all. The ceiling.
- *   SHOWN    the cadence actually presented. A pacing readout, not a budget.
- *
- * Polls at 2 Hz and only reads what the engine already computed, so the overlay
- * cannot perturb what it measures.
- */
-
 import { useEffect, useState } from 'react';
 
-import type { SphereTier } from '../../shared/ipc-contract.ts';
-import { PARTICLE_COUNT } from '../scene/gpu-tier.ts';
-import { STATS_STALE_AFTER_MS, type SphereStats } from '../scene/sphere-engine.ts';
+import type { PlasmaStats } from '../scene/plasma-engine.ts';
 
 interface DevOverlayProps {
-  /**
-   * The live tier from the store — NOT read off engine stats. When the tier
-   * falls to 'dom' the Sphere unmounts and its engine is disposed, but the
-   * stats closure keeps returning the last object it built. Reading the tier
-   * from there made the overlay report `med · 8,000 pts` while a DOM sphere was
-   * on screen, which is exactly the kind of instrument that makes you trust a
-   * wrong number.
-   */
-  tier: SphereTier;
-  readStats: (() => SphereStats) | null;
-  tierReason: string;
-  rendererName: string;
+  readStats: (() => PlasmaStats) | null;
+  devKeys: boolean;
 }
 
-function pair(label: string, p50: number, p95: number) {
-  return `${label} p50 ${p50.toFixed(p50 < 10 ? 2 : 1)} · p95 ${p95.toFixed(p95 < 10 ? 2 : 1)}ms`;
+function ms(v: number): string {
+  return v.toFixed(v < 10 ? 2 : 1);
 }
 
-export function DevOverlay({ tier, readStats, tierReason, rendererName }: DevOverlayProps) {
-  const [stats, setStats] = useState<SphereStats | null>(null);
-  const [now, setNow] = useState(() => performance.now());
+export function DevOverlay({ readStats, devKeys }: DevOverlayProps) {
+  const [stats, setStats] = useState<PlasmaStats | null>(null);
 
   useEffect(() => {
     if (!readStats) {
       setStats(null);
       return;
     }
-    const id = window.setInterval(() => {
-      setStats(readStats());
-      setNow(performance.now());
-    }, 500);
+    const id = window.setInterval(() => setStats(readStats()), 500);
     return () => window.clearInterval(id);
   }, [readStats]);
 
-  const published = stats && stats.publishedAt > 0;
-  const ageMs = published ? now - stats.publishedAt : 0;
-  const stale = published ? ageMs > STATS_STALE_AFTER_MS : false;
-
-  // A window collected while unfocused was paced to 10 fps deliberately. Saying
-  // so is the difference between "slow" and "idling on purpose".
-  const qualifier = !published
-    ? 'collecting…'
-    : stale
-      ? `stale ${(ageMs / 1000).toFixed(0)}s`
-      : stats.focused
-        ? `${stats.samples} frames`
-        : 'unfocused — paced to 10fps';
+  if (!stats) return <div className="dev-overlay">no engine</div>;
 
   return (
-    <div className="dev-overlay" data-stale={stale || (published && !stats.focused)}>
+    <div className="dev-overlay" data-stale={!stats.focused}>
       <div className="dev-overlay__row">
-        <span className="dev-overlay__key">tier</span>
-        <span>{`${tier} · ${PARTICLE_COUNT[tier].toLocaleString()} pts`}</span>
+        <span className="dev-overlay__key">fps</span>
+        <span>{`${stats.fps.toFixed(1)} · target ${stats.targetFps.toFixed(0)} · refresh ${ms(stats.refreshMs)}ms`}</span>
       </div>
       <div className="dev-overlay__row">
-        <span className="dev-overlay__key">cost</span>
-        <span>{published ? pair('', stats.cost.p50, stats.cost.p95) : '—'}</span>
-      </div>
-      <div className="dev-overlay__row">
-        <span className="dev-overlay__key">raf</span>
-        <span>{published ? pair('', stats.raf.p50, stats.raf.p95) : '—'}</span>
-      </div>
-      <div className="dev-overlay__row">
-        <span className="dev-overlay__key">shown</span>
-        <span>
-          {published
-            ? `${pair('', stats.present.p50, stats.present.p95)} · ${stats.fps.toFixed(0)}fps`
-            : '—'}
-        </span>
-      </div>
-      <div className="dev-overlay__row">
-        <span className="dev-overlay__key">window</span>
-        <span>{qualifier}</span>
+        <span className="dev-overlay__key">frame</span>
+        <span>{`p50 ${ms(stats.intervalP50)} · p95 ${ms(stats.intervalP95)}ms · dropped ${stats.dropped}/${stats.samples}`}</span>
       </div>
       <div className="dev-overlay__row">
         <span className="dev-overlay__key">gpu</span>
-        <span className="dev-overlay__wrap">{rendererName}</span>
+        <span>{stats.timerQuery ? `p50 ${ms(stats.gpuP50)} · p90 ${ms(stats.gpuP90)}ms` : 'no timer query'}</span>
       </div>
       <div className="dev-overlay__row">
-        <span className="dev-overlay__key">why</span>
-        <span className="dev-overlay__wrap">{tierReason}</span>
+        <span className="dev-overlay__key">scale</span>
+        <span>{`${stats.scale.toFixed(2)} · ${stats.canvas.bufW}x${stats.canvas.bufH} · R ${stats.radius.toFixed(0)}px`}</span>
+      </div>
+      <div className="dev-overlay__row">
+        <span className="dev-overlay__key">change</span>
+        <span>
+          {`p95 ${stats.changeCount > 0 ? `${stats.changeP95.toFixed(0)}ms` : '--'}`}
+          {stats.lastSettle
+            ? ` · ${stats.lastSettle.label} settled ${stats.lastSettle.ms.toFixed(0)} of ${stats.lastSettle.budget}ms`
+            : ''}
+        </span>
+      </div>
+      <div className="dev-overlay__row">
+        <span className="dev-overlay__key">path</span>
+        <span className="dev-overlay__wrap">{`${stats.path} — ${stats.reason}`}</span>
+      </div>
+      <div className="dev-overlay__row">
+        <span className="dev-overlay__key">gpu</span>
+        <span className="dev-overlay__wrap">{stats.rendererShort}</span>
       </div>
       <div className="dev-overlay__row dev-overlay__row--hint">
         <span className="dev-overlay__key">keys</span>
-        <span>alt+1…6 states · alt+0 hides this · esc closes drawer</span>
+        <span>
+          {devKeys
+            ? '1-6 states · W wake · I interrupt · T threat · D daemon · J job · M mute · S summon · N night · K 30fps · P reel · H hide'
+            : 'alt+1…6 states · alt+0 hides this · esc closes drawer'}
+        </span>
       </div>
     </div>
   );
