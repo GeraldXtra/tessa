@@ -15,17 +15,18 @@ import { useSyncExternalStore } from 'react';
 
 import type { AgentState } from '@tessa/protocol';
 
-import type {
-  AuditEntry,
-  ConnectionStatus,
-  DaemonHealth,
-  MicState,
-  OrbNotification,
-  PtySession,
-  SphereTier,
-  CalendarToday,
-  TranscriptLine,
-  TurnTiming,
+import {
+  DEFAULT_COMPANION,
+  type AuditEntry,
+  type ConnectionStatus,
+  type DaemonHealth,
+  type MicState,
+  type OrbNotification,
+  type PtySession,
+  type SphereTier,
+  type CalendarToday,
+  type TranscriptLine,
+  type TurnTiming,
 } from '../../shared/ipc-contract.ts';
 
 // Re-exported so the components that render notifications keep importing the
@@ -120,7 +121,13 @@ export const healthStore = createStore<DaemonHealth | null>(null);
  *   JOBS    the status card AND the jobs list. They are one question — what is
  *           she doing — and Active/Done/Companions is the header of that list
  *           rather than a panel of its own.
- *   CHAT    the typed conversation's shape.
+ *
+ * CHAT IS GONE, and its function moved rather than died. It was the typed
+ * conversation's SHAPE with a disabled box that said "not connected yet";
+ * the typed input now lives at the bottom of TRACE (layout/Composer.tsx),
+ * because the conversation is ONE thread — what he types and what he says
+ * land on the same `evt.transcript.message` — and a second rail rendering the
+ * same lines would have been the second renderer the brief forbids.
  *
  * The rails, §R.3. Order is fixed and is the order they render.
  *
@@ -141,7 +148,6 @@ export const RAIL_IDS = [
   'sentinel',
   'pulse',
   'jobs',
-  'chat',
   'arsenal',
   'recall',
   'signal',
@@ -240,3 +246,24 @@ export const TRANSCRIPT_MAX = 200;
 
 /** What the sphere actually settled on, after probe and any demotions. */
 export const tierStore = createStore<SphereTier>('med');
+
+/**
+ * THE ACTIVE COMPANION — the one the switcher shows and the compose box
+ * addresses. One record, read by both, so the name above the box and the
+ * `companionId` on the wire cannot come from two different places.
+ *
+ * Seeded with the only companion that exists (see DEFAULT_COMPANION). Nothing
+ * writes it yet: `evt.companion.roster` is never emitted and the switcher's
+ * arrows are disabled for that reason. When the roster lands, the switcher
+ * sets this and the box follows with no change of its own.
+ */
+export const companionStore = createStore<{ id: string; name: string }>({
+  id: DEFAULT_COMPANION.id,
+  name: DEFAULT_COMPANION.name,
+});
+
+/**
+ * `bootstrap.isDev`, for code that runs per keystroke and must not pay for
+ * an IPC message in a packaged build. Set once by App; false until then.
+ */
+export const devStore = createStore<boolean>(false);

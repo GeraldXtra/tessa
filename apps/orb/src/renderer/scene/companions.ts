@@ -330,6 +330,8 @@ export function createCompanion(
     uGradWarmPow: { value: 1 },
     uGradAxis: { value: new Vector3(0, 0, 1) },
     uBackFade: { value: new Vector2(-2, -1) },
+    /** ROUND T: the main sphere's rim shrink, OFF here (third component 0). */
+    uRimShrink: { value: new Vector3(0, 1, 0) },
   };
 
   const material = new ShaderMaterial({

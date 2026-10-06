@@ -37,6 +37,12 @@ failure from where Gerald is sitting: he asked a question and cannot tell what
 happened. So a 429 becomes `LLMUnavailable` carrying a SPOKEN sentence, and the
 engine never substitutes another one on its own. Choosing her brain is his
 decision.
+
+⚠ THAT LAST SENTENCE STILL HOLDS, AND `fallback.py` DOES NOT BREAK IT. This
+engine still never swaps itself. What changed is that a 429 now raises the
+`RateLimited` SUBCLASS carrying which quota was hit and whether it clears on
+its own, so a layer ABOVE the engine can make an informed, logged, visible
+decision about it. The engine reports; it does not choose.
 """
 
 from __future__ import annotations
@@ -46,7 +52,7 @@ import os
 import time
 from typing import Any, Iterator
 
-from .base import LLMAdapter, LLMUnavailable, Message, ToolDef, Usage
+from .base import LLMAdapter, LLMUnavailable, Message, RateLimited, ToolDef, Usage
 
 API_ROOT = "https://generativelanguage.googleapis.com/v1beta"
 
@@ -76,6 +82,54 @@ def _api_message(body: str) -> str:
         return body[:200]
 
 
+def classify_429(body: str) -> tuple[bool, float, str]:
+    """
+    (transient, retry_after_s, quota_id) from Google's own 429 body.
+
+    ⚠ THE TWO FREE-TIER QUOTAS ARE NOT THE SAME EVENT and treating them alike
+    is how she either sits on a weak model all afternoon over a ten-second
+    blip, or hammers a spent daily quota once a second.
+
+    Google says which one it was, in `error.details`:
+
+        {"error": {"code": 429, "details": [
+            {"@type": ".../QuotaFailure",
+             "violations": [{"quotaId":
+                "GenerateRequestsPerMinutePerProjectPerModel-FreeTier"}]},
+            {"@type": ".../RetryInfo", "retryDelay": "27s"}]}}
+
+    `PerMinute` clears itself; `PerDay` does not. WHEN IT IS AMBIGUOUS THIS
+    RETURNS TRANSIENT, because guessing "transient" costs one retry and a few
+    seconds, while guessing "daily" wrongly demotes her to the 0.5B model for
+    half an hour over nothing. The escalation in fallback.py closes the gap: a
+    retry that 429s again is treated as exhausted regardless of what the body
+    claimed.
+    """
+    quota_id, retry_after = "", 0.0
+    try:
+        err = (json.loads(body) or {}).get("error", {}) or {}
+    except (json.JSONDecodeError, AttributeError, TypeError):
+        err = {}
+    for detail in err.get("details", []) or []:
+        kind = str(detail.get("@type", ""))
+        if kind.endswith("QuotaFailure"):
+            for v in detail.get("violations", []) or []:
+                quota_id = quota_id or str(v.get("quotaId", "") or v.get("quotaMetric", ""))
+        elif kind.endswith("RetryInfo"):
+            raw = str(detail.get("retryDelay", "")).strip().rstrip("s")
+            try:
+                retry_after = float(raw)
+            except ValueError:
+                retry_after = 0.0
+    haystack = f"{quota_id} {err.get('message', '')}".lower()
+    if "perday" in haystack or "per day" in haystack or "daily" in haystack:
+        return False, retry_after, quota_id
+    if "perminute" in haystack or "per minute" in haystack:
+        return True, retry_after, quota_id
+    # Nothing conclusive. Transient, and let the retry decide — see above.
+    return True, retry_after, quota_id
+
+
 class GeminiLLM(LLMAdapter):
     def __init__(self, cfg: dict[str, Any] | None = None) -> None:
         self.cfg = cfg or {}
@@ -88,6 +142,8 @@ class GeminiLLM(LLMAdapter):
         #: he needs to see: how much he is leaning on someone else's quota.
         self.calls = 0
         self.rate_limited_at: float | None = None
+        #: Which quota the last 429 named, for the log. Empty until one lands.
+        self.last_quota_id = ""
 
     # ── identity and availability ────────────────────────────────────────────
 
@@ -146,9 +202,14 @@ class GeminiLLM(LLMAdapter):
         tools: list[ToolDef] | None = None,
         max_tokens: int = 1024,
         thinking: bool = False,
+        quality: str = "critical",
+        json_object: bool = False,
     ) -> Iterator[str]:
         import httpx
 
+        # `quality` is accepted and ignored here — this engine is the good one;
+        # nothing about how much the answer matters changes how it answers. The
+        # wrapper in fallback.py is what reads it. See base.py.
         self._require()
         # THINKING IS TURNED DOWN BY DEFAULT, AND THIS IS THE SINGLE MOST
         # IMPORTANT LINE IN THE FILE FOR A VOICE ASSISTANT.
@@ -169,6 +230,13 @@ class GeminiLLM(LLMAdapter):
         # of silence he sits through.
         gen_cfg: dict[str, Any] = {"maxOutputTokens": max_tokens}
         gen_cfg["thinkingConfig"] = {"thinkingLevel": "high" if thinking else "low"}
+        if json_object:
+            # ONE JSON OBJECT, enforced by the model's own decoder rather than
+            # by hoping. This is what the intent resolver asks for; measured on
+            # gemini-3.6-flash it returns clean JSON in ~3.5 s where prompt-only
+            # asking on the lite model returned "Here is the JSON". The caller
+            # still parses defensively — see core/brain/intent_model.py.
+            gen_cfg["responseMimeType"] = "application/json"
         body: dict[str, Any] = {
             "contents": self._contents(messages),
             "generationConfig": gen_cfg,
@@ -201,9 +269,20 @@ class GeminiLLM(LLMAdapter):
                     if r.status_code == 429:
                         r.read()
                         self.rate_limited_at = time.time()
-                        raise LLMUnavailable(
-                            "gemini rate limited (429)",
-                            spoken="I am rate limited, Emperor. Try me in a minute.")
+                        # RateLimited, not plain LLMUnavailable: this is the one
+                        # failure the fallback layer is allowed to act on, and
+                        # it must be distinguishable by TYPE rather than by
+                        # matching on a message string that a Google copy edit
+                        # could change under us. See base.RateLimited.
+                        transient, retry_after, quota_id = classify_429(r.text)
+                        self.last_quota_id = quota_id
+                        raise RateLimited(
+                            f"gemini rate limited (429) {quota_id or 'quota unknown'}",
+                            spoken=("I am rate limited, Emperor. Try me in a minute."
+                                    if transient else
+                                    "Google's daily quota is spent, Emperor."),
+                            transient=transient, retry_after=retry_after,
+                            quota_id=quota_id)
                     if r.status_code in (401, 403):
                         r.read()
                         raise LLMUnavailable(

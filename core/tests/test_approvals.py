@@ -35,6 +35,76 @@ from core.brain.provenance import ExternalContent, SessionContext  # noqa: E402
 from core.brain.tools_local import ToolCall  # noqa: E402
 from core.tools import REGISTRY  # noqa: E402
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# ⚠⚠ THE LIVE-TWEET GUARD. THIS RUNS BEFORE ANY TEST, AND IT IS STRUCTURAL.
+#
+# Section 5 of this file calls `execute_approved` on a REAL `x.post`. That
+# reaches the real handler, which drives the owner's persistent Chrome profile.
+# While that profile was logged out it failed harmlessly on "not signed in" —
+# which is exactly what the section asserts. The moment he signs into X by hand,
+# THE SAME LINE PUBLISHES A LIVE TWEET.
+#
+# That was a note in a report and a wrapper he had to remember to use. A safety
+# property that depends on remembering is not a safety property, so it is now a
+# refusal in the file itself.
+#
+# THE TEST IS "IS THE DANGEROUS PATH LIVE", NOT "IS HE LOGGED IN". Two things
+# have to be true for this suite to be able to publish: a real session exists,
+# AND the real sign-in check is still wired up. `run-approvals-guarded.py`
+# replaces `_require_signed_in` with a raiser before importing anything, so
+# under the wrapper the publish path is provably dead and the suite may run.
+# Bare, with a live cookie, it refuses.
+#
+# The cookie is read from Chrome's own SQLite store rather than by launching a
+# browser: the value is DPAPI-encrypted and unreadable, but the NAME and the
+# host are plaintext, which is all this needs. Nothing is decrypted, and no
+# browser is started to ask.
+def _live_x_session() -> bool:
+    import shutil
+    import sqlite3
+    import tempfile
+
+    from core.tools.browser import DEFAULT_PROFILE
+
+    db = DEFAULT_PROFILE / "Default" / "Network" / "Cookies"
+    if not db.exists():
+        return False
+    tmp = Path(tempfile.gettempdir()) / "tessa-cookiecheck.sqlite"
+    try:
+        shutil.copyfile(db, tmp)          # Chrome may hold a lock on the original
+        con = sqlite3.connect(str(tmp))
+        try:
+            rows = con.execute(
+                "SELECT host_key FROM cookies WHERE name = 'auth_token'").fetchall()
+        finally:
+            con.close()
+        return any(str(h[0]).lstrip(".").endswith(("x.com", "twitter.com")) for h in rows)
+    except (OSError, sqlite3.Error):
+        # UNREADABLE MEANS UNKNOWN, AND UNKNOWN MEANS REFUSE. The cost of a
+        # wrong "no" is a tweet he never wrote.
+        return True
+    finally:
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+def _publish_path_is_live() -> bool:
+    from core.tools import x_tools
+
+    guarded = getattr(x_tools._require_signed_in, "__module__", "") != "core.tools.x_tools"
+    return not guarded
+
+
+if _live_x_session() and _publish_path_is_live():
+    print("\n  REFUSING TO RUN.\n")
+    print("  This suite approves a REAL x.post, and your X profile currently holds a live")
+    print("  session cookie. Running it bare would PUBLISH A TWEET from your account.\n")
+    print("  Run it through the guard instead, which disables the publish path first:")
+    print("      python <scratch>/run-approvals-guarded.py\n")
+    sys.exit(2)
+
 passed = 0
 failed = 0
 
@@ -121,17 +191,24 @@ check("resolve_edit never reads a tool name from the frame",
 check("resolve_edit never reads a tier from the frame",
       'edited["tier"]' not in src and 'edited.get("tier"' not in src)
 
-# ── 3. EXECUTION — the edited version runs, the original does not ───────────
+# ── 3. EXECUTION — the delete PATH is frozen; a plain approval runs the ORIGINAL
+#
+# The first version of this section approved a delete of one file with an
+# `editedArgs` frame naming ANOTHER and asserted the edited one executed. That
+# was the hole, not the guarantee: fs.delete now declares `frozen=("path",)`
+# (core/tools/__init__.py), so the card may correct nothing about a delete —
+# a swapped path is refused, the request is put back, and only what he read on
+# the card can run.
 tmp = Path(os.environ["TEMP"]) / "tessa-approval-tests"
 tmp.mkdir(exist_ok=True)
-wrong = tmp / "WRONG.txt"
-right = tmp / "RIGHT.txt"
-wrong.write_text("must survive", encoding="utf-8")
-right.write_text("the one he meant", encoding="utf-8")
+asked = tmp / "ASKED.txt"      # the path on the card
+other = tmp / "OTHER.txt"      # the path a swapped frame names — must survive
+asked.write_text("the one he approved", encoding="utf-8")
+other.write_text("must survive", encoding="utf-8")
 
 events: list = []
 ex = Executor(session=SessionContext(), on_permission_request=events.append)
-said = ex.run(ToolCall(name="fs.delete", args={"path": str(wrong)}))
+said = ex.run(ToolCall(name="fs.delete", args={"path": str(asked)}))
 check("a red tool still refuses on voice alone",
       "not doing it on your voice alone" in said, said[:70])
 check("...and points him at the card, which now exists", "card" in said, said[:70])
@@ -140,15 +217,25 @@ rid = events[-1]["requestId"]
 check("evt.permission.request carries the requestId", bool(rid))
 check("...and the provenance, which §6.2 requires", "provenance" in events[-1])
 
-rec = ex.execute_approved(rid, {"path": str(right)})
-check("the EDITED path executed", rec["edited"] and rec["executed_args"]["path"] == str(right))
-check("the ORIGINAL file is untouched", wrong.exists())
-check("the EDITED file was acted on", not right.exists())
+check("the card carries frozen=['path']", "path" in (events[-1].get("frozen") or []))
+try:
+    ex.execute_approved(rid, {"path": str(other)})
+    check("an edited `path` on fs.delete is REFUSED (frozen)", False, "MERGED")
+except ApprovalError as err:
+    check("an edited `path` on fs.delete is REFUSED (frozen)", "may not change" in err.message,
+          err.message[:80])
+check("...both files untouched by the refused edit", asked.exists() and other.exists())
+check("...and the request was put back, not consumed", rid in ex.approvals.pending)
+rec = ex.execute_approved(rid, None)
+check("a plain approval executes the ORIGINAL path",
+      not rec["edited"] and rec["executed_args"]["path"] == str(asked))
+check("the file on the card was acted on (Recycle Bin)", not asked.exists())
+check("the OTHER file is untouched", other.exists())
 check("the request is consumed", rid not in ex.approvals.pending)
 check("internal flags never appear in the audited args",
       "_approved_by_surface" not in rec["executed_args"]
       and "confirmed" not in rec["executed_args"])
-wrong.unlink(missing_ok=True)
+other.unlink(missing_ok=True)
 
 # EVERY red tool must survive the flag-passing path — an unexpected keyword
 # reaching a handler is how this broke the first time it was run for real.

@@ -33,9 +33,40 @@ kernel32 = ctypes.windll.kernel32
 CF_UNICODETEXT = 13
 GMEM_MOVEABLE = 0x0002
 
+# ⚠ ARGTYPES AS WELL AS RESTYPES — THE 64-BIT BUG THIS FILE SHIPPED WITH.
+#
+# Only the RESTYPES were declared, and that is half a declaration. A clipboard
+# handle is a 64-bit pointer on this machine; with no `argtypes`, ctypes
+# converts a Python int argument as a C `int`, which is 32 bits. So the moment
+# Windows handed back a handle above 2^31 the very next call died with
+#
+#     ctypes.ArgumentError: argument 1: OverflowError: int too long to convert
+#
+# Measured 2026-09-07: `clip.read` and `clip.write` BOTH raised it on this
+# machine, which means "what's on my clipboard" and "copy that" — two GREEN,
+# registered, voice-routed tools — had never once worked here. `clip.clear`
+# survived only because `EmptyClipboard` takes no handle.
+#
+# Declaring the argument types is the whole fix: ctypes then marshals each
+# handle as the pointer-sized value it is. Every function that takes or
+# returns a HANDLE/HGLOBAL is declared below, so the next one added cannot
+# quietly inherit the same bug.
+user32.OpenClipboard.argtypes = [wintypes.HWND]
+user32.OpenClipboard.restype = wintypes.BOOL
+user32.IsClipboardFormatAvailable.argtypes = [wintypes.UINT]
+user32.IsClipboardFormatAvailable.restype = wintypes.BOOL
+user32.GetClipboardData.argtypes = [wintypes.UINT]
 user32.GetClipboardData.restype = wintypes.HANDLE
+user32.SetClipboardData.argtypes = [wintypes.UINT, wintypes.HANDLE]
+user32.SetClipboardData.restype = wintypes.HANDLE
+kernel32.GlobalLock.argtypes = [wintypes.HGLOBAL]
 kernel32.GlobalLock.restype = wintypes.LPVOID
+kernel32.GlobalUnlock.argtypes = [wintypes.HGLOBAL]
+kernel32.GlobalUnlock.restype = wintypes.BOOL
+kernel32.GlobalAlloc.argtypes = [wintypes.UINT, ctypes.c_size_t]
 kernel32.GlobalAlloc.restype = wintypes.HGLOBAL
+kernel32.GlobalFree.argtypes = [wintypes.HGLOBAL]
+kernel32.GlobalFree.restype = wintypes.HGLOBAL
 
 
 class _Clipboard:
@@ -73,8 +104,14 @@ def read() -> dict[str, Any]:
             raise ToolError("the clipboard would not hand over its text",
                             "Copy it again and I will retry.")
         ptr = kernel32.GlobalLock(handle)
+        if not ptr:
+            raise ToolError("the clipboard would not hand over its text",
+                            "Copy it again and I will retry.")
         try:
-            text = ctypes.c_wchar_p(ptr).value or ""
+            # `cast`, not `c_wchar_p(ptr)`: the pointer is already typed as
+            # LPVOID by the restype above, and casting says so explicitly
+            # rather than relying on an int being reinterpreted as an address.
+            text = ctypes.cast(ptr, ctypes.c_wchar_p).value or ""
         finally:
             kernel32.GlobalUnlock(handle)
     words = len(text.split())

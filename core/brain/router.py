@@ -30,7 +30,7 @@ import platform
 import random
 from functools import lru_cache
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from enum import Enum
 from typing import Callable
@@ -80,6 +80,16 @@ class Routed:
     #: sets `sleeps_wake` as well, because that one really does make the chord
     #: the only way back.
     ends_session: bool = False
+    #: WHY THE FAST PATH DOES NOT TRUST THIS RESULT, or "" (intent round,
+    #: 2026-09-22). Set at the one choke point below from the parser's own
+    #: doubt (an ambiguous or fuzzy application) or from a platform name
+    #: sitting in a file path or window name ("read my X timeline" parsed as
+    #: fs.read on "X timeline"). The caller hands a doubted result to the
+    #: brain for a second opinion before anything runs — see
+    #: core/brain/intent_model.py. It never loosens a gate: a tool the model
+    #: confirms still meets the same fence, hold and card as one the regex
+    #: chose, and carries origin="agent" on the way.
+    doubt: str = ""
 
     @property
     def handled_locally(self) -> bool:
@@ -555,9 +565,25 @@ class Router:
 
         parsed = self._tools.parse(raw)
         if parsed.question:
-            return Routed(Intent.TOOL, parsed.question, score=1.0)
+            return Routed(Intent.TOOL, parsed.question, score=1.0, doubt=parsed.doubt)
         if parsed.calls:
-            return Routed(Intent.TOOL, "", score=1.0, calls=list(parsed.calls))
+            # STAMPED HERE, AT THE ONE CHOKE POINT, rather than at each of the
+            # ~40 `ToolCall(...)` sites in intents.py. Everything that reaches
+            # this line was parsed out of HIS utterance by the regex router, so
+            # "human" is the truth for all of it — and a single stamp cannot be
+            # forgotten by the next intent someone adds. The field's default is
+            # "schedule" (fail-safe), so THIS STAMP is the only thing that makes
+            # a call the owner's: drop it and his own speech would be gated and
+            # chained as a scheduled job, never the other way round.
+            calls = [replace(c, origin="human") for c in parsed.calls]
+            # THE DOUBT TRAVELS WITH THE RESULT. The parser's own (ambiguous or
+            # fuzzy application) first; failing that, a platform name in the
+            # target of a tool that has no business with platforms — "X
+            # timeline" as a file path is the case from his transcript.
+            from .intent_model import doubt_for
+
+            return Routed(Intent.TOOL, "", score=1.0, calls=calls,
+                          doubt=parsed.doubt or doubt_for(calls))
 
         ranked = score_intents(norm)
         if not ranked:

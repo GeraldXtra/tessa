@@ -55,6 +55,8 @@ interface SphereProps {
   faceSat?: number | null;
   /** DEV ONLY. `--force-pgain=<0|1>`; false disables palette normalisation. */
   paletteGain?: boolean | null;
+  /** DEV ONLY. `--force-deform=<0|1>`; false is round T's round shell, exactly. */
+  deform?: boolean | null;
 }
 
 export function Sphere({
@@ -69,6 +71,7 @@ export function Sphere({
   counts,
   faceSat,
   paletteGain,
+  deform,
 }: SphereProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const engineRef = useRef<SphereEngine | null>(null);
@@ -101,6 +104,7 @@ export function Sphere({
       ...(counts ? { counts } : {}),
       ...(typeof faceSat === 'number' ? { faceSat } : {}),
       ...(typeof paletteGain === 'boolean' ? { paletteGain } : {}),
+      ...(typeof deform === 'boolean' ? { deform } : {}),
       onTierChange: (next, reason) => onTierChangeRef.current(next, reason),
       onStateRendered: (state, at) => onStateRenderedRef.current?.(state, at),
     });

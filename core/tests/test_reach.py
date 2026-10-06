@@ -156,7 +156,9 @@ for utt in ("read me that", "list it", "open this", "open it", "show me that"):
 print("\n   ...without breaking the commands that work")
 for utt, want in (("what is in my downloads", "fs.list"),
                   (r"list C:\dev", "fs.list"),
-                  ("find a file called invoice", "fs.search"),
+                  # RETARGETED 2026-09-07 to the indexed capability version.
+                  # See core/system/abilities/search.py.
+                  ("find a file called invoice", "system.files.search"),
                   ("read my clipboard", "clip.read"),
                   ("open my downloads", "app.open_folder"),
                   ("open chrome", "app.open")):
@@ -164,8 +166,11 @@ for utt, want in (("what is in my downloads", "fs.list"),
     check(f"{utt!r} still reaches {want}",
           bool(calls) and calls[0][0] == want, str(calls))
 
+# The SEMANTIC is unchanged and is the point of the check: a search term may
+# name something that does not exist, so `_MUST_NAME_A_THING` must not cover
+# it. Only the tool it routes to moved (2026-09-07).
 check("a SEARCH TERM is still allowed to name nothing",
-      route("find a file called zzzznotreal")[1][0][0] == "fs.search")
+      route("find a file called zzzznotreal")[1][0][0] == "system.files.search")
 
 # ── 5. WORD BOUNDARIES ───────────────────────────────────────────────────────
 print("\n5. intent keywords are words, not substrings")

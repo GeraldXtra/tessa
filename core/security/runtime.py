@@ -29,8 +29,18 @@ RUNTIME_FILENAME = "runtime.json"
 PROTOCOL_VERSION = 1
 TOKEN_BYTES = 32  # -> 64 hex chars, per CONTRACT §2.1
 
+#: TEST ISOLATION ONLY. A test daemon gets its own runtime directory through
+#: this variable, so its runtime.json — and the single-instance guard keyed on
+#: that directory — can never collide with the real one. Read ONCE, here, at
+#: import. LOCALAPPDATA itself is never overridden: Chrome, Playwright and the
+#: vault read it too. Never set it with setx, the registry or a profile file;
+#: scripts\start-tessa.cmd clears it before a real launch.
+RUNTIME_DIR_OVERRIDE = os.environ.get("TESSA_RUNTIME_DIR") or None
+
 
 def local_appdata_root() -> Path:
+    if RUNTIME_DIR_OVERRIDE:
+        return Path(RUNTIME_DIR_OVERRIDE)
     base = os.environ.get("LOCALAPPDATA")
     if not base:
         # Non-Windows dev fallback; the daemon targets Windows.
@@ -302,9 +312,31 @@ def write_runtime_file(port: int, token: str, pid: int | None = None) -> Path:
     return path
 
 
-def remove_runtime_file() -> None:
-    """Delete on clean shutdown (CONTRACT §1)."""
-    runtime_path().unlink(missing_ok=True)
+def remove_runtime_file(token: str, pid: int | None = None) -> bool:
+    """
+    Delete on clean shutdown (CONTRACT §1) — but ONLY this daemon's own entry.
+
+    It used to unlink unconditionally, and on 28 Sep that cost a working daemon
+    its advertisement: a second daemon lived 20 s on 47601, stopped cleanly, and
+    deleted the file the live 47600 daemon had written, leaving the Orb nothing
+    to connect to. The file is removed only when BOTH its pid and its token are
+    this launch's; anything else — another daemon's entry, an unreadable file —
+    is left exactly where it is. Returns True if it removed the file.
+    """
+    path = runtime_path()
+    me = os.getpid() if pid is None else pid
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return False
+    except (json.JSONDecodeError, OSError, ValueError):
+        return False
+    if not isinstance(data, dict) or data.get("pid") != me:
+        return False
+    if not isinstance(token, str) or not secrets.compare_digest(str(data.get("token", "")), token):
+        return False
+    path.unlink(missing_ok=True)
+    return True
 
 
 def pid_is_alive(pid: int) -> bool:

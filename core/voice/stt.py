@@ -90,7 +90,38 @@ VOCABULARY_PRIME = (
     "Go to sleep. Stop the wake word. Go back to sleep, Tessa. "
     "Stop. Be quiet. Cancel that. "
     "google.com, x.com, web.whatsapp.com, github.com. "
-    "LedgerWatch, Aptech, naira, Titan Wave, TESSA_CORE, Lagos."
+    # ── THE MACHINE-CONTROL NOUNS, AND WHY THEY ARE NOUNS ────────────────────
+    #
+    # ADDED AFTER MEASURING A REAL FAILURE. On the fixed set, base with the
+    # prime above heard "Turn bluetooth on." as "Turn Blue Shoot On.", which the
+    # router cannot route — while the SAME model with NO prime heard "Turn blue
+    # tooth on." and routed it correctly. The prime was dense with "tweet" and
+    # "post" and contained no radio vocabulary at all, so it pushed three
+    # ambiguous syllables toward the shapes it knew. A prime is not a list of
+    # good words; it is a BUDGET of bias, and daily vocabulary missing from it
+    # is actively bid against.
+    #
+    # ⚠⚠ NOUNS, NEVER IMPERATIVES, AND THAT DISTINCTION IS A SAFETY ONE.
+    #
+    # The obvious fix was to add the commands — "Turn bluetooth on. Set the
+    # volume to forty." — and it was MEASURED AND REJECTED. With those
+    # sentences primed, his own recorded room-noise capture seg-142144 came back
+    # as "Turn the bluetooth off. Turn the wifi on." and the router routed it to
+    # `system.radio.set` — AMBER, so the tier system would have held it for a
+    # yes rather than silently killing his wifi, but room tone asking him to
+    # confirm a radio change is still a failure. The same variant also took 45 s
+    # on that clip against 1.8 s here, because a decoder given more command
+    # shapes to echo emits far more tokens.
+    #
+    # Priming the WORD as a noun gets the vocabulary without the imperative. The
+    # noun echo is not literally unroutable — "bluetooth wifi brightness volume"
+    # reaches `system.brightness.get` — but that is GREEN and READ-ONLY: at
+    # worst she announces the brightness. The imperative echo reaches a state
+    # change. Measured on the fixed set, this line took routing
+    # from 13/14 to 14/14 and mean WER from 0.110 to 0.026, and made the six
+    # real captures FASTER in total (38.8 s against 65.8 s).
+    "LedgerWatch, Aptech, naira, Titan Wave, TESSA_CORE, Lagos, "
+    "bluetooth, wifi, brightness, volume."
 )
 
 
@@ -370,9 +401,20 @@ class WhisperSTT:
 
 
 def model_disk_bytes(size: str) -> int:
-    """Bytes this model occupies under data/models/."""
+    """
+    Bytes THIS WHISPER MODEL occupies under data/models/. 0 means downloading
+    it would cost metered data.
+
+    ⚠ SCOPED TO THE WHISPER CACHE DIRECTORY, and it was not before. The old
+    version matched the size as a substring of any path under data/models/, so
+    `model_disk_bytes("medium")` returned 63 MB — the PIPER VOICE, which is
+    called `en_GB-jenny_dioco-medium`. Anything asking "is whisper medium
+    already here, or is this a 1.5 GB download on a metered line?" was told yes.
+    Caught by the hearing proof asserting that medium was absent.
+    """
+    needle = f"faster-whisper-{size.lower()}"
     total = 0
     for p in MODEL_ROOT.rglob("*"):
-        if p.is_file() and size in str(p).lower():
+        if p.is_file() and needle in str(p).lower():
             total += p.stat().st_size
     return total

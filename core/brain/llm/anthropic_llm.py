@@ -99,7 +99,13 @@ class AnthropicLLM(LLMAdapter):
         tools: list[ToolDef] | None = None,
         max_tokens: int = 1024,
         thinking: bool = False,
+        quality: str = "critical",
+        json_object: bool = False,
     ) -> Iterator[str]:
+        # Accepted and ignored — see base.py. This engine's own Opus→Sonnet
+        # step is a different thing from the quota fallback and stays as it is.
+        # `json_object` too: no native JSON mode is wired here, so the prompt's
+        # own request for one object is what the caller relies on.
         client = self._require()
         kwargs: dict[str, Any] = {
             "model": self.model_main,

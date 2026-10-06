@@ -108,7 +108,7 @@ def main() -> int:
     check("...file STILL untouched", victim2.exists())
     victim2.unlink(missing_ok=True)
 
-    for red_tool, red_args in [("shell.execute", {"command": "echo hi", "provenance": "human"}),
+    for red_tool, red_args in [("shell.execute", {"command": "echo hi"}),
                                ("x.post", {"text": "hello"}),
                                ("x.reply", {"text": "hi", "index": 1}),
                                ("browser.submit", {})]:
@@ -219,7 +219,12 @@ def main() -> int:
         ("open my docs", "app.open_folder"),
         ("close chrome", "win.close"),
         ("switch to chrome", "win.focus"),
-        ("am I online", "sys.network"),
+        # RETARGETED 2026-09-07. "am I online" now answers with the radio
+        # state, the SSID and Bluetooth as well as reachability, via
+        # core/system/abilities/network.py. `sys.network` is still registered
+        # and still reachable by name — see the read-only block below, which
+        # still exercises it — it is simply no longer what this sentence means.
+        ("am I online", "system.network.status"),
         ("delete my downloads", "fs.delete"),
     ]:
         routes_to(router, text, name)
@@ -239,7 +244,16 @@ def main() -> int:
         ("search the web for piper tts", "browser.search"),
         ("google how to disable defender", "browser.search"),
         ("read me this page", "browser.read_page"),
-        ("take a screenshot", "browser.screenshot"),
+        # ⚠ RETARGETED, DELIBERATELY, by the input+screen batch. A bare "take a
+        # screenshot" used to photograph the BROWSER PAGE, which is the wrong
+        # answer whenever a browser is not what he is looking at — and he had no
+        # way to tell which of the two he had got. Bare and screen-worded forms
+        # now mean the SCREEN; the browser forms below still mean the browser,
+        # and they are asserted here so the retarget cannot quietly widen.
+        ("take a screenshot", "system.screen.capture"),
+        ("screenshot this window", "system.screen.capture"),
+        ("screenshot the page", "browser.screenshot"),
+        ("take a screenshot of the site", "browser.screenshot"),
         ("close the browser", "browser.close"),
         ("click accept", "browser.click"),
         ("type hello in the search box", "browser.type"),
@@ -248,6 +262,16 @@ def main() -> int:
         ("read my timeline", "x.read_timeline"),
         ("check my x notifications", "x.read_notifications"),
         ("like post two", "x.like"),
+        # THE ENGAGEMENT ROUND (X features round 2, 2026-09-12): one target
+        # each, unlike/unfollow before like/follow, bulk refused by the tool.
+        ("like 1234567890123", "x.like"),
+        ("unlike that", "x.unlike"),
+        ("take the like off post two", "x.unlike"),
+        ("follow @ada", "x.follow"),
+        ("follow ada on x", "x.follow"),
+        ("unfollow @ada", "x.unfollow"),
+        ("like everything from ada", "x.like"),
+        ("follow all my followers", "x.follow"),
         ("repost the second one", "x.repost"),
         ("tweet that we shipped it", "x.post"),
         ("reply to post two with thanks", "x.reply"),
@@ -255,10 +279,148 @@ def main() -> int:
         # and the ones that must NOT have moved
         ("close chrome", "win.close"),
         ("read me that file", "fs.read"),
-        ("find a file called invoice", "fs.search"),
+        # RETARGETED 2026-09-07. Filename search now answers from the cached
+        # index in core/system/winapi/fileindex.py (1-85 ms) instead of walking
+        # the disk (6 991-42 361 ms measured). `fs.search` is still registered
+        # and still exercised by the read-only block below; it is simply no
+        # longer what this sentence means.
+        ("find a file called invoice", "system.files.search"),
         ("open my downloads", "app.open_folder"),
     ]:
         routes_to(router, text, name)
+
+    # ── THE READING ROUND (X features round 1, 2026-09-12): search, thread,
+    #    profile. Green, read-only, on the same key and fence as the timeline.
+    from core.tools import x_tools as _xt
+
+    for text, name in [
+        ("search x for piper tts", "x.search"),
+        ("what are people saying about the naira on x", "x.search"),
+        ("what is twitter saying about arsenal", "x.search"),
+        ("find tweets about titan wave", "x.search"),
+        ("read the thread on post two", "x.read_thread"),
+        ("what are the replies to that", "x.read_thread"),
+        ("read the replies to 1234567890123", "x.read_thread"),
+        ("what has ada been posting", "x.read_user"),
+        ("read ada's profile", "x.read_user"),
+        ("show me ada's posts on x", "x.read_user"),
+        # and the neighbours that must NOT have moved
+        ("what are people saying about the naira", "claims.recall"),
+        ("what have you heard about the naira", "claims.recall"),
+        ("open my work profile", "system.chrome.open_personal_profile"),
+        ("show me your profiles", "system.chrome.list_profiles"),
+        ("read my timeline", "x.read_timeline"),
+        ("read me that file", "fs.read"),
+        ("search the web for piper tts", "browser.search"),
+        ("tweet that we shipped it", "x.post"),
+    ]:
+        routes_to(router, text, name)
+
+    # ── DIRECT MESSAGES (X features round 4, 2026-09-12): read (green,
+    #    PRIVATE) and send (red, recipient + message frozen). "message"
+    #    routes to a private message, never to a public reply or tweet;
+    #    bulk reaches the tool to be refused by shape.
+    for text, name in [
+        ("read my dms", "x.read_dm"),
+        ("read my dms with ada", "x.read_dm"),
+        ("what did @ada message me", "x.read_dm"),
+        ("dm @ada saying see you at six", "x.send_dm"),
+        ("message ada saying thanks", "x.send_dm"),
+        ("send @ada a dm: on my way", "x.send_dm"),
+        ("reply to ada's dm saying thanks", "x.send_dm"),
+        ("dm everyone saying hi", "x.send_dm"),
+        # and the neighbours that must NOT have moved
+        ("reply to post two with thanks", "x.reply"),
+        ("tweet that we shipped it", "x.post"),
+        ("read the thread on post two", "x.read_thread"),
+        ("read ada's profile", "x.read_user"),
+    ]:
+        routes_to(router, text, name)
+    check("'dm @ada saying ...' carries the handle without the @ and the exact words",
+          router.route("dm @ada saying see you at six").calls[0].args == {"handle": "ada", "text": "see you at six"})
+    check("'reply to ada's dm' is a PRIVATE reply: x.send_dm, never x.reply",
+          router.route("reply to ada's dm saying thanks").calls[0].name == "x.send_dm")
+    for stray in ("what's the error message", "read the commit message", "send a message to the team saying hi",
+                  "message me later", "read my messages", "read my emails", "message received"):
+        _r = router.route(stray)
+        check(f"{stray!r} does not reach x.read_dm / x.send_dm",
+              not any(c.name in ("x.read_dm", "x.send_dm") for c in (_r.calls or [])),
+              str([c.name for c in (_r.calls or [])]))
+    # A mangled private reply is STILL private (x.send_dm with nothing to send,
+    # refused) — never the legacy public x.reply; a status word after "message"
+    # is not a recipient.
+    routes_to(router, "reply to ada's dm bob saying x", "x.send_dm")
+    check("a mangled private reply reaches x.send_dm with NO text (refused), never x.reply with the words",
+          router.route("reply to ada's dm bob saying x").calls[0].args == {"handle": "ada", "text": ""})
+    for stray in ("message received, loud and clear", "message sent, thanks", "message failed, try again"):
+        _r = router.route(stray)
+        check(f"{stray!r} is not a DM to a status word",
+              not any(c.name == "x.send_dm" for c in (_r.calls or [])), str([c.name for c in (_r.calls or [])]))
+    from core.brain.intents import is_private_utterance
+    check("is_private_utterance: DM-shaped speech is private; a message to himself and ordinary speech are not",
+          all(is_private_utterance(t) for t in ("dm ada saying hi", "direct message ada bob saying secret",
+                                                 "send @ada a dm: hi", "reply to ada's dm saying thanks",
+                                                 "message ada: hi", "please dm ada saying hi"))
+          and not any(is_private_utterance(t) for t in ("dm me the link", "send me a message when it's done",
+                                                         "read my dms", "what's the error message", "open notepad",
+                                                         "tweet that I read my dms")))
+    _rd, _sd = REGISTRY["x.read_dm"], REGISTRY["x.send_dm"]
+    check("x.read_dm is green, x.dm_read, PRIVATE, and does not hold",
+          _rd.tier == "green" and _rd.capability == "x.dm_read" and _rd.private and not _rd.holds)
+    check("x.send_dm is red, x.dm_send, holds, resolve + describe, recipient AND message frozen, text withheld",
+          _sd.tier == "red" and _sd.capability == "x.dm_send" and _sd.holds and _sd.resolve is not None
+          and _sd.describe is not None and {"handle", "text"} <= set(_sd.frozen)
+          and tuple(_sd.private_args) == ("text",) and _sd.private)
+    check("'search x for' carries the query",
+          router.route("search x for piper tts").calls[0].args.get("query") == "piper tts")
+    check("'thread on post two' resolves to index 2",
+          router.route("read the thread on post two").calls[0].args.get("index") == 2)
+    check("a spoken status id is carried as post_id",
+          router.route("read the replies to 1234567890123").calls[0].args.get("post_id") == "1234567890123")
+    check("the handle is carried without the @",
+          router.route("read ada's profile").calls[0].args.get("handle") == "ada")
+    for name in ("x.search", "x.read_thread", "x.read_user"):
+        s = REGISTRY[name]
+        check(f"{name} is green, x.read, and does not hold",
+              s.tier == "green" and s.capability == "x.read" and not s.holds)
+    # READ ONLY, AST-CHECKED: none of the three handlers calls anything that
+    # acts on a page, and none reaches a write function in the module.
+    # Attribute names catch `page.click(...)`; bare names catch `post(...)`.
+    # Kept apart so the builtin `type(exc)` is not mistaken for `.type()`.
+    _page_acts = {"click", "fill", "type", "press", "dblclick", "hover", "check",
+                  "select_option", "set_input_files", "tap", "drag_to", "keyboard", "mouse"}
+    _write_fns = {"post", "reply", "like", "repost", "_action_on_post", "open_for_login",
+                  "unlike", "follow", "unfollow", "_engage_post", "_engage_user", "_press"}
+    for fn in (_xt.search, _xt.read_thread, _xt.read_user):
+        attrs, names = set(), set()
+        for node in ast.walk(ast.parse(inspect.getsource(fn))):
+            if isinstance(node, ast.Attribute):
+                attrs.add(node.attr)
+            elif isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+                names.add(node.func.id)
+        bad = (attrs & _page_acts) | (names & _write_fns)
+        check(f"x_tools.{fn.__name__} never clicks, fills, types or publishes (AST-checked)",
+              not bad, str(bad))
+
+    check("a spoken status id is a post_id on x.like, not a position",
+          router.route("like 1234567890123").calls[0].args == {"post_id": "1234567890123"})
+    check("'like post two' is index 2, resolved by the handler against the last read",
+          router.route("like post two").calls[0].args == {"index": 2})
+    check("'follow @ada' carries the handle without the @",
+          router.route("follow @ada").calls[0].args == {"handle": "ada"})
+    check("a bulk like carries the bulk words as the target, for the handler to refuse",
+          router.route("like everything from ada").calls[0].args == {"post_id": "everything from ada"})
+    for stray in ("i'd like to open my downloads", "i would like the weather", "i like that idea",
+                  "follow up with ada tomorrow", "follow the link", "what does that look like"):
+        _r = router.route(stray)
+        check(f"{stray!r} no longer reaches x.like / x.follow",
+              not any(c.name in ("x.like", "x.unlike", "x.follow", "x.unfollow") for c in (_r.calls or [])),
+              str([c.name for c in (_r.calls or [])]))
+    for name, cap, frz in (("x.like", "x.interact", ("post_id",)), ("x.unlike", "x.interact", ("post_id",)),
+                           ("x.follow", "x.follow", ("handle",)), ("x.unfollow", "x.follow", ("handle",))):
+        s = REGISTRY[name]
+        check(f"{name} is amber, {cap}, holds, target frozen {frz}",
+              s.tier == "amber" and s.capability == cap and s.holds and tuple(s.frozen) == frz)
 
     r_reply = router.route("reply to post two with thanks")
     check("'reply to post two' carries the RIGHT text, not 'two with thanks'",

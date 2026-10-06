@@ -1451,6 +1451,23 @@ ol {
   border-left-color: var(--prov-program);
 }
 
+/* `system` is the daemon's own voice — neither trusted like his nor untrusted
+   like a tool's. --text-muted rather than the program tint, so it stops
+   falling to the untrusted side by default. */
+.trace__line[data-provenance='system'] {
+  border-left-color: var(--text-muted);
+}
+
+/* CONTRACT §4.1 `via` — TYPED / VOICE, or whatever string the daemon sent.
+   Only rendered when present; absent means no tag. Inherits the meta row's
+   label case and tracking. */
+.trace__via {
+  padding: 0 var(--sp-1);
+  border: var(--hairline) solid var(--panel-border);
+  border-radius: var(--radius-sm);
+  color: var(--text-muted);
+}
+
 .trace__meta {
   display: flex;
   gap: var(--sp-2);
@@ -2800,71 +2817,88 @@ ol {
   color: var(--status-warn);
 }
 
-/* ─── chat ─── */
+/* ─── the compose box — TRACE's footer (layout/Composer.tsx) ───
+   Pinned below the scrolling body by Drawer's footer slot. A 1px --panel-border
+   on the TOP edge only; the field sits on the drawer's own background with no
+   card, no border, and no radius beyond --radius-sm. Nothing here animates:
+   the caret blink is the platform's and free, the field grows by content
+   (`field-sizing`), and the hint changes text, not opacity. */
 
-.chat {
+.drawer__foot {
+  flex: none;
+}
+
+.compose {
   display: flex;
   flex-direction: column;
-  gap: var(--sp-2);
-  width: 100%;
-  min-height: 0;
+  gap: var(--sp-1);
+  padding: var(--sp-2) var(--sp-4) var(--sp-3);
+  border-top: var(--hairline) solid var(--panel-border);
 }
 
-.chat__tabs {
-  display: flex;
-  align-items: baseline;
-  gap: var(--sp-3);
-}
-
-.chat__tab {
-  background: none;
-  border: none;
-  padding: 0 0 var(--sp-1);
-  font: inherit;
+/* The active companion's name. Label style, §R.7. */
+.compose__label {
   font-size: var(--fs-label);
-  color: var(--accent-bright);
+  font-weight: 400;
   text-transform: var(--label-transform);
   letter-spacing: var(--label-tracking);
-  border-bottom: 2px solid var(--accent-bright);
-  cursor: default;
+  color: var(--text-muted);
 }
 
-.chat__tabnote {
-  font-size: var(--fs-label);
-  color: var(--ornament);
-}
-
-.chat__body {
-  flex: 1 1 auto;
-  min-height: 0;
-}
-
-.chat__count {
-  margin: 0;
-  font-size: var(--fs-sm);
-  color: var(--text);
-}
-
-.chat__field {
+/* 28px row rhythm: 20px line, 4px above and below. Grows with its content from
+   one line (28px) to four (88px), then scrolls inside. */
+.compose__field {
+  display: block;
   width: 100%;
-  padding: var(--sp-2) var(--sp-3);
-  background: var(--bg-void);
-  border: var(--hairline) solid var(--panel-border);
+  box-sizing: border-box;
+  margin: 0;
+  padding: var(--sp-1) 0;
+  background: transparent;
+  border: 0;
   border-radius: var(--radius-sm);
-  font: inherit;
-  font-size: var(--fs-sm);
+  font-family: var(--font-mono);
+  font-size: var(--fs-base);
+  line-height: 20px;
   color: var(--text);
+  resize: none;
+  field-sizing: content;
+  min-height: 28px;
+  max-height: 88px;
+  overflow-y: auto;
+  overflow-wrap: anywhere;
 }
 
-/* Disabled and SAYING SO. The placeholder carries the reason, because a
-   disabled control with no explanation is indistinguishable from a broken one. */
-.chat__field:disabled {
-  color: var(--col-label);
+.compose__field::placeholder {
+  color: var(--text-muted);
+}
+
+/* 1px --accent, hugging the field. The global :focus-visible ring is the same
+   width; only the offset differs, so the ring does not poke into the label
+   above or the hint below. Text fields match :focus-visible on every focus. */
+.compose__field:focus-visible {
+  outline: var(--hairline) solid var(--accent);
+  outline-offset: 0;
+}
+
+/* NO DAEMON. The field stays where it is, disabled; the hint says why. */
+.compose__field:disabled {
+  color: var(--text-muted);
   cursor: not-allowed;
 }
 
-.chat__field::placeholder {
-  color: var(--col-label);
+/* ENTER TO SEND · SHIFT+ENTER NEW LINE — or NO DAEMON — or the refusal. The
+   refusal is the only thing here that changes colour, and it is the alarm
+   colour, which does not theme. */
+.compose__hint {
+  font-size: var(--fs-label);
+  text-transform: var(--label-transform);
+  letter-spacing: var(--label-tracking);
+  color: var(--text-muted);
+  overflow-wrap: anywhere;
+}
+
+.compose__hint[data-tone='error'] {
+  color: var(--status-error);
 }
 
 /* ─── the clock, top right ─── */

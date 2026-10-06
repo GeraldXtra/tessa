@@ -28,7 +28,9 @@ import { AGENT_STATES } from '@tessa/protocol';
 
 import { developmentCsp, PRODUCTION_CSP } from '../shared/csp.ts';
 import {
+  AGENT_TEXT_MAX,
   IPC,
+  type AgentSendResult,
   type AuditEntry,
   type BootstrapInfo,
   type ConnectionStatus,
@@ -42,6 +44,7 @@ import { gpuFeatureSummary, probeGpu } from './gpu-probe.ts';
 import { PttController } from './ptt-controller.ts';
 import { DEFAULT_THEME, isThemeId, loadTheme, orbThemePath, saveTheme } from './theme-state.ts';
 import { createOrbWindow, hardenWebContents, isInstrumentedLaunch } from './window.ts';
+import { createWidgetWindow, widgetBounds } from './widget-window.ts';
 import { DaemonConnection } from './ws-client.ts';
 
 const isDev = !app.isPackaged;
@@ -226,6 +229,18 @@ const APPROVAL_FIXTURES: Record<string, Omit<PermissionRequest, 'receivedAt' | '
     },
   ],
 };
+
+/**
+ * Dev-only `--fixture-echo-delay=<ms>`; 0 when absent. See the transcript
+ * forwarder for what it proves.
+ */
+const echoDelayMs = (() => {
+  if (!isDev) return 0;
+  const flag = process.argv.find((a) => a.startsWith('--fixture-echo-delay='));
+  if (!flag) return 0;
+  const ms = Number.parseInt(flag.slice('--fixture-echo-delay='.length), 10);
+  return Number.isFinite(ms) && ms > 0 ? Math.min(ms, 30_000) : 0;
+})();
 
 /** Dev-only. `--probe-geometry=<ms>` / `--probe-pulse=<ms>`; 0 when absent. */
 function probeFlagMs(name: string): number {
@@ -548,6 +563,14 @@ if (!instrumentedDevLaunch && !app.requestSingleInstanceLock()) {
         log(`sphere: forced paletteGain ${on ? 'ON' : 'OFF'}`);
         return on;
       })(),
+      forcedDeform: (() => {
+        if (!isDev) return null;
+        const flag = process.argv.find((a) => a.startsWith('--force-deform='));
+        if (!flag) return null;
+        const on = flag.slice('--force-deform='.length) !== '0';
+        log(`sphere: forced deform ${on ? 'ON' : 'OFF (round T shell)'}`);
+        return on;
+      })(),
       probeGeometryMs: probeFlagMs('probe-geometry'),
       probePulseMs: probeFlagMs('probe-pulse'),
       probeLimbMs: probeFlagMs('probe-limb'),
@@ -777,7 +800,27 @@ if (!instrumentedDevLaunch && !app.requestSingleInstanceLock()) {
         log(`pty sessions → renderer: ${sessions.length}`);
         broadcast(IPC.ptySessions, sessions);
       },
-      onTranscriptLine: (line) => broadcast(IPC.transcriptLine, line),
+      onTranscriptLine: (line) => {
+        /**
+         * `--fixture-echo-delay=<ms>` — dev only. Holds HIS typed line back
+         * from the renderer while the ack passes through untouched.
+         *
+         * It exists to prove one rule by making it visible: the user's own
+         * line renders ONLY from the daemon's `evt.transcript.message` echo,
+         * never from local state. With the echo held, the box clears (the ack
+         * arrived) and the transcript shows nothing for the delay — a surface
+         * that painted the line from what it sent would show it at once.
+         */
+        if (echoDelayMs > 0 && line.role === 'user' && line.via === 'typed') {
+          log(`!! FIXTURE ECHO DELAY: holding his line ${line.messageId} for ${echoDelayMs} ms`);
+          setTimeout(() => {
+            log(`!! FIXTURE ECHO DELAY: releasing ${line.messageId}`);
+            broadcast(IPC.transcriptLine, line);
+          }, echoDelayMs);
+          return;
+        }
+        broadcast(IPC.transcriptLine, line);
+      },
 
       // The two halves of a push-to-talk round trip. Neither of them decides
       // anything here — both go straight to the controller, which owns the one
@@ -1075,6 +1118,96 @@ if (!instrumentedDevLaunch && !app.requestSingleInstanceLock()) {
     });
 
     /**
+     * A typed line to her — the last gate before the wire. CONTRACT §5.1.
+     *
+     * Refusals, in order, each a real failure mode rather than a formality:
+     *
+     *  1. A malformed message. The renderer is sandboxed, not trusted.
+     *  2. Not a string, or nothing but whitespace. The daemon would answer
+     *     `err.validation "text is required"`; refusing here says the same
+     *     thing without a round trip.
+     *  3. Over AGENT_TEXT_MAX characters. REFUSED, never truncated: a line cut
+     *     at 4,000 characters would send her a sentence he did not write.
+     *  4. A companionId that is not id-shaped. CONTRACT §5.1 requires the
+     *     field; an arbitrary string in it would be the renderer choosing a
+     *     payload, which this bridge exists to prevent.
+     *
+     * What is deliberately NOT here: any reading of the text. Whether it is a
+     * question, a red-tier command or an injection attempt is the daemon's
+     * guard's to decide (§6.1, §6.4) — this process forwards or refuses, and
+     * never interprets.
+     */
+    /**
+     * Turns the daemon accepted, by messageId → when. The cancel fence: only
+     * an id that came back in a `res.agent.accepted` may be cancelled, so the
+     * renderer cannot aim a cancel at a turn it did not start. Bounded.
+     */
+    const acceptedTurns = new Map<string, number>();
+    const ACCEPTED_TURNS_MAX = 64;
+
+    ipcMain.handle(IPC.agentSend, async (_event, message: unknown): Promise<AgentSendResult> => {
+      if (typeof message !== 'object' || message === null) {
+        return { ok: false, error: 'malformed request', code: 'protocol.badEnvelope' };
+      }
+      const { companionId, text } = message as { companionId?: unknown; text?: unknown };
+      if (typeof text !== 'string') {
+        return { ok: false, error: 'text must be a string', code: 'protocol.badEnvelope' };
+      }
+      const trimmed = text.trim();
+      if (trimmed.length === 0) {
+        return { ok: false, error: 'nothing to send', code: 'validation' };
+      }
+      if (text.length > AGENT_TEXT_MAX) {
+        return {
+          ok: false,
+          error: `${text.length} characters is over the ${AGENT_TEXT_MAX} cap — not sent`,
+          code: 'tooLong',
+        };
+      }
+      if (typeof companionId !== 'string' || !/^[A-Za-z0-9_-]{1,64}$/.test(companionId)) {
+        log(`!! refused a typed line addressed to companionId=${JSON.stringify(companionId)}`);
+        return { ok: false, error: 'companionId is not a valid id', code: 'protocol.badEnvelope' };
+      }
+      if (!connection) {
+        return { ok: false, error: 'no connection object', code: 'unavailable' };
+      }
+      const result = await connection.sendAgentMessage(companionId, trimmed);
+      if (result.ok) {
+        acceptedTurns.set(result.messageId, result.ackAt);
+        if (acceptedTurns.size > ACCEPTED_TURNS_MAX) {
+          const oldest = acceptedTurns.keys().next().value;
+          if (oldest !== undefined) acceptedTurns.delete(oldest);
+        }
+      }
+      return result;
+    });
+
+    ipcMain.on(IPC.agentCancel, (_event, message: unknown) => {
+      if (typeof message !== 'object' || message === null) return;
+      const { companionId, messageId } = message as { companionId?: unknown; messageId?: unknown };
+      if (typeof messageId !== 'string' || !messageId) return;
+      if (typeof companionId !== 'string' || !/^[A-Za-z0-9_-]{1,64}$/.test(companionId)) return;
+      if (!acceptedTurns.has(messageId)) {
+        // Loud. Either the turn was never ours or it was already forgotten;
+        // in both cases a cancel for it must not reach the daemon.
+        log(`!! refused a cancel for ${messageId}: main never received an acceptance for it`);
+        return;
+      }
+      void (
+        connection?.sendAgentCancel(companionId, messageId) ??
+        Promise.resolve({
+          messageId,
+          ok: false,
+          type: 'unavailable',
+          message: 'no connection object',
+        })
+      ).then((reply) => {
+        log(`cancel ${messageId} → ${reply.type}${reply.ok ? '' : `: ${reply.message}`}`);
+        broadcast(IPC.agentCancelReply, reply);
+      });
+    });
+
+    /**
      * Persist the theme. Display already changed in the renderer; this only
      * decides what the NEXT launch paints.
      *
@@ -1114,7 +1247,29 @@ if (!instrumentedDevLaunch && !app.requestSingleInstanceLock()) {
     // Dev only. In a packaged build the channel is simply never handled, so a
     // renderer that somehow sent on it would be talking to nothing.
     if (isDev) {
-      ipcMain.on(IPC.devMetrics, (_event, line: string) => log(`metrics ${line}`));
+      ipcMain.on(IPC.devMetrics, (event, line: string) => {
+        log(`metrics ${line}`);
+        /**
+         * `CAPTURE <name>` — a capture AT A SCRIPT POINT, not on a timer.
+         *
+         * `--capture-every` photographs the window on a cadence, which cannot
+         * land on "the 200 ms after the ack and before the echo". The dev
+         * driver's `capture:` step reports this line, and main answers with
+         * one `capturePage()` into TESSA_CAPTURE_DIR under that name. Dev
+         * only, and inert without the directory.
+         */
+        const m = /^CAPTURE ([A-Za-z0-9_-]{1,40})$/.exec(String(line));
+        const dir = process.env['TESSA_CAPTURE_DIR'];
+        if (m && dir) {
+          const name = m[1] as string;
+          const contents = event.sender;
+          void contents
+            .capturePage()
+            .then((image) => writeFile(join(dir, `${name}.png`), image.toPNG()))
+            .then(() => log(`capture ${name}.png`))
+            .catch((err: unknown) => log(`capture ${name} failed: ${String(err)}`));
+        }
+      });
 
       /**
        * Geometry, reported by Electron itself rather than by GetWindowRect.
@@ -1147,7 +1302,118 @@ if (!instrumentedDevLaunch && !app.requestSingleInstanceLock()) {
     // renderer calls tessa.bootstrap() as its first act; creating the window
     // first leaves a window — small, but real — in which that invoke rejects
     // with "no handler registered" and the surface comes up with no GPU tier.
-    createOrbWindow({ isDev, rendererUrl });
+    /**
+     * ⚠ THE FULL ORB IS NOW LAZY, AND ONLY UNDER `--widget-only`.
+     *
+     * Default launch is unchanged: the window is created here, exactly as it
+     * always was, before anything else can race it.
+     *
+     * `--widget-only` starts with JUST the corner sphere and builds the full
+     * surface the first time he clicks it. That is the mode worth having at
+     * login — an ambient indicator costs a frozen canvas, while the full Orb
+     * costs a 245 kB bundle, a WebGL context and 15,600 particles he may not
+     * look at all day.
+     */
+    const widgetOnly = process.argv.includes('--widget-only');
+    let orbWindow: BrowserWindow | null = widgetOnly
+      ? null
+      : createOrbWindow({ isDev, rendererUrl });
+
+    const showOrb = (): BrowserWindow => {
+      if (!orbWindow || orbWindow.isDestroyed()) {
+        orbWindow = createOrbWindow({ isDev, rendererUrl });
+        attachOrbCloseGuard(orbWindow);
+      }
+      if (orbWindow.isMinimized()) orbWindow.restore();
+      orbWindow.show();
+      orbWindow.focus();
+      return orbWindow;
+    };
+
+    /* ── the ambient widget ──────────────────────────────────────────────────
+     *
+     * A second window, 132 px, top-right, transparent and always on top. It
+     * needs NO new daemon client: `broadcast` above already sends every push to
+     * every BrowserWindow, so it receives `agentStateChanged` the moment it
+     * exists.
+     *
+     * OPT-IN with `--widget`. It is not on by default because it is a window
+     * that sits over his screen all day, and that is his decision to make, not
+     * a surprise on next launch.
+     */
+    const wantWidget = process.argv.includes('--widget');
+    let widgetWindow: BrowserWindow | null = null;
+
+    /**
+     * Closing the full Orb HIDES it and leaves the widget, rather than quitting.
+     *
+     * That is the behaviour the widget implies: he clicked a corner ornament to
+     * open something, so closing it should return him to the ornament. It also
+     * keeps `window-all-closed` from firing, which is what would otherwise quit
+     * the app and take the ambient indicator with it.
+     *
+     * ⚠ ONLY attached when the widget exists. Without `--widget` nothing is
+     * intercepted and closing the Orb quits exactly as it always has — a
+     * feature he did not ask for must not change how the app he has behaves.
+     */
+    const attachOrbCloseGuard = (win: BrowserWindow): void => {
+      win.on('close', (event) => {
+        if (!widgetWindow || widgetWindow.isDestroyed()) return;
+        event.preventDefault();
+        win.hide();
+        widgetWindow.showInactive();
+        log('orb hidden — the widget has it; click the sphere to bring it back');
+      });
+    };
+
+    /**
+     * ⚠ COLLAPSE BEHAVIOUR, DECIDED AND STATED.
+     *
+     * Closing the full Orb HIDES it and brings the widget back, rather than
+     * quitting. That is the behaviour the widget implies: he clicked a corner
+     * ornament to open something, so closing it should return him to the
+     * ornament, not end the session and take the ambient indicator with it.
+     *
+     * ⚠ It also means `window-all-closed` must not fire, which is why the main
+     * window is hidden rather than destroyed — `app.quit()` on that event is
+     * still correct, and with the widget alive it simply never runs.
+     *
+     * WITHOUT `--widget` NOTHING CHANGES: no interception, and closing the Orb
+     * quits exactly as it always has. A feature he did not ask for must not
+     * change how the app he has behaves.
+     */
+    if (wantWidget) {
+      if (orbWindow) attachOrbCloseGuard(orbWindow);
+
+      widgetWindow = createWidgetWindow({
+        isDev,
+        rendererUrl,
+        onExpand: () => {},
+      });
+
+      const b = widgetBounds();
+      log(`widget: ${b.width}x${b.height} at ${b.x},${b.y} — transparent, always on top`);
+
+      // Click the sphere -> show the full Orb. The widget stays where it is:
+      // hiding it would make the corner blink every time he opens the Orb, and
+      // an always-on-top ornament that disappears is not ambient.
+      ipcMain.on(IPC.widgetExpand, () => {
+        const existed = orbWindow !== null && !orbWindow.isDestroyed();
+        showOrb();
+        log(`widget clicked — full Orb ${existed ? 'shown' : 'created'}`);
+      });
+
+      /**
+       * The click-through toggle. `forward: true` on the ignoring side keeps
+       * mousemove flowing so the renderer can tell when the pointer has entered
+       * the disc; without it the page would go blind the moment it gave the
+       * clicks back and could never ask for them again.
+       */
+      ipcMain.on(IPC.widgetInteractive, (_event, over: unknown) => {
+        if (!widgetWindow || widgetWindow.isDestroyed()) return;
+        widgetWindow.setIgnoreMouseEvents(!over, { forward: true });
+      });
+    }
 
     /**
      * §R.8 item 8. A display change can alter the refresh rate out from under
@@ -1446,6 +1712,46 @@ if (!instrumentedDevLaunch && !app.requestSingleInstanceLock()) {
         );
         log(`!! FIXTURE DAEMON DEATH: invalidated ${n} card(s)`);
       }, deathAfterMs);
+    }
+
+    /**
+     * `--fixture-link-drop=<afterMs>,<forMs>` — dev only. A CLIENT STUB for
+     * the compose box's NO DAEMON state.
+     *
+     * The socket is untouched — this session may not stop or signal the
+     * daemon, and dropping the link for real would also drop the pending
+     * approvals path this surface has already proven. What it does is push
+     * the identical `connectionChanged` status a real drop pushes, wait, and
+     * push the real current status back. The renderer cannot tell the
+     * difference, which is the point: the box goes disabled, the hint says
+     * NO DAEMON, Enter does nothing, and the draft must still be there when
+     * the status returns. What it does NOT prove is that a real close reaches
+     * `onStatus` — that is one `emit` in ws-client.ts, stated as reasoning.
+     */
+    const linkDrop = (() => {
+      if (!isDev) return null;
+      const flag = process.argv.find((a) => a.startsWith('--fixture-link-drop='));
+      if (!flag) return null;
+      const [after, dur] = flag.slice('--fixture-link-drop='.length).split(',').map(Number);
+      if (!Number.isFinite(after) || !Number.isFinite(dur) || (after as number) <= 0 || (dur as number) <= 0) {
+        log(`!! --fixture-link-drop needs <afterMs>,<forMs>, got "${flag}"`);
+        return null;
+      }
+      return { after: after as number, dur: dur as number };
+    })();
+    if (linkDrop) {
+      setTimeout(() => {
+        log(`!! FIXTURE LINK DROP: pushing 'reconnecting' to the renderer for ${linkDrop.dur} ms — the socket is untouched`);
+        broadcast(IPC.connectionChanged, {
+          phase: 'reconnecting',
+          detail: 'FIXTURE link drop — the socket is untouched',
+        });
+        setTimeout(() => {
+          const real = connection?.current ?? { phase: 'offline' };
+          log(`!! FIXTURE LINK DROP: restoring the real status (${real.phase})`);
+          broadcast(IPC.connectionChanged, real);
+        }, linkDrop.dur);
+      }, linkDrop.after);
     }
 
     connection.start();

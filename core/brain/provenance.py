@@ -91,6 +91,13 @@ _INJECTION_PATTERNS = [
     re.compile(r"\b(delete|rm\s+-rf|format|del\s+/[sq])\b", re.I),
     re.compile(r"new\s+instructions?\s*:", re.I),
     re.compile(r"\bexfiltrat|send\s+(the\s+)?(token|key|password)", re.I),
+    # MEMORY-POISONING SHAPES, added with the claim store (core/brain/claims.py).
+    # A post that tells her what to REMEMBER, or who to TRUST, is aimed at her
+    # memory rather than her hands. Still reported, still not relied upon: the
+    # store cannot be told a status whatever the post says.
+    re.compile(r"ignore\s+(all\s+)?(your|the|these)\s+(rules|instructions|guidelines)", re.I),
+    re.compile(r"\b(remember|store|save|note)\s+(this\s+|that\s+|it\s+)?as\s+(a\s+)?(fact|truth)\b", re.I),
+    re.compile(r"\b(is|am|are)\s+(a\s+|an\s+)?(trusted|authori[sz]ed)\s+(source|user|admin|account)\b", re.I),
 ]
 
 

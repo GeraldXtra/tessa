@@ -17,6 +17,8 @@ import { contextBridge, ipcRenderer, type IpcRendererEvent } from 'electron';
 
 import {
   IPC,
+  type AgentCancelReply,
+  type AgentSendResult,
   type ApprovalCleared,
   type ApprovalDecision,
   type ApprovalRefusal,
@@ -102,6 +104,23 @@ const bridge: TessaBridge = {
     };
   },
 
+  /**
+   * The two the ambient widget needs, and nothing more.
+   *
+   * Both are `send` — fire and forget, no reply, no data returned to the page.
+   * Neither carries a payload the renderer chose beyond a single boolean, so
+   * there is no new attack surface here: main cannot be made to do anything
+   * with these except show a window it already owns, and toggle a mouse flag on
+   * a window it created.
+   */
+  widgetExpand: (): void => {
+    ipcRenderer.send(IPC.widgetExpand);
+  },
+
+  widgetInteractive: (over: boolean): void => {
+    ipcRenderer.send(IPC.widgetInteractive, Boolean(over));
+  },
+
   onDisplayChanged: (listener: () => void): (() => void) => {
     const handler = (): void => listener();
     ipcRenderer.on(IPC.displayChanged, handler);
@@ -148,6 +167,36 @@ const bridge: TessaBridge = {
       ...(edited ? { editedArgs: edited } : {}),
     });
   },
+
+  /**
+   * Free text, and the narrowing here is deliberately DUMB: types and a hard
+   * size ceiling, nothing else. Main owns the real rules (non-empty, at most
+   * AGENT_TEXT_MAX characters, an id-shaped companion) and says which one
+   * refused, so the box can show the reason. Truncating here would be the
+   * silent cut the brief forbids — the 64 KiB ceiling only stops a runaway
+   * renderer from pushing megabytes over IPC, and anything that large is
+   * refused by main as too long anyway.
+   */
+  agentSend: (companionId: string, text: string): Promise<AgentSendResult> => {
+    if (typeof companionId !== 'string' || typeof text !== 'string') {
+      return Promise.resolve({ ok: false, error: 'bad arguments', code: 'protocol.badEnvelope' });
+    }
+    return ipcRenderer.invoke(IPC.agentSend, {
+      companionId: companionId.slice(0, 64),
+      text: text.slice(0, 64 * 1024),
+    });
+  },
+
+  agentCancel: (companionId: string, messageId: string): void => {
+    if (typeof companionId !== 'string' || typeof messageId !== 'string') return;
+    if (!companionId || !messageId) return;
+    ipcRenderer.send(IPC.agentCancel, {
+      companionId: companionId.slice(0, 64),
+      messageId: messageId.slice(0, 64),
+    });
+  },
+
+  onAgentCancelReply: subscribe<AgentCancelReply>(IPC.agentCancelReply),
 
   // Persistence only — the renderer has already repainted itself. Main
   // re-validates the id, so the worst a bad value achieves is being ignored.

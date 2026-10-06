@@ -24,6 +24,16 @@ from typing import Any
 Tier = str  # "green" | "amber" | "red"
 
 
+#: Who or what BUILT a call. A strict subset of the protocol's PROVENANCE enum
+#: (CONTRACT §6.2) — `program` and `external` can never build a tool call, only
+#: be read by one.
+#:
+#:   human     the router parsed the owner's speech or typing
+#:   agent     the model picked it (the tool-picking loop, when it exists)
+#:   schedule  an unattended trigger (the scheduler, when it exists)
+Origin = str
+
+
 @dataclass(frozen=True)
 class ToolCall:
     name: str
@@ -32,6 +42,43 @@ class ToolCall:
     #: What Tessa says while doing it. Short first sentence — Piper streams per
     #: sentence and the opener is the whole 400 ms budget.
     speech: str = ""
+    #: ── WHO BUILT THIS CALL. THE APPROVAL CARD'S PROVENANCE COMES FROM HERE. ──
+    #:
+    #: It used to come from `args["provenance"]`, defaulting to "human". That
+    #: was harmless while every call was router-built from his own speech, and
+    #: it is a hole the moment a model builds one: nothing stops a model setting
+    #: `args["provenance"] = "human"` on its own call, and the card — the
+    #: security boundary for every red action — would then say the owner asked
+    #: for it. A forgeable provenance guts the card.
+    #:
+    #: So provenance is a FIELD ON THE CALL, set by whatever constructed it and
+    #: never readable from `args`. The executor strips `provenance`/`origin`
+    #: keys out of `args` before dispatch (core/brain/executor.py), mirroring how
+    #: `_approved_by_surface` is made unforgeable.
+    #:
+    #: THE DEFAULT IS "schedule", NOT "human", AND THAT IS THE POINT. It was
+    #: "human" so existing construction sites kept their meaning — which meant
+    #: any builder that forgot the field (a future model loop, a scheduler, a
+    #: test) was recorded as the OWNER on the card and on the chain. A forgotten
+    #: origin now fails SAFE: "schedule" is the most restrictive actor in
+    #: guard.py. Every real human call is stamped "human" explicitly at the
+    #: router's one choke point (core/brain/router.py) and at the typed and
+    #: voice web.search sites; nothing human relies on the default. A future
+    #: model loop sets "agent". Anything unrecognised is treated as "schedule".
+    origin: Origin = "schedule"
+    #: ── THE HOLD'S "YES" TRAVELS HERE, NOT IN `args`. ─────────────────────────
+    #:
+    #: `confirmed` used to be an ARGS key: `answer_confirmation` set
+    #: `args["confirmed"] = True` and the hold gate read it back with
+    #: `args.get("confirmed")`. Nothing stripped it, so a model-built call
+    #: carrying `confirmed: true` would have skipped the hold outright — the
+    #: same hole as `provenance`, and a bypass rather than a mislabel. The
+    #: executor now strips that key with the others, and the ONLY things that
+    #: satisfy a hold are this field — set by `answer_confirmation` once the
+    #: ledger has accepted his "yes" — and the ledger's own repeat match. A
+    #: model's args cannot reach either. Defaults False: a call is unconfirmed
+    #: unless the code that owns the ledger says otherwise.
+    confirmed: bool = False
 
 
 # ── the Start Menu index ─────────────────────────────────────────────────────

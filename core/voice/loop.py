@@ -29,7 +29,10 @@ import numpy as np
 
 from core.brain.conversation import (CLEARED_LINES, Conversation,
                                      is_clear_request)
+from core.brain import intent_model
 from core.brain.executor import Executor
+from core.brain.intents import PRIVATE_UNROUTED as _PRIVATE_UNROUTED
+from core.brain.intents import is_private_utterance
 from core.brain.persona import system_prompt
 from core.brain.repair import repair
 from core.brain.unrouted import (Disposition, action_refusal, classify,
@@ -47,6 +50,13 @@ from core.bus import AgentState, AudioBus
 #: over a fifteen-second stream. Saying it once and resetting is tessa.md's
 #: own rule about opinions: say it once, never nag.
 EMPTY_TURNS_BEFORE_SPEAKING = 3
+
+#: What she says to a private message the router could not place (X direct
+#: messages, round 4, 2026-09-12). LOCAL, ALWAYS: "direct message ada bob
+#: saying …" is not a DM rule's shape and the classifier would have handed it
+#: to the brain — his dictated private words to a cloud model, and into the
+#: thread on disk. She names the shape she needs instead.
+PRIVATE_UNROUTED = _PRIVATE_UNROUTED   # one sentence, shared with the typed path
 
 #: Output budget for a model answer.
 #:
@@ -170,6 +180,9 @@ class VoiceLoop:
         conversation=None,   # core.brain.conversation.Conversation — the thread
         wake=None,           # core.voice.wake.WakeDetector — optional, may be None
         speaker=None,        # core.voice.speaker.SpeakerVerifier — optional
+        claims=None,         # core.brain.claims.ClaimStore — strangers' words, as claims
+        style=None,          # core.brain.style.StyleStore — how people write, as numbers
+        relevance=None,      # core.brain.relevance.RelevanceFilter — which claims are kept
     ) -> None:
         self.mic = mic
         self.stt = stt
@@ -185,7 +198,8 @@ class VoiceLoop:
         # audit file — both of which would look like they were working.
         self.executor = Executor(
             on_state=lambda st, detail=None: self._state(AgentState(st), detail),
-            session=session, audit=audit)
+            session=session, audit=audit, claims=claims, style=style,
+            relevance=relevance)
         # THE BRAIN. Injected, like the fence and the audit log, because the
         # daemon owns one and a second would be a second call counter and a
         # second set of rate-limit state.
@@ -258,7 +272,7 @@ class VoiceLoop:
         cannot answer says why instead of falling through to "not mine yet",
         which is the exact failure this whole file is fixing.
         """
-        from core.brain.llm import LLMUnavailable, Message
+        from core.brain.llm import QUALITY_ROUTINE, LLMUnavailable, Message
         from core.brain.repair import strip_wake_name
 
         # HER NAME COMES OFF BEFORE THE MODEL SEES IT.
@@ -279,13 +293,33 @@ class VoiceLoop:
         # "yes, please" fix: without it every call was standalone and her own
         # offer one turn earlier did not exist.
         history = self.conversation.messages()
+        # CLAIMS SHE HAS NOTED FROM X, if any are about this — fenced and
+        # labelled as strangers' posts. Same as the typed twin; see
+        # core/brain/claims.py.
+        from core.brain import claims as _claims
+
+        block = _claims.prompt_block(question)
+        asked = f"{block}\n\n{question}" if block else question
+        # STYLE NOTES on the system prompt — same as the typed twin; numbers
+        # and single words from what she has read, never a sentence. See
+        # core/brain/style.py.
+        from core.brain import style as _style
+
         self._stage(f"brain.entered {self.brain.name} "
                     f"[{self.conversation.describe()}]", t0)
         try:
+            # ROUTINE. A spoken answer he can hear and immediately push back on
+            # is worth having from the weak local model when Gemini's free-tier
+            # quota is spent — the alternative is her saying nothing all
+            # evening. Quality-critical work (X drafting) declares nothing and
+            # therefore stops and asks instead. See core/brain/llm/base.py.
+            # `brain.entered {self.brain.name}` above already names whichever
+            # engine this actually reaches.
             parts = [d for d in self.brain.stream(
-                system_prompt(),
-                history + [Message(role="user", content=question)],
-                max_tokens=BRAIN_MAX_TOKENS)]
+                _style.with_style(system_prompt()),
+                history + [Message(role="user", content=asked)],
+                max_tokens=BRAIN_MAX_TOKENS,
+                quality=QUALITY_ROUTINE)]
         except LLMUnavailable as exc:
             self._stage(f"brain.unavailable {exc}", t0)
             return exc.spoken
@@ -293,7 +327,16 @@ class VoiceLoop:
             self._stage(f"brain.failed {type(exc).__name__}", t0)
             return action_failed(f"my thinking brain errored: {type(exc).__name__}",
                                  "Ask me again, or check the connection.")
-        text = "".join(parts).strip()
+        # THE ANTI-AI-TELLS FILTER, on the SPOKEN path — the one that matters
+        # most, because Piper pronounces markdown literally and a "Certainly!"
+        # wind-up is spent out of the time-to-first-audio budget. Strips filler
+        # only; flags what it will not rewrite. See core/brain/humanness.py.
+        from core.brain import humanness
+
+        _human = humanness.humanise("".join(parts))
+        text = _human.text
+        if not _human.clean:
+            self._stage(f"brain.humanness {humanness.describe(_human)}", t0)
         self._stage(f"brain.returned {len(text)}ch", t0)
 
         # RECORD THE EXCHANGE — the model path only.
@@ -307,6 +350,8 @@ class VoiceLoop:
         # context while she answered, her reply is page-DERIVED and is re-fenced
         # on replay. See core/brain/conversation.py.
         external = bool(getattr(self.executor.session, "external_content_in_context", 0))
+        # ...and a reply written with claims in front of it is claim-DERIVED.
+        external = external or bool(block)
         if text:
             self.conversation.add("user", question, external=external)
             self.conversation.add("assistant", text, external=external)
@@ -461,7 +506,15 @@ class VoiceLoop:
 
         self._stage(f"transcribe.entered dur={cap.duration_s:.2f}s peak={cap.peak} rms={cap.rms:.0f}", t0)
         tr = self.stt.transcribe(audio, cap.sample_rate)
-        t_stt = self._stage(f"transcribe.returned {tr.text[:40]!r}", t0)
+        # A PRIVATE-MESSAGE UTTERANCE IS NOT FOR THE LOG (X direct messages,
+        # round 4, 2026-09-12). This line goes to stdout, and stdout is the
+        # daemon log file when Tessa starts at login — so "dm @ada saying …"
+        # would put the first forty characters of a dictated private message
+        # on disk before routing even ran. Withheld by SHAPE (it starts with
+        # a DM verb), with the length, so the stage still shows STT returned.
+        t_stt = self._stage(
+            f"transcribe.returned <withheld: {len(tr.text)} chars, a private-message utterance>"
+            if is_private_utterance(tr.text) else f"transcribe.returned {tr.text[:40]!r}", t0)
 
         heard = tr.text.strip()
         # An empty transcript (silence, or a prime echo) must still land on a
@@ -619,7 +672,21 @@ class VoiceLoop:
 
         self._stage("route.entered", t0)
         routed = self.router.route(heard)
-        t_route = self._stage(f"route.returned intent={routed.intent.value} calls={len(routed.calls)}", t0)
+        t_route = self._stage(f"route.returned intent={routed.intent.value} calls={len(routed.calls)}"
+                              + (f" doubt={routed.doubt!r}" if routed.doubt else ""), t0)
+
+        # ── A DOUBTED FAST-PATH RESULT GETS A SECOND OPINION ─────────────────
+        #
+        # Intent round, 2026-09-22. "open X" scored three Start Menu programs
+        # as equals; "read my X timeline" parsed as a FILE called "X timeline".
+        # The router now says when it is not sure (`Routed.doubt`), and the
+        # brain — which has the whole sentence — confirms or corrects it before
+        # anything runs. No brain, no doubt: the fast path's answer stands.
+        if routed.doubt and self.brain is not None:
+            self._stage("intent.second_opinion.entered", t0)
+            routed = intent_model.second_opinion(
+                routed, heard, self.brain, log=lambda m: self._stage(m, t0))
+            self._stage(f"intent.second_opinion.returned calls={[c.name for c in routed.calls]}", t0)
 
         # ── UNROUTED IS NOT AN ANSWER. IT IS A HANDOFF. ──────────────────────
         #
@@ -640,16 +707,58 @@ class VoiceLoop:
                 return Turn(heard=heard, said="", intent=Intent.UNROUTED,
                             timing=TurnTiming(stt_s=t_stt - t0, audio_s=cap.duration_s))
 
-            if disposition is Disposition.ACTION:
+            if is_private_utterance(heard):
+                # A PRIVATE MESSAGE THE ROUTER COULD NOT PLACE NEVER REACHES
+                # THE MODEL (X direct messages, round 4, 2026-09-12). The
+                # classifier below hands a "question" to the brain; "direct
+                # message ada bob saying …" classified as one. Local, and it
+                # says what shape she needs. Nothing here runs a tool.
+                routed.speech = PRIVATE_UNROUTED
+            elif disposition is Disposition.ACTION:
                 routed.speech = action_refusal()
 
+            elif (disposition in (Disposition.UNRESOLVED, Disposition.QUESTION)
+                    and self.brain is not None):
+                # ── THE BRAIN RESOLVES INTENT (intent round, 2026-09-22) ─────
+                #
+                # This is the branch that replaces the dead end. "open X so I
+                # can login" reached `unresolved_refusal` and she said "I do
+                # not know what CAN LOGIN is — give me the full path". The
+                # verb was hers and the object was plain; the regex just did
+                # not have that sentence. Now the model is handed the
+                # utterance and the catalogue of tools she HAS, and answers
+                # with a tool NAME and structured args (never a command
+                # string), which the executor runs under origin="agent" —
+                # same fence, same holds, same card as any other call.
+                #
+                # THE OLD FABRICATION HAZARD IS STILL CLOSED, differently: the
+                # chat brain is never handed an instruction until the intent
+                # model has said it is NOT one ("chat"). "Open My Taluts"
+                # resolves to a folder tool or to a clarifying question, not to
+                # a paragraph about opening Taluts.
+                self._stage("intent.entered", t0)
+                res = intent_model.resolve(heard, self.brain,
+                                           log=lambda m: self._stage(m, t0))
+                self._stage(f"intent.returned kind={res.kind} "
+                            f"tool={res.call.name if res.call else '-'} via {res.engine}", t0)
+                if res.kind == intent_model.KIND_TOOL and res.call is not None:
+                    routed = Routed(Intent.TOOL, "", score=1.0, calls=[res.call])
+                elif res.kind == intent_model.KIND_CLARIFY and res.question:
+                    routed = Routed(Intent.TOOL, res.question, score=1.0)
+                elif res.kind == intent_model.KIND_CHAT or disposition is Disposition.QUESTION:
+                    # A question, or an instruction nothing owns: the chat
+                    # brain, exactly as before this round.
+                    routed.speech = self._ask_brain(heard, t0)
+                else:
+                    # An instruction with a verb she owns that even the brain
+                    # could not place — or a brain that could not be asked (a
+                    # spent quota speaks its own sentence). Honest, local,
+                    # names the word; never narrates.
+                    routed.speech = res.spoken or unresolved_refusal(heard)
+
             elif disposition is Disposition.UNRESOLVED:
-                # A verb she OWNS, with an object she could not place. This must
-                # never reach the model: asked "Open My Taluts" it answered
-                # "On it, Emperor. I am opening Taluts for you now" and opened
-                # nothing. A fabricated action in her voice is worse than the
-                # refusal it replaced, because he would go looking for a folder
-                # that never opened.
+                # NO BRAIN. A verb she OWNS, with an object she could not
+                # place, and nothing to ask: name the word, never narrate.
                 routed.speech = unresolved_refusal(heard)
 
             elif disposition is Disposition.LIVE_DATA:
@@ -663,7 +772,10 @@ class VoiceLoop:
                 routed = Routed(Intent.TOOL, "", score=1.0,
                                 calls=[ToolCall(name="web.search",
                                                 args={"query": query},
-                                                speech="Looking it up.")])
+                                                speech="Looking it up.",
+                                                # He asked; the classifier only
+                                                # decided it needed live data.
+                                                origin="human")])
 
             elif self.brain is not None:
                 routed.speech = self._ask_brain(heard, t0)

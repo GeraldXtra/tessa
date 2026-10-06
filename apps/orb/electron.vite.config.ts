@@ -1,3 +1,5 @@
+import { resolve } from 'node:path';
+
 import { defineConfig } from 'electron-vite';
 import react from '@vitejs/plugin-react';
 import type { Plugin } from 'vite';
@@ -90,6 +92,27 @@ export default defineConfig({
     plugins: [react(), cspMetaPlugin()],
     build: {
       sourcemap: true,
+
+      /**
+       * TWO HTML ENTRIES, ONE BUNDLE GRAPH.
+       *
+       * `index.html` is the full Orb; `widget.html` is the ambient corner
+       * sphere. Naming both as inputs is what makes electron-vite emit two
+       * pages instead of silently building only the default one — the widget
+       * window would then load a file that does not exist in a packaged build
+       * and show nothing, which is indistinguishable from the transparency
+       * being wrong.
+       *
+       * Rollup shares what they share: `sphere-engine.ts` and `three` are
+       * imported by both and are emitted once, so the widget costs the disc it
+       * draws rather than a second copy of the renderer.
+       */
+      rollupOptions: {
+        input: {
+          index: resolve(__dirname, 'src/renderer/index.html'),
+          widget: resolve(__dirname, 'src/renderer/widget.html'),
+        },
+      },
 
       // Set EXPLICITLY. electron-vite does not minify the renderer by default,
       // and the first build proved it: 1,609 kB across 38,471 lines of readable

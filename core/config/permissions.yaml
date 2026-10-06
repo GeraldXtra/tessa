@@ -19,21 +19,109 @@ tiers:
     - fs.usage             # size of a folder, from attributes only
     - app.launch
     - browser.open_url
+    - browser.profile      # create, list and open TESSA'S OWN Chrome profiles, and
+                           # check whether a site is signed in there. Green because
+                           # her profiles hold only what he deliberately signed into.
+                           # Opening one of HIS is a different key — see
+                           # browser.profile.personal, amber, below.
+                           # ⚠ Nothing under this key can type a password: the human
+                           # signs in by hand, always. core/tools/chrome_profiles.py
     - browser.search       # OUTPUT IS UNTRUSTED — fenced as external content
     - browser.read         # ditto, and it harvests hidden/ARIA text on purpose
     - browser.screenshot
     - browser.close
-    - x.read               # a timeline is thousands of strangers' text
+    - x.read               # a timeline is thousands of strangers' text.
+                           # Also x.search / x.read_thread / x.read_user (the
+                           # reading round, 2026-09-12): same key, same fence,
+                           # same learning path, no click anywhere in them.
+                           # Also x.share_link (the media round, 2026-09-22): a
+                           # post's permalink from the last read — no page load,
+                           # no press; the link is built by shape from the id.
+    - x.media_save         # SAVE a post's image(s) or its video to disk (the media
+                           # round, 2026-09-22). Green because it publishes nothing
+                           # and changes nothing on X — but it WRITES FILES, so:
+                           # a FIXED folder of his (Pictures\Tessa, Videos\Tessa),
+                           # never a spoken path; every name checked against
+                           # protected_paths below; create-only (no overwrite,
+                           # ever); bytes only from pbs.twimg.com / video.twimg.com;
+                           # a 50 MB cap per video (the metered-data rule) with the
+                           # size spoken. The post's words are fenced as external.
+                           # ffmpeg is NOT installed by anything under this key.
+                           # core/tools/x_tools.py
+    - x.draft              # compose a DRAFT reply for him to read. Green because a
+                           # draft is text in memory that changes nothing and reaches
+                           # nobody: it is not published, not queued, and has no send
+                           # path. PUBLISHING stays red (x.publish) behind the card.
+                           # core/brain/x_voice.py fences the source post so a hostile
+                           # tweet cannot steer what the draft says.
+    - x.dm_read            # ⚠ PRIVACY-FLAGGED (round 4, 2026-09-12): read his X
+                           # inbox or one conversation. Green because it changes
+                           # nothing and sends nothing — but it is HIS PRIVATE
+                           # correspondence, so: fenced as external (someone else
+                           # wrote it), NEVER handed to the claim or style stores,
+                           # and the chain records only that a read happened, the
+                           # handle and a count — never a message. Its one press is
+                           # the profile's Message button, which opens a
+                           # conversation and sends nothing. core/tools/x_tools.py
+    - memory.claims        # recall / confirm / reject what strangers said on X.
+                           # Green because nothing under this key can act: a
+                           # claim is a string in data/memory/claims.json that
+                           # is UNVERIFIED by construction, and the ONLY thing
+                           # that changes its status is a call whose origin is
+                           # the owner. Noting is not a tool at all — it is the
+                           # executor, after the fence. core/brain/claims.py
     - system.status
     - system.control       # volume, media keys, brightness, lock, sleep.
                            # Reversible without loss: the worst case of a
                            # mistranscription is thirty seconds of annoyance.
+                           # Also system.power.cancel: aborting a pending
+                           # shutdown is the safe direction, so it is green
+                           # and any origin may (core/system/abilities/power.py).
     - window.query         # list what is open
     - window.control       # focus / minimise / maximise / WM_CLOSE, one HWND
+    - screen.capture       # ⚠ PRIVACY-SENSITIVE, AND GREEN ANYWAY. A screenshot
+                           # changes nothing and destroys nothing — the same
+                           # reasoning as browser.screenshot — but it captures
+                           # WHATEVER is on screen: an open password manager, a
+                           # bank balance, a private message. No filter could
+                           # know which of those he meant, and one that tried
+                           # would be worse than none because he would trust it.
+                           # Bounded by location and visibility instead: every
+                           # shot lands in %LOCALAPPDATA%\Tessa\screens and on
+                           # the audit chain, and nothing here uploads anything.
+                           # core/system/abilities/screen.py
+    - screen.read          # OUTPUT IS UNTRUSTED — window and control text is
+                           # written by whoever wrote the program or named the
+                           # document. Fenced through untrusted.py exactly like
+                           # the observers, so an amber/red act is refused until
+                           # he clears the context. Also covers pixel colour.
+    - input.scroll         # the ONE green input act. A wheel turn moves a
+                           # viewport: it commits nothing, types nothing, and
+                           # undoes itself by scrolling back the other way.
     - clipboard.read       # OUTPUT IS UNTRUSTED — `program` provenance, fenced
     - clipboard.write
     - mail.read
     - pty.spawn.human      # the owner clicked/typed. Their machine, their shell.
+    - vault.status         # "is the vault locked?" — metadata; the only vault TOOL the model can name
+
+    # ── BATCH 2: the read-only observers (core/system/abilities/) ────────────
+    # They only LOOK. Nothing under these keys can start, stop, install,
+    # remove, enable or disable anything — that is why they are green. Each is
+    # a separate key rather than one blanket `system.status` so a single one
+    # can be withdrawn later without losing the others.
+    #
+    # ⚠ EVERYTHING THEY RETURN IS UNTRUSTED. A program's DisplayName, a
+    # service's display name, a task's path and an event-log message are all
+    # chosen by whoever installed the software or provoked the event. Their
+    # output is fenced as external content (core/system/untrusted.py), so it
+    # can never reach an amber or red action on its own.
+    - system.inventory     # what is installed, and what starts at login
+    - system.services      # Windows services and scheduled tasks — LIST only
+    - system.eventlog      # the last N entries of System/Application/Setup.
+                           # Its own key: event records carry usernames, paths
+                           # and remotely-influenced strings, so this is the
+                           # one the owner is most likely to want to withdraw.
+                           # Security is NOT readable — it needs elevation.
 
   # ── AMBER — unattended ONLY inside a job the owner explicitly authorised ──
   amber:
@@ -42,27 +130,163 @@ tiers:
     - fs.create            # mkdir. Additive, but it writes to his disk.
     - fs.copy              # can fill a drive; 14.5 GB free when this was written
     - process.kill         # BY PID ONLY. Never by image name — see core/tools/procs.py
+    - process.priority     # raise/lower ONE process's priority, BY PID, pid frozen.
+                           # Reversible and destroys nothing — but on two cores
+                           # "high" can starve her own voice loop, so it holds and
+                           # names the process first. Realtime is not offered at
+                           # all, and the daemon / core-process refuse list is the
+                           # kill's. core/system/abilities/process.py
     - browser.interact     # click / type on a live page. Amber because a page
                            # is attacker-controlled and a click can be a public act.
-    - x.interact           # like / repost. Reversible, but PUBLIC under his name.
+    - x.interact           # like / unlike / repost / unrepost. Reversible, but PUBLIC
+                           # under his name. Round 2 (2026-09-12): x.like/x.unlike hold
+                           # on ONE status id, frozen through the hold and the card;
+                           # the reverse is one call away. Round 3 (2026-09-12):
+                           # x.repost rebuilt onto the same frozen-id path (it had
+                           # addressed a post by POSITION), x.unrepost is its reverse.
+                           # core/tools/x_tools.py
+    - x.follow             # follow / unfollow ONE account by @name, handle frozen.
+                           # Amber for the same reason as x.interact — a follow is a
+                           # public statement in his name — and its own key so it can
+                           # be withdrawn without losing likes. Reversible: unfollow.
+                           # ⚠ Nothing under this key can fan out: one handle per call,
+                           # by shape, refused before any navigation otherwise. How
+                           # much liking/following X tolerates is X's call, not code's.
+    - x.bookmark           # bookmark / unbookmark ONE post by status id, id frozen
+                           # (the media round, 2026-09-22). Private to his account
+                           # and reversible — a lighter act than a like — amber all
+                           # the same: it holds for his yes through the same ledger,
+                           # one press, x.like's shape exactly. Its own key so it
+                           # can be withdrawn without losing likes.
     - fs.hydrate           # console: recalls a OneDrive placeholder. COSTS METERED DATA.
     - mail.draft
     - git.commit
     - pty.spawn.agent      # the model wants a shell. Not automatic.
     - pkg.install          # npm/pip install — arbitrary postinstall code
+    - auth.login           # a future vault consumer: fill a stored password into ITS OWN origin, in ITS OWN profile
+    - browser.profile.personal
+                           # ⚠ OPEN ONE OF *HIS* CHROME PROFILES. Amber, and it is the
+                           # sharpest tier line in the browser surface. Measured on this
+                           # machine 2026-09-08: THIRTY Chrome profiles, signed into real
+                           # Google accounts (mail, drive, everything). Driving a browser
+                           # in one of them is acting AS HIM. So it holds, it must name
+                           # the profile deliberately, and it never happens unattended.
+                           # A SEPARATE key from browser.profile on purpose: the green
+                           # capability is structurally unable to reach a personal
+                           # profile rather than merely declining to.
+    - system.radio         # turn the Wi-Fi or Bluetooth radio on/off. A state change,
+                           # reversible — but Wi-Fi off cuts HER connections too (STT,
+                           # TTS, the model). Never on a mistranscription: she holds.
+                           # core/system/abilities/radio.py
+    - input.keyboard       # ⚠⚠ TYPE TEXT AND PRESS KEYS. The sharpest key in the input
+                           # batch, because a keyboard is a way AROUND the deliberate
+                           # isolation of `shell.execute` below: type into an open
+                           # terminal, or press Win+R and type into the box, and the
+                           # master key is reached through a door nobody reviewed.
+                           # Three bars, none of them a promise in a comment:
+                           #   1. the MECHANISM refuses a terminal by window CLASS
+                           #      (ConsoleWindowClass, Windows Terminal, mintty, PuTTY)
+                           #      inside send_text/send_keys, so a capability added
+                           #      later inherits the refusal by calling them;
+                           #   2. Win+R, Win+X, Ctrl+Shift+Esc, Alt+F4 and any unlisted
+                           #      Windows-key combination are REFUSED OUTRIGHT, not held
+                           #      — he cannot see from "shall I press Win+R" what would
+                           #      be typed into the box a second later;
+                           #   3. amber, and the hold names the ACTUAL TEXT.
+                           # ⚠ Known limit: VS Code's integrated terminal shares a window
+                           # class with its editor, so the class bar does not stop an
+                           # embedded terminal. A bar across the obvious door, not a
+                           # proof. core/system/winapi/inputs.py
+    - input.mouse          # move / click / double / right / drag. A click lands on
+                           # whatever is under the cursor and she cannot see what that
+                           # is — a Delete button and a Cancel button are the same act
+                           # to her. So the owner confirms the coordinates.
+    - screen.record        # video of the screen. Hundreds of screenshots from ONE yes,
+                           # and on two cores it takes most of the machine while it
+                           # runs. He should know it is on.
+    - screen.find          # locate a picture on screen. Nothing is changed by looking,
+                           # but the only REASON to look is to click the answer, so it
+                           # inherits the click's caution rather than handing him
+                           # coordinates he has no way to check.
 
   # ── RED — ALWAYS requires explicit approval, no exceptions ────────────────
   red:
     - fs.delete
     - x.publish            # post / reply. The least reversible act in this build.
+    - x.quote              # QUOTE-POST (round 3, 2026-09-12): his words with another
+                           # post's permalink on the end. Posting, so red; through the
+                           # proven x.post compose path and the same card. The quoted
+                           # post's id, author and text and the quote text itself are
+                           # FROZEN on the card; a post she has not read cannot be
+                           # quoted (the card could not show it); the card says when
+                           # the quoted post carried an injection attempt. Its own key
+                           # so it can be withdrawn without losing plain posts.
+    - x.thread             # THREAD (round 3, 2026-09-12): a list of posts, ONE card for
+                           # the whole list, the list FROZEN. Posted by id-chain — each
+                           # part replies under the id X returned for the one before,
+                           # never a position — and STOPS at the first part that fails,
+                           # with the public ids on the chain. 2 to 10 parts. ⚠ Threads
+                           # and quotes at volume are bot-shaped; X's tolerance is X's.
+    - x.dm_send            # ⚠⚠ DIRECT MESSAGE (round 4, 2026-09-12): ONE private
+                           # message to ONE @name, in his name. Red: often more
+                           # consequential than a public post. The recipient AND
+                           # the message are FROZEN on the card; bulk (all/every/
+                           # a list/two @s) is refused by shape before the card; a
+                           # conversation he has not read in the last 30 minutes
+                           # is refused before the card (no reply blind). The
+                           # message text is withheld from the chain — length +
+                           # sha256 digest in its place. ⚠ Mass/automated DMing is
+                           # the most spam-flagged X behaviour; one at a time.
     - mail.send
     - shell.execute
-    - system.shutdown
+    - system.shutdown      # shut down / restart / hibernate / log off —
+                           # system.power.* (core/system/abilities/power.py).
+                           # RED and NOT instant: approval SCHEDULES it 60 s out
+                           # (10 s to 1 h if he names a time, delay frozen on the
+                           # card) and system.power.cancel aborts it until it
+                           # fires. Fixed argv, no /f: unsaved work can still veto.
     - git.push
     - browser.form_submit
     - any.payment
     - pkg.install.global   # -g / system-wide: mutates PATH outside the project
     - pty.spawn.schedule   # an unattended trigger wants a shell
+    - software.install     # ⚠⚠ RUNS AN INSTALLER — the second master key after
+                           # shell.execute. system.software.install
+                           # (core/system/abilities/software_change.py): winget
+                           # CATALOG ONLY, by EXACT package id, id FROZEN on the
+                           # card; fixed argv, shell=False. A file, a URL, a
+                           # --manifest or another --source cannot be expressed.
+                           # The name -> id search is green under system.inventory
+                           # (read-only, output fenced).
+    - software.uninstall   # by exact installed catalog id, frozen. REFUSES —
+                           # before the card and again after approval — the
+                           # daemon's Python and launcher, Chrome, Git, Node, App
+                           # Installer, Windows Terminal, OneDrive, and the
+                           # VC/.NET/AppRuntime/Xaml/Edge/DirectX/PowerShell
+                           # runtimes and Intel/NVIDIA/AMD/Realtek drivers.
+    - registry.write       # ⚠⚠ WRITES ONE REGISTRY VALUE — system.registry.set
+                           # (core/system/abilities/registry_write.py). DEFAULT-DENY:
+                           # only an ALLOWLISTED HKCU preference subtree (Control
+                           # Panel Desktop/Mouse/Keyboard/Colors/Sound, Console,
+                           # Explorer Advanced, Themes Personalize, Search, DWM,
+                           # ContentDeliveryManager) is writable at all. An ABSOLUTE
+                           # NEVER-LIST — Run*, Winlogon, IFEO, AppInit, Shell
+                           # Folders, App Paths, Classes, Environment, Command
+                           # Processor, Windows Defender, every Policies key,
+                           # Windows Update, certificates, the firewall, the
+                           # SYSTEM/SAM/SECURITY/BCD/HARDWARE hives, HKCR, HKCC and
+                           # Tessa's own keys — is refused BEFORE the card and AGAIN
+                           # after approval. One string/dword value, no key creation,
+                           # key+name+value+kind FROZEN on the card.
+    - service.control      # ⚠⚠ START / STOP / SET STARTUP of a Windows service —
+                           # system.service.start/.stop/.set_startup
+                           # (core/system/abilities/service_control.py). sc.exe by
+                           # absolute path, fixed argv, shell=False; name FROZEN on
+                           # the card. REFUSES — before the card and after approval —
+                           # the daemon's own ancestry (measured live), the
+                           # Windows-critical set, every security service, and any
+                           # name not in the service table. No sc create/delete, no
+                           # binPath=.
 
 # ── Protected paths ──────────────────────────────────────────────────────────
 # Writes, deletes, and renames under these confirm REGARDLESS of tier or actor.

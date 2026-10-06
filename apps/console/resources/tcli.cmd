@@ -21,6 +21,11 @@ rem  block, so the file stays robust even if an editor rewrites the endings.
 rem ==========================================================================
 
 setlocal
+
+rem  tcli daemon status | start | stop | restart  ->  tcli-daemon.mjs beside this
+rem  file (Node built-ins only). A single-line IF plus GOTO, like the one below.
+if /i "%~1"=="daemon" goto :daemon
+
 set "TESSA_EXE=%LOCALAPPDATA%\Programs\TessaConsole\TessaConsole.exe"
 
 if not exist "%TESSA_EXE%" goto :notinstalled
@@ -61,3 +66,7 @@ echo     npm run reinstall -w @tessa/console
 echo.
 endlocal
 exit /b 9009
+
+:daemon
+node "%~dp0tcli-daemon.mjs" %2 %3
+exit /b %ERRORLEVEL%

@@ -117,6 +117,16 @@ uniform float uEvenLight;
 // a surface property — it turns with the shell. Companions pin (0,0,1) and a
 // uGradMix of 0, so it is inert there.
 uniform vec3 uGradAxis;
+// ROUND T. Rim shrink: (gap ratio, size ratio, on). As a round shell turns
+// edge-on, the radial centre-to-centre spacing of its rows is the face spacing
+// times the facing (cos of the angle to the eye), and a dot of fixed screen
+// size overlaps its neighbour once that falls below the dot: measured, the
+// rows fuse from 0.78 R and form a solid ring past 0.85 R. The law here holds
+// the radial GAP instead: size = spacing*facing - gap, i.e. a multiplier of
+// (facing - gap/spacing) / (dot/spacing), clamped to 1 on the face. Every dot
+// stays present and keeps its colour; only its size follows the foreshortening.
+// Companions pin (0, 1, 0): off.
+uniform vec3 uRimShrink;
 
 varying float vRim;
 varying float vSeed;
@@ -214,7 +224,20 @@ void main() {
   // by a changing factor jumps the phase on every frame the factor moves, which
   // reads as a glitch rather than as acceleration.
   float noise  = wobble(position * 1.6 + aSeed, uNoiseTime);
-  float ripple = sin(dir.y * 9.0 - uTime * 6.0 + aSeed * 6.2831);
+  // ROUND W: the ripple's phase is HASHED, and it was not before. `aSeed` is
+  // `i * 0.618 mod 1` — on the golden-angle lattice that IS the dot's azimuth
+  // (the lattice advances by the same golden fraction per dot), so
+  // `aSeed * 2pi` was a smooth function of position and the "per-dot" ripple
+  // was a coherent travelling wave: one azimuthal cycle by 1.4 vertical
+  // cycles, which at speaking's old gain threw the silhouette out by 26 px
+  // (measured, cap-16 of the round-V baseline) and turned the reference's
+  // shape into lobes. Hashing the seed decorrelates neighbours, so the same
+  // term is now a per-dot shimmer that thickens the shell without moving its
+  // outline. The hash is the one the jitter already uses. 22 rad/s is a
+  // 3.5 Hz tremble — syllable rate — so it reads as a fine shimmer riding
+  // the swell rather than as a slow boil.
+  float ripplePhase = fract(sin(aSeed * 91.7) * 43758.5453) * 6.2831;
+  float ripple = sin(uTime * 22.0 + ripplePhase);
 
   // PER-PARTICLE RADIAL JITTER — the lattice-breaker.
   //
@@ -247,7 +270,15 @@ void main() {
 
   radius += pulse * 0.05;
 
+#ifdef TESSA_DEFORM
+  // ROUND U: the shell is the DEFORMED unit surface (see deform.glsl), scaled
+  // by exactly the radius the round shell was scaled by. With uDeformOn 0
+  // `shape` is `dir` and this is the round build, bit for bit.
+  vec3 shape = (uDeformOn > 0.5) ? deformShape(dir) : dir;
+  vec4 viewPos = modelViewMatrix * vec4(shape * radius, 1.0);
+#else
   vec4 viewPos = modelViewMatrix * vec4(dir * radius, 1.0);
+#endif
 
   // How far this particle sits outside the nominal shell. Drives the hot→cool
   // gradient in the fragment stage: displaced particles read as the rim.
@@ -298,6 +329,20 @@ void main() {
   vec3 eye   = normalize(-viewPos.xyz);
   vFresnel   = 1.0 - clamp(abs(dot(nView, eye)), 0.0, 1.0);
   vFacing    = dot(nView, eye);
+#ifdef TESSA_DEFORM
+  // ROUND U: the facing that the far-side fade and the rim shrink read is
+  // the LARGER of the rest facing and the deformed surface's facing. The
+  // crease is a sheet that was face-on at rest turning edge-on: by its rest
+  // facing it keeps full size and brightness, so its rows fuse into the
+  // solid band the reference has. The far wall of the fold was the limb at
+  // rest but faces the eye once folded: by its deformed facing it stays
+  // visible as the second layer. The true silhouette and the true back score
+  // low on both and fade exactly as round T left them.
+  if (uDeformOn > 0.5) {
+    vec3 nDef = normalize((modelViewMatrix * vec4(deformNormal(dir, shape), 0.0)).xyz);
+    vFacing = max(vFacing, dot(nDef, eye));
+  }
+#endif
   vGradT     = dot(dir, normalize(uGradAxis));
   vLight     = dot(nView, uLightDir);
 
@@ -358,6 +403,15 @@ void main() {
    */
   float wantRim = base * (1.0 + uRimSize * grow * face * (1.0 - uEvenLight));
   float want = wantRim * (1.0 + uCrossSize * vCross + uCapSize * vCap);
+  // ROUND T: the rim shrink (see uRimShrink). 1.0 wherever the natural gap is
+  // at least the target; below that the dot shrinks with the facing so the gap
+  // holds, down to the 1 px floor of the clamp on the next line.
+  float shrink = clamp((clamp(vFacing, 0.0, 1.0) - uRimShrink.x) / max(uRimShrink.y, 0.0001), 0.0, 1.0);
+#ifdef TESSA_DEFORM
+  // ROUND U: the fold's far wall keeps full-size dots — see deformFoldBack.
+  if (uDeformOn > 0.5) shrink = mix(shrink, 1.0, deformFoldBack(dir));
+#endif
+  want *= mix(1.0, shrink, uRimShrink.z);
   float got  = clamp(want, 1.0, POINT_SIZE_MAX);
   gl_PointSize = got;
   // The cross growth, as the clamp actually delivered it. Divided back out of

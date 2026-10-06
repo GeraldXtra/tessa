@@ -36,6 +36,12 @@ import {
   approvalsSweepExpired,
 } from './state/approval-store.ts';
 import { StateDwell } from './state/state-dwell.ts';
+import {
+  composeNoteLine,
+  composeNoteState,
+  composePatch,
+  requestComposeFocus,
+} from './state/compose-store.ts';
 import { ApprovalStack } from './layout/ApprovalCard.tsx';
 import { Calendar } from './layout/Calendar.tsx';
 import { Clock } from './layout/Clock.tsx';
@@ -60,6 +66,7 @@ import {
   auditStore,
   AUDIT_MAX,
   connectionStore,
+  devStore,
   healthStore,
   micStore,
   ptySessionsStore,
@@ -200,6 +207,8 @@ function describeProbe(r: ProbeReading): string {
     `c=${r.cx.toFixed(3)},${r.cy.toFixed(3)} ` +
     `dx=${r.dx.toFixed(3)} dy=${r.dy.toFixed(3)} ` +
     `lit=${r.lit} sum=${r.sum} uPulse=${r.uPulse.toFixed(4)} ` +
+    `spin=${r.spinRad.toFixed(4)} ` +
+    `sway=${r.swayYawDeg.toFixed(2)}/${r.swayPitchDeg.toFixed(2)}/${r.swayRollDeg.toFixed(2)} ` +
     `state=${agentStateStore.get()} resize=${r.resizeReason}`
   );
 }
@@ -268,6 +277,9 @@ export function App() {
     void window.tessa.bootstrap().then((info) => {
       if (!alive) return;
       setBootstrap(info);
+      // Per-keystroke instrumentation in the compose box reads this rather
+      // than paying for an IPC message it cannot know is a no-op.
+      devStore.set(info.isDev);
 
       /**
        * Paint the theme before anything else in this callback.
@@ -369,9 +381,21 @@ export function App() {
           `stillPending=${refusal.requestStillPending}`,
       );
     });
-    const offTranscript = window.tessa.onTranscriptLine((line) =>
-      transcriptStore.set([...transcriptStore.get(), line].slice(-TRANSCRIPT_MAX)),
-    );
+    const offTranscript = window.tessa.onTranscriptLine((line) => {
+      transcriptStore.set([...transcriptStore.get(), line].slice(-TRANSCRIPT_MAX));
+      // Her answer closes the typed turn in flight. Bookkeeping for Escape,
+      // not a rendering — the line itself is drawn by TRACE from the store.
+      composeNoteLine(line);
+    });
+
+    // What the daemon said to a cancel. `res.ok` ends the turn; anything
+    // else leaves it running and puts the daemon's own words in the hint.
+    const offCancelReply = window.tessa.onAgentCancelReply((reply) => {
+      composePatch(reply.ok ? { inflight: null, error: null } : { error: reply.message });
+      window.tessa.reportMetrics(
+        `CANCEL-RESULT messageId=${reply.messageId} ok=${reply.ok} type=${reply.type}`,
+      );
+    });
 
     // Main has already validated this against AGENT_STATES before sending.
     // Through the dwell, never straight to the store. See state-dwell.ts.
@@ -397,6 +421,9 @@ export function App() {
       window.tessa.reportMetrics(
         `STATE-ARRIVED state=${state} t=${at.toFixed(1)} repeat=${repeat} depth=${dwell.depth}`,
       );
+      // The raw arrival, before the dwell: idle-after-busy closes a typed
+      // turn in flight. Bookkeeping, not a drawing.
+      composeNoteState(state);
       // The detail is set BEFORE the state. The chip renders both from one
       // paint, and setting the state first would show the new state beside the
       // old target for a frame — which is a wrong statement about what she is
@@ -422,6 +449,7 @@ export function App() {
       offAuditAppended();
       offPty();
       offTranscript();
+      offCancelReply();
       offMic();
       offNote();
       offApproval();
@@ -616,6 +644,38 @@ export function App() {
     function onKeyDown(event: KeyboardEvent) {
       if (event.key === 'Escape') {
         railStore.set(null);
+        return;
+      }
+
+      /**
+       * Ctrl+Shift+Space — open TRACE with focus in the compose box, from
+       * anywhere in the Orb including the canvas. NOT dev-gated.
+       *
+       * Chosen, not inherited: the Console's chat pane has no chord at all
+       * (a toolbar button and a pane-menu command), so there was no muscle
+       * memory to match. This one is the push-to-talk chord minus Alt —
+       * Ctrl+Alt+Shift+Space is TALK, Ctrl+Shift+Space is TYPE, same key —
+       * and it is free of every other binding here (themes are Ctrl+Shift+
+       * letter; the hold-mode PTT needs Alt), of Electron (no menu, so no
+       * default accelerators), and of Windows. A renderer keydown, not a
+       * global grab: it takes nothing from any other application.
+       *
+       * `code` then `key`, for the same reason every other chord here does:
+       * synthetic input arrives with no usable `code`.
+       *
+       * Refused while an approval is pending, for the reason the rail refuses
+       * (Rail.tsx): a red-tier request must not be dismissable by opening a
+       * panel, and the card owns the right-hand column until it is answered.
+       */
+      const isSpace = event.code === 'Space' || event.key === ' ';
+      if (event.ctrlKey && event.shiftKey && !event.altKey && !event.metaKey && isSpace) {
+        event.preventDefault();
+        if (approvalsStore.get().length > 0) {
+          window.tessa.reportMetrics('CHORD ctrl+shift+space refused — approval pending');
+          return;
+        }
+        railStore.set('trace');
+        requestComposeFocus();
         return;
       }
 
@@ -1059,35 +1119,34 @@ export function App() {
    * every layout change so a resize or a drawer moves them with everything else.
    */
   /**
-   * JOBS AND CHAT OPEN THEMSELVES WHEN THERE IS SOMETHING IN THEM.
+   * JOBS OPENS ITSELF WHEN THERE IS SOMETHING IN IT.
    *
    * His ruling: a panel appears when it becomes active, and stays until he
    * dismisses it — no timeout, no auto-close. The trigger is built; NOTHING
-   * FIRES IT TODAY. Jobs waits on a Phase 5 queue that does not exist, and
-   * typed chat waits on Session 1 wiring the agent loop to a surface. Both
-   * conditions below are permanently false right now, and that is the honest
+   * FIRES IT TODAY. Jobs waits on a Phase 5 queue that does not exist, so the
+   * condition below is permanently false right now, and that is the honest
    * state rather than a stub that opens on nothing.
+   *
+   * CHAT no longer has an entry here: the typed input lives in TRACE and is
+   * opened by hand (the rail, or Ctrl+Shift+Space). A reply to something he
+   * typed arrives in a drawer he already has open, and a spoken turn lands
+   * in TRACE exactly as it did before — neither is a reason to open a panel
+   * he did not ask for.
    *
    * One-shot per transition, not per render: `openedFor` remembers what it has
    * already opened for, so dismissing a panel does not have it spring back on
    * the next tick. That is the difference between "opens when it becomes
    * active" and "cannot be closed while active".
    */
-  const openedFor = useRef<{ jobs: boolean; chat: boolean }>({ jobs: false, chat: false });
+  const openedFor = useRef<{ jobs: boolean }>({ jobs: false });
   const jobsActive = false; // no producer: evt.job.* is never emitted
-  const chatActive = false; // no producer: typed chat is not wired
   useEffect(() => {
     if (jobsActive && !openedFor.current.jobs) {
       openedFor.current.jobs = true;
       railStore.set('jobs');
     }
     if (!jobsActive) openedFor.current.jobs = false;
-    if (chatActive && !openedFor.current.chat) {
-      openedFor.current.chat = true;
-      railStore.set('chat');
-    }
-    if (!chatActive) openedFor.current.chat = false;
-  }, [jobsActive, chatActive]);
+  }, [jobsActive]);
 
   useEffect(() => {
     if (!engine) return;
@@ -1181,6 +1240,7 @@ export function App() {
               counts={bootstrap.forcedCount}
               faceSat={bootstrap.forcedFaceSat}
               paletteGain={bootstrap.forcedPaletteGain}
+              deform={bootstrap.forcedDeform}
               offsetYPx={offsetYPx}
             />
           )}
@@ -1224,6 +1284,7 @@ export function App() {
           title={railById(lastRail.current).label}
           open={rail !== null}
           onClose={() => railStore.set(null)}
+          footer={railById(lastRail.current).footer?.()}
         >
           {railById(lastRail.current).render()}
         </Drawer>

@@ -31,13 +31,13 @@
  */
 
 import { useStore } from '../state/store.ts';
-import { auditStore, connectionStore, railStore } from '../state/store.ts';
-
-const COMPANION_NAME = 'TESSA';
+import { auditStore, companionStore, connectionStore, railStore } from '../state/store.ts';
 
 export function CompanionSwitcher() {
   const connection = useStore(connectionStore);
   const audit = useStore(auditStore);
+  // The same record the compose box addresses — one name, one id, one place.
+  const companion = useStore(companionStore);
   const online = connection.phase === 'connected';
 
   // One companion, so both arrows are inert. Derived rather than hard-coded so
@@ -60,7 +60,7 @@ export function CompanionSwitcher() {
         </button>
 
         <div className="switcher__id">
-          <span className="switcher__name">{COMPANION_NAME}</span>
+          <span className="switcher__name">{companion.name}</span>
           <span className="switcher__rungs" aria-hidden="true">
             {[0, 1, 2].map((i) => (
               <span

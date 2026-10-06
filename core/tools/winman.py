@@ -74,6 +74,25 @@ def enumerate_windows() -> list[dict[str, Any]]:
     return out
 
 
+#: Ways he refers to the window he is looking at. Resolved to the foreground
+#: window by `_find_one`, so focus/minimise/maximise/close all understand it
+#: without four copies of the same idea.
+_THIS_WINDOW = {
+    "this", "this window", "the window", "the current window", "current window",
+    "current", "active", "active window", "the active window", "foreground",
+    "the foreground window", "this one", "front window", "the front window",
+}
+
+
+def foreground_window() -> dict[str, Any] | None:
+    """The window Windows says is in front, in the same shape as the list."""
+    hwnd = user32.GetForegroundWindow()
+    if not hwnd:
+        return None
+    title = _title(hwnd)
+    return {"hwnd": int(hwnd), "pid": _pid_of(hwnd), "title": title or "(untitled)"}
+
+
 def _find_one(name: str) -> dict[str, Any]:
     """
     Resolve a spoken name to ONE window, or ask which.
@@ -85,6 +104,24 @@ def _find_one(name: str) -> dict[str, Any]:
     needle = str(name or "").strip().lower()
     if not needle:
         raise ToolError("no window name came through", "Say part of the title.")
+
+    # "THIS WINDOW" IS A REAL TARGET, AND IT WAS NOT RESOLVING.
+    #
+    # "minimise this window" reached here as the literal string "this window",
+    # matched no title, and she answered "nothing open matches 'this window'"
+    # — measured, and it is the most natural way to say it. The window he
+    # means is the one he is looking at, which Windows can name exactly.
+    #
+    # Bare "it" is deliberately NOT in this set. It is the vaguest word he
+    # uses and it would turn "close it" into closing whatever happens to be
+    # focused, which is a destructive-feeling surprise for a green tool.
+    if needle in _THIS_WINDOW:
+        current = foreground_window()
+        if current is None:
+            raise ToolError("I cannot tell which window is in front",
+                            "Name part of its title instead.")
+        return current
+
     wins = enumerate_windows()
     hits = [w for w in wins if needle in w["title"].lower()]
     if not hits:

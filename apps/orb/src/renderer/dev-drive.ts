@@ -42,6 +42,14 @@
  *   type:<selector>~<text>        set a controlled field the way a key does
  *   dump:<selector>               read one element back into the process log
  *   respond:<requestId>~<approve|deny>   call the bridge directly, no card
+ *   key:<chord>                   keydown at window (the app's own chords)
+ *   press:<selector>~<chord>      keydown+keyup ON an element (React handlers)
+ *   keys:<selector>~[<ms>~]<text> type character by character, paced
+ *   attr:<selector>~<name>        one attribute and the element's rect
+ *   count:<selector>              how many elements match
+ *   focus:<selector>              focus it, report what has focus
+ *   active:                       report what has focus, and whether the window does
+ *   capture:<name>                one capturePage() now, into TESSA_CAPTURE_DIR
  *
  * `~` rather than `|` as the inner separator purely so these survive being
  * passed through cmd.exe, where `|` is a pipe.
@@ -58,14 +66,94 @@
  * arrival-to-drawn measurement deliberately only times states the daemon
  * actually sent, and a `state:` step is invisible to it.
  */
-export type DevAction = 'click' | 'wait' | 'state' | 'type' | 'dump' | 'respond' | 'key';
+export type DevAction =
+  | 'click'
+  | 'wait'
+  | 'state'
+  | 'type'
+  | 'dump'
+  | 'respond'
+  | 'key'
+  | 'press'
+  | 'keys'
+  | 'attr'
+  | 'count'
+  | 'focus'
+  | 'active'
+  | 'capture';
 
 export interface DevStep {
   action: DevAction;
   arg: string;
 }
 
-const ACTIONS: readonly DevAction[] = ['click', 'wait', 'state', 'type', 'dump', 'respond', 'key'];
+const ACTIONS: readonly DevAction[] = [
+  'click',
+  'wait',
+  'state',
+  'type',
+  'dump',
+  'respond',
+  'key',
+  'press',
+  'keys',
+  'attr',
+  'count',
+  'focus',
+  'active',
+  'capture',
+];
+
+/**
+ * A key by name, as the compose-box round needed it: `key:` only knew single
+ * letters, and Enter, Escape and Space are the three keys the box is about.
+ * `code` is the physical key so a handler that matches `code` first (every
+ * handler here) sees what a keyboard would send; `key` is populated too, for
+ * the handlers that fall back to it.
+ */
+function keyByName(name: string): { key: string; code: string } | null {
+  const n = name.trim();
+  if (n.length === 1) {
+    if (/[a-z]/i.test(n)) return { key: n, code: `Key${n.toUpperCase()}` };
+    if (/[0-9]/.test(n)) return { key: n, code: `Digit${n}` };
+    if (n === ' ') return { key: ' ', code: 'Space' };
+    return { key: n, code: '' };
+  }
+  switch (n.toLowerCase()) {
+    case 'space':
+      return { key: ' ', code: 'Space' };
+    case 'enter':
+      return { key: 'Enter', code: 'Enter' };
+    case 'escape':
+    case 'esc':
+      return { key: 'Escape', code: 'Escape' };
+    case 'backspace':
+      return { key: 'Backspace', code: 'Backspace' };
+    case 'tab':
+      return { key: 'Tab', code: 'Tab' };
+    default:
+      return null;
+  }
+}
+
+/** `ctrl+shift+space` → the event init a physical chord would produce. */
+function chordInit(spec: string): KeyboardEventInit | null {
+  const parts = spec.split('+').map((p) => p.trim()).filter(Boolean);
+  const last = parts.pop() ?? '';
+  const named = keyByName(last);
+  if (!named) return null;
+  const mods = parts.map((p) => p.toLowerCase());
+  return {
+    key: named.key,
+    code: named.code,
+    ctrlKey: mods.includes('ctrl'),
+    shiftKey: mods.includes('shift'),
+    altKey: mods.includes('alt'),
+    metaKey: mods.includes('meta'),
+    bubbles: true,
+    cancelable: true,
+  };
+}
 
 /**
  * Steps are `;`-separated, so **no argument may contain a semicolon**. The
@@ -123,6 +211,14 @@ const sleep = (ms: number): Promise<void> =>
   new Promise((resolve) => {
     window.setTimeout(resolve, ms);
   });
+
+/** `tag.class` of whatever has focus, for the log. */
+function describeActive(): string {
+  const el = document.activeElement;
+  if (!el) return 'none';
+  const cls = el.className && typeof el.className === 'string' ? `.${el.className.split(' ')[0]}` : '';
+  return `${el.tagName.toLowerCase()}${cls}`;
+}
 
 /**
  * Run the script, reporting each step. `report` goes to the process log, so the
@@ -187,24 +283,181 @@ export async function runDevScript(
      * of synthetic input, including the `keybd_event` test that found it.
      */
     if (step.action === 'key') {
-      const parts = step.arg.split('+').map((p) => p.trim()).filter(Boolean);
-      const letter = parts.pop() ?? '';
-      if (letter.length !== 1) {
-        report(`DEV-DRIVE ${i} key "${step.arg}" BAD KEY (want e.g. ctrl+shift+M)`);
+      const init = chordInit(step.arg);
+      if (!init) {
+        report(`DEV-DRIVE ${i} key "${step.arg}" BAD KEY (want e.g. ctrl+shift+M or ctrl+shift+space)`);
         continue;
       }
-      const mods = parts.map((p) => p.toLowerCase());
-      const event = new KeyboardEvent('keydown', {
-        key: letter,
-        code: `Key${letter.toUpperCase()}`,
-        ctrlKey: mods.includes('ctrl'),
-        shiftKey: mods.includes('shift'),
-        altKey: mods.includes('alt'),
-        bubbles: true,
-        cancelable: true,
-      });
+      const event = new KeyboardEvent('keydown', init);
       window.dispatchEvent(event);
-      report(`DEV-DRIVE ${i} key ${step.arg} dispatched (defaultPrevented=${event.defaultPrevented})`);
+      report(
+        `DEV-DRIVE ${i} key ${step.arg} dispatched at window (defaultPrevented=${event.defaultPrevented}) ` +
+          `active=${describeActive()}`,
+      );
+      continue;
+    }
+
+    /**
+     * `press:<selector>~<chord>` — a keydown AND keyup ON AN ELEMENT.
+     *
+     * `key:` dispatches at `window`, which is where the app's chords listen.
+     * The compose box listens on its own textarea through React's delegated
+     * `onKeyDown`, and an event that starts at `window` never passes through
+     * the root container that React listens on. Dispatching on the element
+     * itself bubbles up through React's root exactly as a real keystroke
+     * does, so Enter-to-send and Escape-to-clear run the real handlers.
+     */
+    if (step.action === 'press') {
+      const bar = step.arg.lastIndexOf('~');
+      const selector = bar < 0 ? step.arg.trim() : step.arg.slice(0, bar).trim();
+      const chord = bar < 0 ? '' : step.arg.slice(bar + 1);
+      const init = chordInit(chord);
+      let target: EventTarget | null = null;
+      if (selector === 'window') target = window;
+      else {
+        try {
+          target = document.querySelector(selector);
+        } catch {
+          report(`DEV-DRIVE ${i} press "${selector}" INVALID SELECTOR`);
+          continue;
+        }
+      }
+      if (!init || !target) {
+        report(`DEV-DRIVE ${i} press "${step.arg}" ${init ? 'NO MATCH' : 'BAD KEY'}`);
+        continue;
+      }
+      const down = new KeyboardEvent('keydown', init);
+      target.dispatchEvent(down);
+      target.dispatchEvent(new KeyboardEvent('keyup', init));
+      report(
+        `DEV-DRIVE ${i} press ${chord} on "${selector}" (defaultPrevented=${down.defaultPrevented}) ` +
+          `t=${performance.now().toFixed(1)} active=${describeActive()}`,
+      );
+      continue;
+    }
+
+    /**
+     * `keys:<selector>~[<paceMs>~]<text>` — type CHARACTER BY CHARACTER, the
+     * way a person does: keydown, the value grows by one, an `input` event,
+     * keyup, then a pause. `type:` sets a whole value in one commit, which is
+     * fine for a payload and useless for a keystroke-to-glyph measurement,
+     * where every character has to be its own commit and its own frame.
+     *
+     * The pace defaults to 100 ms (≈120 wpm, a fast typist). Every character
+     * runs the real React `onChange`; the box's own probe stamps the keydown
+     * and reports the paint. Semicolons are not typable (`;` splits steps).
+     */
+    if (step.action === 'keys') {
+      const first = step.arg.indexOf('~');
+      const selector = first < 0 ? step.arg.trim() : step.arg.slice(0, first).trim();
+      let rest = first < 0 ? '' : step.arg.slice(first + 1);
+      let pace = 100;
+      const second = rest.indexOf('~');
+      if (second >= 0 && /^\d+$/.test(rest.slice(0, second))) {
+        pace = Number.parseInt(rest.slice(0, second), 10);
+        rest = rest.slice(second + 1);
+      }
+      let field: Element | null = null;
+      try {
+        field = document.querySelector(selector);
+      } catch {
+        report(`DEV-DRIVE ${i} keys "${selector}" INVALID SELECTOR`);
+        continue;
+      }
+      if (!(field instanceof HTMLTextAreaElement) && !(field instanceof HTMLInputElement)) {
+        report(`DEV-DRIVE ${i} keys "${selector}" NO MATCH (or not a field)`);
+        continue;
+      }
+      field.focus();
+      const started = performance.now();
+      let typed = 0;
+      for (const ch of rest) {
+        const named = keyByName(ch) ?? { key: ch, code: '' };
+        const down = new KeyboardEvent('keydown', { ...named, bubbles: true, cancelable: true });
+        field.dispatchEvent(down);
+        if (!down.defaultPrevented) setControlledValue(field, field.value + ch);
+        field.dispatchEvent(new KeyboardEvent('keyup', { ...named, bubbles: true, cancelable: true }));
+        typed += 1;
+        await sleep(pace);
+      }
+      report(
+        `DEV-DRIVE ${i} keys "${selector}" typed ${typed} chars at ${pace} ms in ` +
+          `${(performance.now() - started).toFixed(0)} ms -> ${field.value.length} chars`,
+      );
+      continue;
+    }
+
+    /** `attr:<selector>~<name>` — one attribute, read back into the log. */
+    if (step.action === 'attr') {
+      const bar = step.arg.lastIndexOf('~');
+      const selector = bar < 0 ? step.arg.trim() : step.arg.slice(0, bar).trim();
+      const name = bar < 0 ? '' : step.arg.slice(bar + 1).trim();
+      let node: Element | null = null;
+      try {
+        node = document.querySelector(selector);
+      } catch {
+        report(`DEV-DRIVE ${i} attr "${selector}" INVALID SELECTOR`);
+        continue;
+      }
+      if (!node) {
+        report(`DEV-DRIVE ${i} attr "${selector}" NO MATCH`);
+        continue;
+      }
+      const value = node.getAttribute(name);
+      const rect = node.getBoundingClientRect();
+      report(
+        `DEV-DRIVE ${i} attr "${selector}" ${name}=${JSON.stringify(value)} ` +
+          `rect=${rect.left.toFixed(0)},${rect.top.toFixed(0)} ${rect.width.toFixed(0)}x${rect.height.toFixed(0)}`,
+      );
+      continue;
+    }
+
+    /** `count:<selector>` — how many match. The transcript line count, mostly. */
+    if (step.action === 'count') {
+      let n = -1;
+      try {
+        n = document.querySelectorAll(step.arg).length;
+      } catch {
+        report(`DEV-DRIVE ${i} count "${step.arg}" INVALID SELECTOR`);
+        continue;
+      }
+      report(`DEV-DRIVE ${i} count "${step.arg}" = ${n} t=${performance.now().toFixed(1)}`);
+      continue;
+    }
+
+    /** `active:` — what has focus right now, and whether the window does. */
+    if (step.action === 'active') {
+      report(`DEV-DRIVE ${i} active=${describeActive()} hasFocus=${document.hasFocus()}`);
+      continue;
+    }
+
+    /** `focus:<selector>` — focus an element and say what has focus after. */
+    if (step.action === 'focus') {
+      let node: Element | null = null;
+      try {
+        node = document.querySelector(step.arg);
+      } catch {
+        report(`DEV-DRIVE ${i} focus "${step.arg}" INVALID SELECTOR`);
+        continue;
+      }
+      if (!(node instanceof HTMLElement)) {
+        report(`DEV-DRIVE ${i} focus "${step.arg}" NO MATCH`);
+        continue;
+      }
+      node.focus();
+      report(`DEV-DRIVE ${i} focus "${step.arg}" active=${describeActive()} hasFocus=${document.hasFocus()}`);
+      continue;
+    }
+
+    /**
+     * `capture:<name>` — ask main for ONE `capturePage()` now, under this
+     * name. Main answers the metrics line; see IPC.devMetrics's handler. It
+     * is how a capture lands on "after the ack, before the echo" rather than
+     * on whatever the 500 ms cadence happened to hit.
+     */
+    if (step.action === 'capture') {
+      report(`CAPTURE ${step.arg.trim()}`);
+      report(`DEV-DRIVE ${i} capture ${step.arg.trim()} requested t=${performance.now().toFixed(1)}`);
       continue;
     }
 

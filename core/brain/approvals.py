@@ -82,6 +82,9 @@ class PendingApproval:
     #: Recorded so the audit shows it and so the decision can be judged against
     #: what she was looking at — see `resolve_edit` and the fence ruling.
     external_at_request: bool = False
+    #: Argument names this approval may NOT change. Copied from the tool's
+    #: `ToolSpec.frozen` when the request is raised. See `resolve_edit`.
+    frozen: tuple[str, ...] = ()
 
     @property
     def expired(self) -> bool:
@@ -139,6 +142,30 @@ def resolve_edit(pending: PendingApproval, edited: Any) -> dict[str, Any]:
             f"editedArgs may only change existing arguments; {unknown} were not "
             f"in the request")
 
+    # ── THE FROZEN ARGUMENTS. THE TARGET IS NOT WORDING. ────────────────────
+    #
+    # `resolve_edit` exists so he can correct what a red action SAYS. It must
+    # not let a surface change what that action is AIMED AT.
+    #
+    # The concrete failure without this: he reads a card — "reply to @friend's
+    # post about the audit log" — approves it, and the frame that comes back
+    # carries `reply_to_id` for a different post. The words he approved land
+    # under a stranger's tweet, publicly, in his name, and the card he trusted
+    # is what delivered it. A public post cannot be un-said, so this is refused
+    # rather than merged.
+    #
+    # REFUSED, NOT SILENTLY IGNORED. Dropping the edit would leave the surface
+    # believing it retargeted the reply while the daemon posted elsewhere —
+    # two different ideas of what just happened, which is worse than an error.
+    # An ApprovalError here also puts the request BACK (see `execute_approved`),
+    # so a malformed frame does not cost him the card.
+    frozen_hits = sorted(set(edited) & set(pending.frozen or ()))
+    if frozen_hits:
+        raise ApprovalError(
+            "protocol.badEnvelope",
+            f"editedArgs may not change {frozen_hits} on {pending.tool} — that is "
+            f"what this action targets, not what it says. Only the wording is editable.")
+
     merged = dict(pending.args)
     for key, value in edited.items():
         original = pending.args.get(key)
@@ -182,7 +209,14 @@ class ApprovalGate:
     MAX_PENDING = 32
 
     def request(self, *, tool: str, args: dict[str, Any], tier: str,
-                provenance: str = "human", detail: str = "") -> PendingApproval:
+                provenance: str = "schedule", detail: str = "",
+                frozen: tuple[str, ...] = ()) -> PendingApproval:
+        # `provenance` DEFAULTS TO "schedule", NOT "human". A caller that does
+        # not say who built the action must not put the owner's name on the
+        # card — the card is the security boundary for every red action, and
+        # "schedule" is the most restrictive actor guard.py knows. The
+        # executor always passes the resolved origin; the default only exists
+        # so a forgetful caller fails safe rather than as him.
         # 128 BITS, NOT A ULID, and this is where I differ from Session 2's
         # proposal. A ULID is the right shape for an envelope `id` — sortable,
         # timestamped, and CONTRACT §3 already mandates one there. It is the
@@ -201,6 +235,7 @@ class ApprovalGate:
             # command he would not want echoed to a log twice. They are recorded
             # once, on the request, and the audit layer redacts before write.
             args=dict(args), tier=tier, provenance=provenance, detail=detail,
+            frozen=tuple(frozen or ()),
         )
         self.pending[req.request_id] = req
         # Sweep the dead, then bound the living. Oldest out.
@@ -218,6 +253,12 @@ class ApprovalGate:
                     # CONTRACT §6.2: provenance is REQUIRED, never optional.
                     "provenance": provenance,
                     "expiresAt": iso_in(APPROVAL_WINDOW_S),
+                    # ADDITIVE (CONTRACT §7.2): which arguments the surface
+                    # must render READ-ONLY. A card that lets him type into a
+                    # field the daemon will refuse is a card that lies about
+                    # what he can change — so the surface is told, rather than
+                    # discovering it when the approval bounces.
+                    "frozen": list(req.frozen),
                 })
             except Exception:  # noqa: BLE001
                 # A broadcast failure must not become an execution.

@@ -133,6 +133,24 @@ export interface SphereParams {
   breathPeriodMs: number;
   /** How much the amplitude signal deforms the shell. */
   amplitudeGain: number;
+  /**
+   * Round V: how much the WHOLE shell swells per unit of voice amplitude, as
+   * a fraction of the radius, added to the breath. The per-dot ripple above
+   * reads as shimmer; this is the coherent cue — the sphere pumps in time
+   * with syllables — and it is what makes "she is talking" legible at a
+   * glance. The occluder follows it, so the fold stays intact while it moves.
+   */
+  voicePulse: number;
+  /**
+   * Round W: how much brighter the whole shell draws per unit of voice
+   * amplitude — `uBrightness * (1 + voiceGlow * amplitude)`. The third voice
+   * cue, and the one the fragment ceiling cannot eat: it lifts the dots that
+   * sit below the ceiling (the grain's dim end, the depth-faded far side,
+   * the limb rows), so on every syllable the shell fills in and the between-
+   * dot floor lifts — a shimmer in time with the swell. 0 for every state
+   * that is not a voice state.
+   */
+  voiceGlow: number;
   /** Radians per second about Y. */
   spin: number;
   /** Point size in world units, before the projection scale. */
@@ -154,7 +172,13 @@ export const SPHERE_STATES = {
     breathDepth: 0.045,
     breathPeriodMs: 5200,
     amplitudeGain: 0.0,
-    spin: 0.04,
+    voicePulse: 0.0,
+    voiceGlow: 0.0,
+    // Round W: 0.04 -> 0.06. One turn every 105 s; 15 px/s of lattice flow
+    // at the face centre on a 260 px disc. Still under FIB_SPIN_MAX and still
+    // calm — the round-V 0.04 (10 px/s) was reported as not visibly moving.
+    // The form's sway (SWAY_* in sphere-engine.ts) is the other half.
+    spin: 0.06,
     pointScale: 0.00952,
     brightness: 1.10,
     coolMix: 0.60,
@@ -169,9 +193,17 @@ export const SPHERE_STATES = {
     turbulence: 0.012,
     breathDepth: 0.022,
     breathPeriodMs: 2600,
-    // Scaled with `speaking` by the same 0.476 — see the note there. Peak
-    // displacement 2.7% of the radius.
-    amplitudeGain: 0.076,
+    // Round W: HIS voice, made visible. Round V rode a room-tone envelope
+    // (0.06..0.20) at pulse 0.04 — a peak swell of 0.8% of the radius, 2 px at
+    // the limb, which is invisible and was reported as such. The envelope is
+    // now speech-shaped (amplitude.ts, HIS cadence, ceiling 0.85), and the
+    // three cues sit at roughly half of `speaking`'s: swell 0.06 (5% of the
+    // radius, 13 px at the limb), glow 0.12, shimmer 0.02 (0.7% peak per-dot).
+    // The daemon still sends no level (see amplitude.ts); a real one, when it
+    // arrives, drives the same three numbers through the same envelope slot.
+    amplitudeGain: 0.02,
+    voicePulse: 0.06,
+    voiceGlow: 0.12,
     spin: 0.06,
     pointScale: 0.01079,
     brightness: 1.50,
@@ -207,6 +239,8 @@ export const SPHERE_STATES = {
     breathDepth: 0.03,
     breathPeriodMs: 1800,
     amplitudeGain: 0.0,
+    voicePulse: 0.0,
+    voiceGlow: 0.0,
     spin: 0.34,
     pointScale: 0.00901,
     brightness: 1.34,
@@ -241,8 +275,42 @@ export const SPHERE_STATES = {
      * `listening` and infinitely more than the four states at zero — so the
      * spec's "amplitude ripple" still reads. It reads as a ripple now rather
      * than as a deformation.
+     *
+     * ─── ROUND V: 0.20 -> 0.30, and a 0.07 whole-shell pulse ───
+     * The owner could not tell speaking from idle. Two reasons, measured on
+     * the round-U shell: the ripple's per-dot random phase makes 7% peak
+     * displacement read as fuzz, not motion, and nothing COHERENT moved. So
+     * the ripple goes to 10.5% peak (still under the 14.7% that made lobes),
+     * and `voicePulse` swells the whole shell by up to 7% of the radius in
+     * time with the syllabic envelope — 18 px at the limb, 4.6 times a
+     * second, which is the cue the eye reads as "talking". The occluder
+     * tracks both, so the fold never shows its hidden side mid-syllable.
+     *
+     * ─── ROUND W: 0.30 -> 0.08, AND THE ROUND-V DIAGNOSIS WAS WRONG ───
+     * Round V raised the ripple to 0.30 on the belief that its per-dot random
+     * phase made it read as fuzz. The phase was `aSeed * 2pi`, and on the
+     * golden-angle lattice `aSeed` IS the azimuth (theta = goldenAngle * i,
+     * seed = i * 0.618 mod 1 — the same golden fraction) — so the ripple was
+     * a coherent travelling wave, and at 0.30 it did exactly what the note
+     * above warns against: the round-V baseline's speaking frames measure a
+     * silhouette residual of 14.6 px std / 26 px max against 4.4 / 8.5 for
+     * idle at the same breath phase (measure.py, cap-16 vs cap-02). The
+     * sphere stopped being the reference's shape every time she spoke.
+     *
+     * So the shape is handed back and the cue is moved to the two channels
+     * that cannot deform it: the ripple is now hashed per dot (particles.vert)
+     * and small — 0.04 is a 1.4% peak per-dot shimmer, 3.6 px on a 9 px
+     * lattice pitch (0.08 was tried first and visibly ragged the rows in a
+     * still) — while the COHERENT swell goes 0.07 -> 0.11 (11% of the
+     * radius, 29 px at the limb, on every stressed syllable) and a
+     * brightness glow of 0.22 lifts the shell with it. A uniform swell moves
+     * the outline in and out but keeps its shape; that is the "breathes
+     * harder" of the brief, and it is the strongest cue a state-only feed
+     * can carry.
      */
-    amplitudeGain: 0.20,
+    amplitudeGain: 0.04,
+    voicePulse: 0.11,
+    voiceGlow: 0.22,
     spin: 0.08,
     pointScale: 0.01037,
     brightness: 1.46,
@@ -259,6 +327,8 @@ export const SPHERE_STATES = {
     breathDepth: 0.105,
     breathPeriodMs: 1400,
     amplitudeGain: 0.0,
+    voicePulse: 0.0,
+    voiceGlow: 0.0,
     spin: 0.13,
     pointScale: 0.00995,
     brightness: 1.37,
@@ -273,6 +343,8 @@ export const SPHERE_STATES = {
     breathDepth: 0.0,
     breathPeriodMs: 1,
     amplitudeGain: 0.0,
+    voicePulse: 0.0,
+    voiceGlow: 0.0,
     spin: 0.0,
     pointScale: 0.01079,
     brightness: 1.25,

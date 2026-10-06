@@ -30,14 +30,17 @@ import {
   Color,
   Euler,
   LinearSRGBColorSpace,
+  Mesh,
   NormalBlending,
   PerspectiveCamera,
   Points,
   Quaternion,
   Scene,
   ShaderMaterial,
+  SphereGeometry,
   Vector2,
   Vector3,
+  Vector4,
   WebGLRenderer,
 } from 'three';
 
@@ -52,6 +55,7 @@ import { createCompanion, type Companion } from './companions.ts';
 
 import vertexShader from './shaders/particles.vert.glsl?raw';
 import fragmentShader from './shaders/particles.frag.glsl?raw';
+import deformChunk from './shaders/deform.glsl?raw';
 
 /**
  * ─── THE DEAD NORTH POLE WAS THE CAMERA, NOT THE LIGHTING ───
@@ -487,6 +491,15 @@ export interface ProbeReading {
    */
   spinRad: number;
   /**
+   * Round W: the form's sway at the instant of the read, degrees. Carried for
+   * the same reason as spinRad — a differencing metric on a still cannot
+   * separate a lean from the breath, and the claim "it sways +/-4 deg on an
+   * 11.3 s period" is checked against these, not inferred from pixels.
+   */
+  swayYawDeg: number;
+  swayPitchDeg: number;
+  swayRollDeg: number;
+  /**
    * What last brought the drawing buffer into step with the CSS box —
    * `observer`, `frame`, `probe`, `init` or `reprobe`.
    *
@@ -547,6 +560,12 @@ export interface SphereEngineOptions {
   faceSat?: number;
   /** DEV ONLY. `--force-pgain=<0|1>`. false reproduces the un-normalised shell. */
   paletteGain?: boolean;
+  /**
+   * DEV ONLY. `--force-deform=<0|1>`. 0 reproduces round T's ROUND shell
+   * exactly — same binary, same lattice, same colours — which is how the
+   * "shape only" claim of round U is checked. See FIB_DEFORM_ON.
+   */
+  deform?: boolean;
   /** Read each frame. Never a subscription — no React involvement. */
   getState: () => AgentState;
   /** Fired when the governor or a context loss changes the tier. */
@@ -666,6 +685,18 @@ export interface SphereEngine {
    * change uses, instead of jumping.
    */
   retint(): void;
+  /**
+   * Run the animation loop, or STOP it and hold one frozen frame.
+   *
+   * Built for the ambient widget, which renders in the corner of his screen all
+   * day rather than for as long as he keeps a window open. `false` cancels the
+   * rAF outright — not a lower frame rate, not a skipped render, no callback at
+   * all — so an idle sphere costs the compositor nothing. See the note on the
+   * implementation for why the existing `fps === 0` path is not sufficient.
+   *
+   * A no-op under `prefers-reduced-motion`, which already runs with no loop.
+   */
+  setAnimating(on: boolean): void;
   dispose(): void;
 }
 
@@ -1503,8 +1534,80 @@ export const FIB_AXIS_EL_DEG = 12;
 export const FIB_AXIS_AZ_DEG = 126;
 /** Phase about the spiral axis at rest. */
 export const FIB_SPIN_DEG = 0;
-/** Multiplier on the state's idle spin. 0: round 1 is STATIC; rotation is a later round. */
-export const FIB_SPIN_MUL = 0;
+/**
+ * ─── ROUND V: THE SHELL TURNS — THE LATTICE FLOWS, THE FORM STAYS ───
+ *
+ * Rounds Q-U were still by ruling; the owner now wants the sphere alive on
+ * its own. The constraint is round U's fold: a body rotation would carry the
+ * crease and the far wall round to the front, where a fold with nothing
+ * behind it reads as a tear. So the ROTATION IS OF THE LATTICE ONLY: the
+ * dots spin about the lattice's own axis (the state's `spin`, through
+ * fibRestEuler as always) while the deformation frame and the gradient axis
+ * are re-derived from the CURRENT pose every frame — they are pinned to the
+ * view, not to the shell. The squash, the bumps, the crease and the far
+ * wall stay exactly where the reference has them; the purple centre stays
+ * at the centre; the rows slide through the form, flow into the fold, go
+ * under the crease and re-emerge on the far wall. That is option A of the
+ * brief, and it costs four quaternion rotations a frame.
+ *
+ * FIB_SPIN_MAX caps the rate. The state table's `spin` was tuned when spin
+ * was a "how hard she works" lever (`thinking` 0.34 rad/s, which the owner
+ * called "just spinning"); calm is the brief now. 0.10 rad/s is one turn a
+ * minute; idle's 0.04 is one turn every 2.6 minutes, 10 px/s at the limb —
+ * visibly drifting in two seconds, never a spin. `blocked` is frozen and
+ * does not turn; reduced motion does not turn.
+ */
+export const FIB_SPIN_MUL = 1;
+/** Ceiling on the lattice spin rate, rad/s. */
+export const FIB_SPIN_MAX = 0.1;
+/**
+ * ─── ROUND W: THE FORM SWAYS — OPTION B, ON TOP OF OPTION A ───
+ *
+ * Round V's lattice flow was measured and shipped, and the owner still read
+ * the sphere as static. The reason is in what the flow moves: 15,600 near-
+ * identical dots sliding through a FIXED outline is a texture change, and
+ * the eye reads an object as moving when its OUTLINE moves. The breath
+ * moves the outline, but uniformly — a slow zoom, which the eye discounts.
+ *
+ * So the whole form now sways: a few degrees of yaw about the screen's
+ * vertical and of pitch about its horizontal, on two incommensurate periods
+ * so the path never repeats. It is applied AFTER the rest pose and the
+ * lattice spin (pose = sway * rest(spin)), and the deformation frame is taken
+ * from the un-swayed rest pose, so the squash, the bumps, the crease and the
+ * far wall — and the purple centre, through uGradAxis — all turn TOGETHER as
+ * one rigid thing. The fold therefore stays on the right side (it moves by
+ * a few degrees about the vertical and comes back; it never travels round to
+ * the front), and the shape is unchanged: a rigid rotation is not a
+ * deformation. The lattice keeps flowing through it underneath.
+ *
+ * ─── WHY MOST OF IT IS ROLL, AND THE YAW IS SMALL ───
+ * The first cut was yaw +/-4 deg, pitch +/-2.5. Measured on captures, the
+ * fold is far more sensitive to yaw than the face is: the crease is a sheet
+ * seen at a grazing angle, so turning the right side 4 deg toward the eye
+ * opened it into a wide rippled sail (silhouette residual 5.5 px std /
+ * 13.7 px max at that phase, against 3.6-4.0 / 7-8 at every other), while
+ * turning it away pinched the peel to a line. Same shape, but it stopped
+ * READING as the reference's fold for a third of every cycle.
+ *
+ * Roll — rotation about the view axis — has none of that cost. It is a 2D
+ * rotation of the silhouette: the squash axis and the fold turn in the plane
+ * of the screen, nothing about what is exposed changes, uDeformFwd (and so
+ * the gradient's purple centre) is unmoved, and the outline visibly moves,
+ * which is the cue. 3 deg of roll carries the peel's tip 14 px along the rim
+ * and back. Pitch keeps the fold's exposure too (it tilts the smooth top
+ * and bottom, not the crease). Yaw stays, at 1.5 deg, so the peel breathes
+ * a little — 7 px of far-wall exposure — and never opens.
+ *
+ * Peak angular rate 1.4 deg/s on the roll. Visible at a glance, never a
+ * spin. `blocked` is frozen and does not sway; reduced motion does not sway.
+ * Cost is one Euler->quaternion and one quaternion multiply a frame.
+ */
+export const SWAY_YAW_DEG = 1.5;
+export const SWAY_PITCH_DEG = 2.5;
+export const SWAY_ROLL_DEG = 3;
+export const SWAY_YAW_PERIOD_MS = 11_300;
+export const SWAY_PITCH_PERIOD_MS = 17_900;
+export const SWAY_ROLL_PERIOD_MS = 13_700;
 /**
  * ─── ROUND R: the idle turbulence is OFF on the main sphere ───
  *
@@ -1582,8 +1685,33 @@ export const FIB_GRAIN_MIN = 1.0;
 export const FIB_GRAIN_POW = 1.0;
 /** No linear depth dimming: the far hemisphere is removed by FIB_BACK_FADE instead. */
 export const FIB_DEPTH_FAR = 1.0;
-/** Gradient position: smoothstep(edges, sin(angle from the camera-facing axis)). Fitted rms 0.038. */
-export const FIB_GRAD_EDGES: readonly [number, number] = [0.12, 0.89];
+/**
+ * Gradient position: smoothstep(edges, sin(angle from the camera-facing axis)).
+ *
+ * ─── ROUND S: 0.12..0.89 -> 0.275..1.0 — THE BALANCE, NOT THE PROFILE ───
+ *
+ * 0.12..0.89 was fitted to the reference's median hue per radius, and it
+ * matched it: the build crossed from red into orange at 0.70 R, the reference
+ * at 0.69 R (`balance3.py`). And the owner still saw a build that was mostly
+ * orange against a reference that is mostly purple/magenta, because the eye
+ * weighs PIXELS, not radii — and the two images do not put their pixels at
+ * the same radii. Share of lit pixels by hue, reference vs that build:
+ *
+ *     purple/blue 16.8% vs  9.7%    magenta 19.9% vs 17.4%
+ *     red-pink    17.3% vs 11.1%    orange  46.0% vs 61.8%
+ *
+ * Two causes, neither a colour: the round build's outermost 0.1 R is an 81%-
+ * covered solid band where the reference's is 43% (its right side recedes),
+ * and the reference's purple and magenta dots on the left face are enlarged
+ * by its bulge (16 -> 43 px). Both are locked by ruling (round, no bulge),
+ * so the mapping carries the difference: the transfer curve that gives this
+ * sphere's pixel distribution the reference's hue distribution
+ * (hue(r) = Q_ref(F_build(r))) is fitted by smoothstep(0.275, 1.0) with the
+ * same stops and easing, rms 4.3 deg against 17.9 for the old edges. Cost,
+ * stated: at any given radius the build is now cooler than the reference by
+ * up to ~25 deg (0.6-0.8 R); in pixel share it is the reference's balance.
+ */
+export const FIB_GRAD_EDGES: readonly [number, number] = [0.275, 1.0];
 /**
  * Easing of the mid -> warm half. Linear (1.0) measured 12 deg too warm at
  * 0.6-0.7 R on the first build (hue 359 vs the reference's 347) while every
@@ -1591,8 +1719,154 @@ export const FIB_GRAD_EDGES: readonly [number, number] = [0.12, 0.89];
  * turns orange. 1.6 puts that band's mix at 0.20 instead of 0.36.
  */
 export const FIB_GRAD_WARM_POW = 1.6;
-/** Fade by signed facing (normal . eye): fully out by -0.25, full at 0 — the silhouette row keeps its brightness. */
-export const FIB_BACK_FADE: readonly [number, number] = [-0.25, 0.0];
+/**
+ * Fade by signed facing (normal . eye). Round Q: (-0.25, 0) — the far hemisphere
+ * out, the silhouette row at full brightness.
+ *
+ * ─── ROUND T: (0.0, 0.22) — the last row fades where no size can separate it ───
+ * At facing 0.22 (r 0.975) a round shell's radial row spacing is 1.55 px; the
+ * point-size floor is 1 px; below that the rows cannot be resolved at any size
+ * and would fuse into a hairline. This fades exactly that band — about one
+ * row — and nothing inside it. The minimal thinning the ruling allows, stated.
+ */
+export const FIB_BACK_FADE: readonly [number, number] = [0.0, 0.22];
+/**
+ * ─── ROUND T: THE RIM SHRINK — (gap / spacing, dot / spacing) ───
+ *
+ * Measured on the shipped build (`mergem3.py`, half-peak components per 0.1 R
+ * band): fused fraction 0% to 0.6 R, 5.7% at 0.6-0.7, 34% at 0.7-0.8, 86% at
+ * 0.8-0.9 and 100% at 0.9-1.0 — 717 dots in 3 components, a solid ring. The
+ * centre-to-centre gap minus the dot goes negative at 0.80 R. Pure geometry:
+ * radial row spacing on a round shell is 7.07 px x facing, the dot is 4.5 px.
+ *
+ * The reference's rim (`third-orb.png`) keeps its dots resolvable as beads
+ * with a 0.6-0.8 px gap: its rim dots are 12% smaller than its centre dots
+ * (4.22 vs 4.79 px) and — the larger part — its deformed shell spaces them
+ * 5.1 px apart where the round shell has 4.1. Round is his ruling, so the
+ * dot has to carry the whole difference.
+ *
+ * Law: dot = spacing x facing - gap, as a multiplier (facing - g/s) / (d0/s):
+ *   g/s = 0.7 / 7.07 = 0.10 — the reference's rim gap;
+ *   d0/s = 4.5 / 7.07 = 0.64 — the face dot over the face spacing.
+ * 1.0 wherever the natural gap is >= 0.7 px (facing >= 0.74, r <= 0.67);
+ * 3.0 px at 0.85 R, 2.4 at 0.90, 1.5 at 0.95, the 1 px floor by 0.975 R.
+ * Every dot stays, every dot keeps its token colour; brightness is untouched
+ * (the energy-spread term only acts on GROWN dots). The third component is
+ * the on switch; companions pin (0, 1, 0).
+ */
+export const FIB_RIM_SHRINK: readonly [number, number] = [0.10, 0.64];
+
+/**
+ * ─── ROUND U: THE DEFORMATION IS BACK — SQUASH, ORGANIC FIELD, RIGHT-SIDE FOLD ───
+ *
+ * Rounds Q-T built the main sphere ROUND by ruling. The owner has now put
+ * that build beside `reference/third-orb.png` and ruled the other way: the
+ * reference is an organic, squashed, folded blob, and this round re-adds the
+ * shape. Nothing else moves: the lattice, the dot profile, the gradient and
+ * its stops, the rim shrink and the far-side fade are the round-T values.
+ * `--force-deform=0` gives the round-T shell back, bit for bit, from the same
+ * binary — that is how the "shape only" claim is checked.
+ *
+ * There was no squash and no fold to re-enable: the only deformation the
+ * shell ever had was the per-dot radial turbulence (FIB_TURB_MUL, 0 since
+ * round R), which is scatter, not shape. All three parts below are new, and
+ * every number is MEASURED off the reference (report U):
+ *
+ *   THE SQUASH. The reference is not wider than tall — it is TALLER than
+ *   wide: lit-mask bbox 502 x 532 px (w:h 0.944), max chords 501 x 532
+ *   (0.942), moment ellipse 266.7 x 250.6 with the major axis 7 deg off
+ *   vertical. Its centre cell is a 7 x 8 px rectangle (round Q), the same
+ *   vertical stretch seen in the lattice. FIB_DEFORM_ASPECT scales the
+ *   screen plane by (0.982, 1.058). Why not 0.944 outright: the SAME mask
+ *   pipeline reads round T's true sphere as 1.045 wide (its top and bottom
+ *   limb rows are thinned by the rim shrink and fade, the sides are not), so
+ *   the target is the reference's moment-ellipse ratio, 1.064 tall, which
+ *   that thinning barely moves. Measured on the first build at (0.988,
+ *   1.047): 1.056 tall by moments, 0.975 by bbox; this is 1.5% more.
+ *
+ *   THE CREASE CURVE was fitted twice: once to the reference's crease
+ *   positions, then corrected by the offset the rendered crease sits from
+ *   the curve (0.07-0.15 R outboard, growing toward the bottom).
+ *
+ *   THE ORGANIC FIELD. Silhouette radius per 15-deg bin over the mask's
+ *   equivalent radius: sd/mean 0.029, min 0.955 (upper left), max 1.060
+ *   (top). The field is the turbulence's own three-sine product evaluated on
+ *   the SMOOTH direction at a frozen phase — a continuous lumpy field, not
+ *   per-dot noise — amplitude 0.059 at frequency 0.592, plus four limb
+ *   harmonics fitted by least squares to the residual: rms 0.015 per bin
+ *   against the reference's profile. The field's face-centre value is
+ *   subtracted, so the centre spacing is untouched by construction.
+ *
+ *   THE FOLD. The reference's right side is not a rim. A bright crease runs
+ *   at 0.67 R near the top (screen-up 0.61 R), bows out to 0.74 R above
+ *   centre, 0.72 R at centre, and sweeps in to 0.43 R at the bottom
+ *   (-0.79 R), while the outer edge beyond it tracks the undeformed circle
+ *   (0.97 R at centre). Between the two: a sparse gap right after the crease,
+ *   then a second layer of rows whose density rises to the outer edge. That
+ *   is a sheet CURLING UNDER — the limb region carried screen-left until the
+ *   front sheet turns edge-on — with the surface behind the limb coming back
+ *   out to the silhouette as the far wall of the fold. FIB_DEFORM_CREASE is
+ *   the cubic fitted to the crease positions. FIB_DEFORM_FOLD is the shift
+ *   (0.83 R), the ramp over which a dot past the crease curve is carried
+ *   (1.0 R — wide on purpose: the sheet foreshortens progressively, so its
+ *   rows converge over ~10 rows and overlap into a solid band about 15 px
+ *   wide, the reference's; a sharp fold at ramp 0.12 piled up ONE row and
+ *   read as a seam, measured coverage 95 against the reference's 154-250;
+ *   0.72 gave a 10 px band at 145-163), and the facing band over which the
+ *   shift lets go behind the limb (-0.32..0.12), which is what puts the
+ *   sparse gap beside the crease and the dense edge at the silhouette. The
+ *   shift over the ramp must exceed 2/3 for the sheet to turn at all.
+ *
+ * THE OCCLUDER. A fold has a hidden side: the sheet folded under, and the far
+ * hemisphere behind the front one. The round shell hid its back with a facing
+ * fade; a folded shell cannot, because the far wall of the fold faces the eye
+ * and must show. So the main sphere is drawn against a depth-only mesh of the
+ * SAME deformed surface — a SphereGeometry through the same GLSL chunk, colour
+ * writes off, depth writes on, inset so surface dots sit in front of it — and
+ * the dots test depth. That is the reference's own mechanism: its between-dot
+ * floor is black because it is an opaque surface with dots on it. The
+ * companions never test depth and are untouched.
+ */
+export const FIB_DEFORM_ON = true;
+/** Screen-plane scale (x, y). The reference's w:h is 0.94; this is its 0.944 bbox to the third decimal. */
+export const FIB_DEFORM_ASPECT: readonly [number, number] = [0.982, 1.058];
+/** The organic field: amplitude, spatial frequency, frozen phase, offset into the field. */
+export const FIB_DEFORM_BUMP = { amp: 0.059, freq: 0.592, phase: 9.158, offset: [2.119, 5.05, 1.437] } as const;
+/** Limb harmonics a1 b1 a2 b2 a3 b3 a4 b4 on (1 - facing^2) * sum(a_k cos k phi + b_k sin k phi). */
+export const FIB_DEFORM_HARM: readonly number[] = [0.0194, 0.0082, 0.0013, 0.0089, 0.0046, -0.0223, -0.0075, 0.0082];
+/** The fold: shift (R), ramp (R past the crease curve), back band (facing from..to). */
+export const FIB_DEFORM_FOLD = { shift: 0.83, ramp: 1.0, back: [-0.32, 0.12] } as const;
+/** The crease curve, screen x (R) as a cubic in screen-up (R): c0 + c1 u + c2 u^2 + c3 u^3. */
+export const FIB_DEFORM_CREASE: readonly [number, number, number, number] = [0.63, 0.075, -0.394, 0.169];
+/**
+ * How far inside the surface the occluder sits, as a scale. Surface dots are
+ * in front of it by 4% of R; the amplitude ripple (0.35 x gain, up to 0.07 at
+ * `speaking`) is subtracted per frame so no dot can dip behind it.
+ */
+export const FIB_DEFORM_OCCLUDER_INSET = 0.96;
+/** Occluder tessellation. 96 x 48 puts its chord error at 0.0005 R against a 0.04 R inset. */
+export const FIB_DEFORM_OCCLUDER_SEGMENTS = 96;
+
+/** The organic field's value at the face centre, subtracted in the shader. Same arithmetic as deformWobble. */
+function fibDeformCentreValue(): number {
+  const { freq, phase, offset } = FIB_DEFORM_BUMP;
+  const x = 0 * freq + offset[0];
+  const y = 0 * freq + offset[1];
+  const z = 1 * freq + offset[2];
+  return Math.sin(x * 3.1 + phase * 1.7) * Math.sin(y * 2.7 - phase * 1.3) * Math.sin(z * 3.9 + phase * 2.1);
+}
+
+/** The depth-only occluder's vertex stage; deform.glsl is prepended. */
+const OCCLUDER_VERTEX = `
+uniform float uRadius;
+uniform float uBreath;
+void main() {
+  vec3 dir = normalize(position);
+  vec3 shape = (uDeformOn > 0.5) ? deformShape(dir) : dir;
+  gl_Position = projectionMatrix * modelViewMatrix * vec4(shape * (uRadius + uBreath) * uDeformInset, 1.0);
+}
+`;
+const OCCLUDER_FRAGMENT = 'void main() { gl_FragColor = vec4(0.0); }';
 
 /**
  * The shell's rest orientation. Order 'ZXY' applies Ry (spin about the
@@ -1619,6 +1893,27 @@ function fibRestEuler(spin = 0): Euler {
 function fibGradAxis(): Vector3 {
   const q = new Quaternion().setFromEuler(fibRestEuler());
   return new Vector3(0, 0, 1).applyQuaternion(q.invert()).normalize();
+}
+
+/**
+ * ROUND U: the whole rest-pose screen frame in object space — right, up and
+ * toward-camera — by the same construction as fibGradAxis, so the deformation
+ * is defined against the very axes the gradient is, and rides with the shell.
+ */
+/** Scratch for the per-frame view-anchoring of the deformation frame (round V). */
+const tmpPoseQuat = new Quaternion();
+/** Round W scratch: the un-swayed rest pose, and the sway itself. */
+const tmpRestQuat = new Quaternion();
+const tmpSwayQuat = new Quaternion();
+const tmpSwayEuler = new Euler(0, 0, 0, 'YXZ');
+
+function fibRestFrame(): { right: Vector3; up: Vector3; fwd: Vector3 } {
+  const q = new Quaternion().setFromEuler(fibRestEuler()).invert();
+  return {
+    right: new Vector3(1, 0, 0).applyQuaternion(q).normalize(),
+    up: new Vector3(0, 1, 0).applyQuaternion(q).normalize(),
+    fwd: new Vector3(0, 0, 1).applyQuaternion(q).normalize(),
+  };
 }
 
 /** The main sphere's geometry: the golden-angle shell, or round P's UV grid. */
@@ -2198,7 +2493,8 @@ export function createSphereEngine(options: SphereEngineOptions): SphereEngine {
     // An opaque clear would cover them, so the sphere composites over the CSS.
     alpha: true,
     antialias: false,
-    depth: false,
+    // ROUND U: a depth buffer, for the fold's occluder. Nothing else reads it.
+    depth: true,
     stencil: false,
     powerPreference: 'low-power',
   });
@@ -2213,6 +2509,9 @@ export function createSphereEngine(options: SphereEngineOptions): SphereEngine {
   camera.position.z = CAMERA_Z;
   // Both spiral lattices take the round-Q material and uniforms; only 'uv' takes round P's.
   const fib = MAIN_LATTICE !== 'uv';
+  // ROUND U: the deformation is a golden-angle-shell feature; `--force-deform=0` is the round-T shell.
+  const deformOn = fib && (options.deform ?? FIB_DEFORM_ON);
+  const restFrame = fibRestFrame();
 
   const uniforms = {
     uTime: { value: 0 },
@@ -2316,7 +2615,31 @@ export function createSphereEngine(options: SphereEngineOptions): SphereEngine {
     uGradWarmPow: { value: FIB_GRAD_WARM_POW },
     uGradAxis: { value: fibGradAxis() },
     uBackFade: { value: fib ? new Vector2(FIB_BACK_FADE[0], FIB_BACK_FADE[1]) : new Vector2(-2, -1) },
+    uRimShrink: { value: fib ? new Vector3(FIB_RIM_SHRINK[0], FIB_RIM_SHRINK[1], 1) : new Vector3(0, 1, 0) },
     uLightDir: { value: LIGHT_DIR.clone() },
+    /**
+     * ROUND U: the deformation (see FIB_DEFORM_*). Read only under the
+     * TESSA_DEFORM define, which only the golden-angle main sphere and the
+     * occluder carry; the companions' program never declares these.
+     */
+    uDeformOn: { value: deformOn ? 1 : 0 },
+    uDeformRight: { value: restFrame.right },
+    uDeformUp: { value: restFrame.up },
+    uDeformFwd: { value: restFrame.fwd },
+    uDeformAspect: { value: new Vector2(FIB_DEFORM_ASPECT[0], FIB_DEFORM_ASPECT[1]) },
+    uDeformBump: {
+      value: new Vector4(FIB_DEFORM_BUMP.amp, FIB_DEFORM_BUMP.freq, FIB_DEFORM_BUMP.phase, fibDeformCentreValue()),
+    },
+    uDeformBumpOff: { value: new Vector3(FIB_DEFORM_BUMP.offset[0], FIB_DEFORM_BUMP.offset[1], FIB_DEFORM_BUMP.offset[2]) },
+    uDeformHarmA: { value: new Vector4(FIB_DEFORM_HARM[0], FIB_DEFORM_HARM[1], FIB_DEFORM_HARM[2], FIB_DEFORM_HARM[3]) },
+    uDeformHarmB: { value: new Vector4(FIB_DEFORM_HARM[4], FIB_DEFORM_HARM[5], FIB_DEFORM_HARM[6], FIB_DEFORM_HARM[7]) },
+    uDeformFold: {
+      value: new Vector4(FIB_DEFORM_FOLD.shift, FIB_DEFORM_FOLD.ramp, FIB_DEFORM_FOLD.back[0], FIB_DEFORM_FOLD.back[1]),
+    },
+    uDeformCurve: {
+      value: new Vector4(FIB_DEFORM_CREASE[0], FIB_DEFORM_CREASE[1], FIB_DEFORM_CREASE[2], FIB_DEFORM_CREASE[3]),
+    },
+    uDeformInset: { value: FIB_DEFORM_OCCLUDER_INSET },
   };
 
   // Multipliers on the per-state body values. 1 unless a sweep is running.
@@ -2330,11 +2653,17 @@ export function createSphereEngine(options: SphereEngineOptions): SphereEngine {
 
   const material = new ShaderMaterial({
     uniforms,
-    vertexShader,
+    // ROUND U: the golden-angle shell takes the deformation chunk and the
+    // TESSA_DEFORM define. The UV path and the companions keep the plain stage.
+    vertexShader: fib ? `${deformChunk}\n${vertexShader}` : vertexShader,
     fragmentShader,
+    defines: fib ? { TESSA_DEFORM: 1 } : {},
     transparent: true,
     depthWrite: false,
-    depthTest: false,
+    // ROUND U: tested against the depth-only occluder, which is what hides the
+    // sheet folded under and the far hemisphere behind the front one. Off,
+    // exactly as before, when the deformation is off.
+    depthTest: deformOn,
     /**
      * ROUND Q: MATTE, not additive, for the golden-angle sphere. The
      * reference's dots are opaque discs — where its silhouette rows overlap
@@ -2363,6 +2692,37 @@ export function createSphereEngine(options: SphereEngineOptions): SphereEngine {
   let geometry = buildMainGeometry(countFor(tier), latticeJitter);
   const points = new Points(geometry, material);
   scene.add(points);
+
+  /**
+   * ROUND U: THE OCCLUDER. The same deformed surface as a depth-only mesh —
+   * see the FIB_DEFORM_* note. Opaque, so three.js draws it before every
+   * transparent object; colour writes off, so it paints nothing and the CSS
+   * behind the canvas still shows through the between-dot floor; polygon
+   * offset pushes it back by its own slope so a sprite on a steep part of the
+   * surface is not nicked by it. It shares this engine's uniforms object, so
+   * radius, breath and the deformation cannot drift from the dots'.
+   */
+  const occluder: Mesh | null = deformOn
+    ? new Mesh(
+        new SphereGeometry(1, FIB_DEFORM_OCCLUDER_SEGMENTS, FIB_DEFORM_OCCLUDER_SEGMENTS / 2),
+        new ShaderMaterial({
+          uniforms,
+          vertexShader: `${deformChunk}\n${OCCLUDER_VERTEX}`,
+          fragmentShader: OCCLUDER_FRAGMENT,
+          colorWrite: false,
+          depthWrite: true,
+          depthTest: true,
+          transparent: false,
+          polygonOffset: true,
+          polygonOffsetFactor: 1,
+          polygonOffsetUnits: 1,
+        }),
+      )
+    : null;
+  if (occluder) {
+    occluder.frustumCulled = false;
+    scene.add(occluder);
+  }
 
   /**
    * THE TWO BACKGROUND COMPANIONS. See companions.ts.
@@ -2572,6 +2932,10 @@ export function createSphereEngine(options: SphereEngineOptions): SphereEngine {
   let sceneTimeMs = 0;
   let breathPhase = 0;
   let spinAngle = 0;
+  /** Round W: the form's sway phases, radians. Accumulated, never uTime * factor. */
+  let swayYawPhase = 0;
+  let swayPitchPhase = 0;
+  let swayRollPhase = 0;
 
   /**
    * §R.1 heartbeat pulse.
@@ -2602,6 +2966,14 @@ export function createSphereEngine(options: SphereEngineOptions): SphereEngine {
   let rafId = 0;
   let lastStepAt = 0;
   let lastRafAt = 0;
+
+  /**
+   * Is the rAF loop running at all? See `setAnimating`.
+   *
+   * Starts true so every existing caller — the full Orb — behaves exactly as it
+   * did before this existed. Only the ambient widget ever turns it off.
+   */
+  let animating = true;
 
   /**
    * Pacing by counting callbacks, not by accumulating milliseconds.
@@ -2774,6 +3146,8 @@ export function createSphereEngine(options: SphereEngineOptions): SphereEngine {
     smooth.turbulence = approach(smooth.turbulence, target.turbulence, rate);
     smooth.breathDepth = approach(smooth.breathDepth, target.breathDepth, rate);
     smooth.amplitudeGain = approach(smooth.amplitudeGain, target.amplitudeGain, rate);
+    smooth.voicePulse = approach(smooth.voicePulse, target.voicePulse, rate);
+    smooth.voiceGlow = approach(smooth.voiceGlow, target.voiceGlow, rate);
     smooth.spin = approach(smooth.spin, target.spin, rate);
     smooth.pointScale = approach(smooth.pointScale, target.pointScale, rate);
     smooth.brightness = approach(smooth.brightness, target.brightness, rate);
@@ -2799,9 +3173,16 @@ export function createSphereEngine(options: SphereEngineOptions): SphereEngine {
       // THE INTENSIFICATION. Rotation, not displacement — it is a single
       // coherent cue the eye integrates, and it moves particles ALONG the shell
       // rather than off it, so the silhouette cannot deform. See SPIN_GAIN.
-      spinAngle += (smooth.spin * (1 + SPIN_GAIN * focusCurrent) * deltaMs) / 1000;
+      // Round V: the golden-angle shell caps the rate — see FIB_SPIN_MAX.
+      const spinRate = fib ? Math.min(smooth.spin, FIB_SPIN_MAX) : smooth.spin;
+      spinAngle += (spinRate * (1 + SPIN_GAIN * focusCurrent) * deltaMs) / 1000;
       // Accumulated, never uTime * factor — see the note in particles.vert.
       noisePhaseS += (deltaMs / 1000) * (1 + NOISE_RATE_GAIN * focusCurrent);
+      // Round W: the form's sway. Inside the frozen guard, so `blocked` holds
+      // whatever lean it had and reduced motion never leans at all.
+      swayYawPhase += (deltaMs / SWAY_YAW_PERIOD_MS) * Math.PI * 2;
+      swayPitchPhase += (deltaMs / SWAY_PITCH_PERIOD_MS) * Math.PI * 2;
+      swayRollPhase += (deltaMs / SWAY_ROLL_PERIOD_MS) * Math.PI * 2;
     }
 
     const amplitude = reducedMotion ? 0 : fakeAmplitude(sceneTimeMs, state);
@@ -2831,7 +3212,9 @@ export function createSphereEngine(options: SphereEngineOptions): SphereEngine {
     uniforms.uRadius.value = smooth.radius * fitCurrent;
     uniforms.uTurbulence.value =
       smooth.turbulence * (1 + TURB_AMP_GAIN * focusCurrent) * (fib ? FIB_TURB_MUL : 1);
-    uniforms.uBreath.value = Math.sin(breathPhase) * smooth.breathDepth;
+    // Round V: the voice pulse rides on the breath — a whole-shell swell in
+    // time with the amplitude envelope. The occluder reads uBreath too.
+    uniforms.uBreath.value = Math.sin(breathPhase) * smooth.breathDepth + amplitude * smooth.voicePulse;
     uniforms.uAmpGain.value = smooth.amplitudeGain;
     uniforms.uPointScale.value =
       smooth.pointScale * bodySizeMul * fitCurrent * (fib ? FIB_POINT_SCALE_MUL : UV_POINT_SCALE_MUL);
@@ -2844,8 +3227,11 @@ export function createSphereEngine(options: SphereEngineOptions): SphereEngine {
     // theme switch crossfades through it with everything else. `blocked` gets
     // its own gain from --status-warn rather than an exemption — see the note
     // on gainFor for why exempting it was wrong.
+    // Round W: the voice glow rides the amplitude with the swell — see
+    // SphereParams.voiceGlow. 1.0 exactly whenever nothing is being said.
     uniforms.uBrightness.value =
       smooth.brightness *
+      (1 + smooth.voiceGlow * amplitude) *
       bodyBrightMul *
       (fib
         ? FIB_BRIGHT_MUL
@@ -2875,10 +3261,34 @@ export function createSphereEngine(options: SphereEngineOptions): SphereEngine {
      * 1.00 R, which is a tilt of about asin(0.89) complement — 27 degrees.
      */
     if (fib) {
-      // The measured rest pose (see fibRestEuler). FIB_SPIN_MUL is 0 this
-      // round — static — so the idle spin does not carry the rows or the
-      // cool patch anywhere; when rotation comes, it comes through here.
-      points.rotation.copy(fibRestEuler(spinAngle * FIB_SPIN_MUL));
+      // The measured rest pose (see fibRestEuler), spun about the lattice's
+      // own axis. Round V turned FIB_SPIN_MUL on.
+      tmpRestQuat.setFromEuler(fibRestEuler(spinAngle * FIB_SPIN_MUL));
+      // ROUND V: pin the FORM and the GRADIENT to the view. The deformation
+      // frame and the gradient axis are the object-space images of screen
+      // right/up/forward under the REST pose (spin included, sway excluded),
+      // so the squash, the fold and the purple centre stay where they are
+      // while the lattice turns through them. At spin 0 this is
+      // fibRestFrame() exactly.
+      tmpPoseQuat.copy(tmpRestQuat).invert();
+      (uniforms.uDeformRight.value as Vector3).set(1, 0, 0).applyQuaternion(tmpPoseQuat).normalize();
+      (uniforms.uDeformUp.value as Vector3).set(0, 1, 0).applyQuaternion(tmpPoseQuat).normalize();
+      (uniforms.uDeformFwd.value as Vector3).set(0, 0, 1).applyQuaternion(tmpPoseQuat).normalize();
+      (uniforms.uGradAxis.value as Vector3).copy(uniforms.uDeformFwd.value as Vector3);
+      // ROUND W: the sway, applied AFTER the rest pose — pose = sway * rest —
+      // in view space (the camera sits on +z unrotated, so world axes are
+      // screen axes). Because the frame above was taken from `rest` alone,
+      // the form is pinned to the SWAYING frame: lattice, deformation,
+      // occluder and gradient all lean together as one rigid body. See
+      // SWAY_YAW_DEG.
+      tmpSwayEuler.set(
+        Math.sin(swayPitchPhase) * ((SWAY_PITCH_DEG * Math.PI) / 180),
+        Math.sin(swayYawPhase) * ((SWAY_YAW_DEG * Math.PI) / 180),
+        Math.sin(swayRollPhase) * ((SWAY_ROLL_DEG * Math.PI) / 180),
+        'YXZ',
+      );
+      tmpSwayQuat.setFromEuler(tmpSwayEuler);
+      points.quaternion.copy(tmpSwayQuat).multiply(tmpRestQuat);
     } else {
       points.rotation.y = spinAngle;
       points.rotation.x = POLE_TILT_RAD;
@@ -2892,6 +3302,17 @@ export function createSphereEngine(options: SphereEngineOptions): SphereEngine {
     points.position.x = -offsetCurrentPx * 0.5 * worldPerPixel;
     // World +y is screen UP, so a positive yPx lifts the sphere.
     points.position.y = offsetCurrentYPx * 0.5 * worldPerPixel;
+    if (occluder) {
+      // ROUND U: the occluder is the dots' own surface; it goes where they go.
+      // Round W copies the quaternion — the pose is now composed there.
+      occluder.quaternion.copy(points.quaternion);
+      occluder.position.copy(points.position);
+      // The amplitude ripple moves a dot radially by up to 0.35 x gain x the
+      // amplitude of THIS frame. The occluder retreats by exactly that, so no
+      // surface dot can dip behind it and it does not sit needlessly deep
+      // between syllables (round V: the bound follows the envelope).
+      uniforms.uDeformInset.value = FIB_DEFORM_OCCLUDER_INSET - 0.35 * smooth.amplitudeGain * amplitude;
+    }
 
     // The companions advance on the same accepted frame as the main sphere, so
     // all three share one clock and cannot drift into looking independent.
@@ -3053,12 +3474,50 @@ export function createSphereEngine(options: SphereEngineOptions): SphereEngine {
       heldMs: stateHeldMs,
       focus: focusCurrent,
       spinRad: spinAngle,
+      swayYawDeg: Math.sin(swayYawPhase) * SWAY_YAW_DEG,
+      swayPitchDeg: Math.sin(swayPitchPhase) * SWAY_PITCH_DEG,
+      swayRollDeg: Math.sin(swayRollPhase) * SWAY_ROLL_DEG,
       resizeReason,
     };
   }
 
+  /**
+   * ─── THE AMBIENT WIDGET'S BATTERY SWITCH ───
+   *
+   * `false` STOPS THE LOOP. It does not slow it, and the difference is the
+   * whole feature. `targetFps()` already returns 0 when the document is hidden,
+   * and the line below it (`if (fps === 0) return;`) skips the RENDER — but the
+   * rAF callback still fires on every vsync, so the compositor still wakes this
+   * process 60 times a second to be told there is nothing to do. That is fine
+   * for a window the owner opened and will close. It is not fine for a sphere
+   * pinned to his corner all day on a two-core laptop with no GPU.
+   *
+   * So this cancels the callback outright and draws one last frame, which then
+   * simply stays on screen — a WebGL back buffer persists until something draws
+   * over it. Restarting re-enters the loop with the clocks continuous, because
+   * `step` measures its own delta against `lastStepAt` and is handed a value
+   * clamped to 250 ms, so a five-hour freeze does not produce a five-hour jump.
+   */
+  function setAnimating(on: boolean): void {
+    if (disposed || reducedMotion || on === animating) return;
+    animating = on;
+    if (on) {
+      // Reset the delta origin, or the first frame after a freeze would be
+      // handed the entire frozen duration as its timestep.
+      lastStepAt = 0;
+      lastRafAt = 0;
+      rafId = requestAnimationFrame(frame);
+    } else {
+      cancelAnimationFrame(rafId);
+      // One final frame so the frozen image is the CURRENT state rather than
+      // whatever happened to be on screen when the freeze landed.
+      step(0);
+      stats = { ...stats, fps: 0 };
+    }
+  }
+
   function frame(now: number): void {
-    if (disposed) return;
+    if (disposed || !animating) return;
     rafId = requestAnimationFrame(frame);
 
     // Sample the RAW callback interval first, before any gating. This is the
@@ -3187,6 +3646,7 @@ export function createSphereEngine(options: SphereEngineOptions): SphereEngine {
 
   return {
     setTier,
+    setAnimating,
 
     setCompanions(placements) {
       for (const p of placements) {
@@ -3282,6 +3742,10 @@ export function createSphereEngine(options: SphereEngineOptions): SphereEngine {
       for (const c of companions) c.dispose();
       geometry.dispose();
       material.dispose();
+      if (occluder) {
+        occluder.geometry.dispose();
+        (occluder.material as ShaderMaterial).dispose();
+      }
       renderer.dispose();
       renderer.forceContextLoss();
     },

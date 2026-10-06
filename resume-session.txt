@@ -1,2 +1,0 @@
-session 1: claude --resume 47f005ee-f96c-4247-9bb5-9ab18f81e19d
-session 2: claude --resume d4c928ad-69cf-4e94-a0db-a08b6d9c03b8

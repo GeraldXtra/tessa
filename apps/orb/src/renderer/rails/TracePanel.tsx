@@ -38,12 +38,20 @@
  * text that may still change, with a provenance gutter asserting a source over
  * it — and the gutter's whole job is to be trustworthy. The sphere's `thinking`
  * state is the in-flight indicator; that is what it is for.
+ *
+ * ─── typed lines are the same lines ───
+ * The compose box at the drawer's foot (layout/Composer.tsx) sends
+ * `cmd.agent.message`; what comes back — HIS line echoed by the daemon, then
+ * hers — is `evt.transcript.message` and renders here through the same store,
+ * the same list and the same gutter as a spoken turn. The only addition is
+ * the `via` tag on lines that carry one. There is no second renderer.
  */
 
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 
 import { excerpt } from './format.ts';
 import { NoData, Section, formatTimestamp } from './primitives.tsx';
+import { latencyLineCommitted } from '../state/latency.ts';
 import { transcriptStore, useStore } from '../state/store.ts';
 
 /** Within this many px of the bottom counts as "following the newest". */
@@ -78,6 +86,17 @@ export function TracePanel() {
     if (el && following.current) el.scrollTop = el.scrollHeight;
   }, [lines.length]);
 
+  /**
+   * The newest line has just been committed to the DOM. Hand it to the
+   * latency probe, which does nothing unless a typed send is being timed —
+   * see state/latency.ts. A layout effect, not an effect, so the rAF it
+   * requests is the frame that paints this commit.
+   */
+  useLayoutEffect(() => {
+    const last = lines[lines.length - 1];
+    if (last) latencyLineCommitted(last, (line) => window.tessa.reportMetrics(line));
+  }, [lines.length, lines]);
+
   return (
     <>
       <Section title="Transcript">
@@ -95,6 +114,11 @@ export function TracePanel() {
                 <li key={id} className="trace__line" data-provenance={line.provenance}>
                   <span className="trace__meta">
                     <span className="trace__role">{line.role}</span>
+                    {/* CONTRACT §4.1 `via` — a tiny tag ONLY when the daemon
+                        sent one. Absent is rendered as nothing: it means
+                        unspecified, never "voice". Any string is shown, since
+                        the set is open by design; main bounds and strips it. */}
+                    {line.via ? <span className="trace__via">{line.via}</span> : null}
                     {long ? (
                       <button
                         type="button"

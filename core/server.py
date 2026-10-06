@@ -17,24 +17,39 @@ Run:  python core/server.py --dev
 
 from __future__ import annotations
 
-import argparse
-import asyncio
-import hashlib
-import json
-import re
-import secrets
-import signal
-import socket
-import sys
-import time
-from datetime import datetime, timedelta, timezone
-from pathlib import Path
-from typing import Any, Iterable
+# ── THE CONSOLE-CLOSE ABORT, SWITCHED OFF BEFORE ANYTHING ELSE LOADS ─────────
+#
+# Whisper's ctranslate2 ships Intel's OpenMP runtime (libiomp5md.dll), and that
+# DLL installs its own console handler which answers CTRL_C / CTRL_CLOSE with
+# `forrtl: error (200): program aborting due to window-CLOSE event` — ending
+# the process before the daemon's clean shutdown can run. Every daemon from
+# 23 Sep to 5 Oct died that way. The runtime reads this variable when the DLL
+# loads, so it is set HERE, ahead of every other import; only the docstring and
+# `from __future__` may come first. scripts/start-tessa.cmd sets it as well —
+# this line is what protects a daemon started any other way.
+import os
 
-import websockets
-import yaml
-from websockets.asyncio.server import ServerConnection, serve
-from websockets.http11 import Request, Response
+_FOR_DISABLE_INHERITED = os.environ.get("FOR_DISABLE_CONSOLE_CTRL_HANDLER")
+os.environ["FOR_DISABLE_CONSOLE_CTRL_HANDLER"] = "1"
+
+import argparse  # noqa: E402
+import asyncio  # noqa: E402
+import hashlib  # noqa: E402
+import json  # noqa: E402
+import re  # noqa: E402
+import secrets  # noqa: E402
+import signal  # noqa: E402
+import socket  # noqa: E402
+import sys  # noqa: E402
+import time  # noqa: E402
+from datetime import datetime, timedelta, timezone  # noqa: E402
+from pathlib import Path  # noqa: E402
+from typing import Any, Iterable  # noqa: E402
+
+import websockets  # noqa: E402
+import yaml  # noqa: E402
+from websockets.asyncio.server import ServerConnection, serve  # noqa: E402
+from websockets.http11 import Request, Response  # noqa: E402
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT_DIR))
@@ -53,7 +68,15 @@ from tessa_protocol import (  # noqa: E402
 )
 from core.brain.approvals import (APPROVAL_WINDOW_S, ApprovalError,  # noqa: E402
                                   iso_in as _iso_in)
+from core.brain.claims import ClaimStore  # noqa: E402
+from core.brain.claims import bind as bind_claims  # noqa: E402
 from core.brain.conversation import Conversation  # noqa: E402
+from core.brain.intents import is_private_utterance  # noqa: E402
+from core.brain.relevance import from_settings as relevance_from_settings  # noqa: E402
+from core.brain.style import StyleStore  # noqa: E402
+from core.brain.style import bind as bind_style  # noqa: E402
+from core.brain.style import enabled as style_enabled  # noqa: E402
+from core.brain.style import resolve_owner_handle  # noqa: E402
 from core.brain.llm import describe_engines, make_engine  # noqa: E402
 from core.tools.browser import close_browser as close_browser_on_shutdown  # noqa: E402
 from core.tools.browser import reap_orphan  # noqa: E402
@@ -64,9 +87,16 @@ from core.security.audit import AuditLog  # noqa: E402
 from core.security.identity import IdentityError, assert_not_service_account  # noqa: E402
 from core.security.guard import Guard, Verdict  # noqa: E402
 from core.security import runtime as rt  # noqa: E402
+from core import lifecycle  # noqa: E402
 from core.pty.grants import GrantRegistry, RedeemResult, Session  # noqa: E402
 from core.telemetry.cost import CURRENCY, CostLedger  # noqa: E402
 from core.telemetry.health import HealthCollector, HealthConfig  # noqa: E402
+# The credential vault (core/capabilities/vault — imported here, never importing
+# back; VAULT-DESIGN.md §0.3). `vault.tools` is the one vault module that touches
+# core.tools and is imported HERE, not from the vault package's __init__.
+from core.capabilities.vault import Vault as _Vault, VaultWs as _VaultWs  # noqa: E402
+from core.capabilities.vault.tools import specs as _vault_specs  # noqa: E402
+from core.tools import REGISTRY as _REGISTRY  # noqa: E402
 
 # ── constants from CONTRACT ───────────────────────────────────────────────────
 
@@ -134,6 +164,12 @@ KNOWN_COMMANDS = frozenset({
     # PROTOCOL_VERSION, because §3.2 requires unknown types to be ignored. The
     # §8 table entry is Gerald's to add; the diff is in the report.
     "cmd.calendar.today",
+    # ADDITIVE under CONTRACT §7.2 — the vault's sub-namespace, taken from the
+    # vault's own handler map so the two can never drift: cmd.vault.status,
+    # .list, .unlock, .lock, .store, .remove, .setPolicy, .setPassphrase.
+    # Handlers live in core/capabilities/vault/ws.py; the CONTRACT rows are the
+    # owner's to add (VAULT-CONTRACT-DIFF.md). PROTOCOL_VERSION stays 1.
+    *_VaultWs.COMMANDS,
 })
 
 _ULID_ALPHABET = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
@@ -212,6 +248,20 @@ class TessaDaemon:
         self.started_at = time.monotonic()
 
         self.audit = AuditLog(ROOT / "data" / "audit.log")
+        # THE CREDENTIAL VAULT. Locked at start, always: the passphrase-derived
+        # key lives in memory only and dies with this process, so every restart
+        # re-locks it. No `path=` — the default is %LOCALAPPDATA%\Tessa\vault.json,
+        # ACL-locked to the owner + SYSTEM (core/capabilities/HOOK-PROPOSAL.md §2).
+        # Construction never raises: DPAPI or store trouble marks it `broken`
+        # and every operation then refuses, audited.
+        self.vault = _Vault(audit=self.audit)
+        self.vault_ws = _VaultWs(self.vault, envelope=envelope, broadcast=self.broadcast)
+        # `vault.status` — the one registry TOOL the model may name (green,
+        # metadata only). Registered here because the spec needs this instance;
+        # core/tools/_validate() has already run, so its capability is in
+        # permissions.yaml regardless. No tool returns a secret (VAULT-DESIGN §5).
+        for _spec in _vault_specs(self.vault):
+            _REGISTRY[_spec.name] = _spec
         self.guard = Guard(ROOT / "core" / "config" / "permissions.yaml")
         # THE INJECTION FENCE, and there is exactly ONE of it. CONTRACT §6.1's
         # `external_content_in_context` counter is only a control if every path
@@ -219,9 +269,19 @@ class TessaDaemon:
         # SessionContext somewhere would be a flag that is always clear and a
         # gate that always opens.
         self.session = SessionContext()
+        # TYPED TURNS RUN AS TASKS, ONE AT A TIME — see `_h_agent_message`.
+        # The lock keeps two quick messages in the order he sent them on the
+        # one shared executor; the set keeps a running task referenced.
+        self._typed_lock = asyncio.Lock()
+        self._typed_tasks: set[asyncio.Task[None]] = set()
         # THE THREAD, loaded from disk at boot. A corrupt file starts empty
         # and is reported — it must never stop the daemon coming up.
         self.conversation = Conversation()
+        # WHAT STRANGERS SAID, kept apart from the thread. One store, its own
+        # file, UNVERIFIED by construction; bound here so the claims.* tools
+        # can reach it and nothing else has to. core/brain/claims.py.
+        self.claims = ClaimStore()
+        bind_claims(self.claims, self.conversation)
 
         # THE BRAIN. Built here so `brain.engine` in settings.yaml is read once,
         # at boot, and reported at boot — including whether it is actually
@@ -237,6 +297,24 @@ class TessaDaemon:
         except ValueError as exc:
             log(f"!! brain: {exc}")
             self.brain = None
+
+        # HOW PEOPLE WRITE, kept as numbers — the third store, apart from the
+        # thread and the claims. Needs settings for `style.owner_handle`, so
+        # it is built after they load. `style.enabled: false` leaves it
+        # unbound, which is the exact behaviour before it existed.
+        # core/brain/style.py.
+        self.style = (StyleStore(owner_handle=resolve_owner_handle(self.settings))
+                      if style_enabled(self.settings) else None)
+        bind_style(self.style)
+
+        # WHICH claims are worth keeping: the selective filter in front of the
+        # claim store, scoring each post of an X read against HIS topics (the
+        # thread's user turns, read and never written, plus
+        # `claims.filter.topics`). It decides note-or-skip and nothing else —
+        # a kept claim is exactly as unverified as before, and only his own
+        # word promotes one. `claims.filter.enabled: false` is Stage 1
+        # exactly. core/brain/relevance.py.
+        self.relevance = relevance_from_settings(self.settings, self.conversation)
 
         budget = self.settings.get("budget", {}) or {}
         health_cfg = self.settings.get("health", {}) or {}
@@ -462,12 +540,17 @@ class TessaDaemon:
             "ok": True,
             "daemonVersion": DAEMON_VERSION,
             "protocolVersion": PROTOCOL_VERSION,
-            "capabilities": ["pty.grant", "fs.list", "audit.query", "permissions.tiers"],
+            "capabilities": ["pty.grant", "fs.list", "audit.query", "permissions.tiers", "vault"],
             "sessionId": state["sessionId"],
         }, corr=msg["id"]))
 
+        # `system`, NOT "human". A surface presenting the launch token is the
+        # daemon's own admission control succeeding — a process authenticated,
+        # and the daemon cannot know whether a person was at the keyboard (the
+        # surfaces reconnect on their own). Claiming "human" here put the
+        # owner's name on an event he may not have caused.
         self.audit.append(
-            actor="human", tool="auth.hello", tier="green",
+            actor="system", tool="auth.hello", tier="green",
             summary=f"{surface} connected",
             detail={"surface": surface, "surfaceVersion": payload.get("surfaceVersion")},
         )
@@ -525,6 +608,10 @@ class TessaDaemon:
             "cmd.voice.pushToTalk": self._h_voice_push_to_talk,
             "cmd.agent.message": self._h_agent_message,
             "cmd.calendar.today": self._h_calendar_today,
+            # cmd.vault.* — pure delegation to core/capabilities/vault/ws.py.
+            # The secret-bearing fields are popped out of `payload` by the vault
+            # before anything else runs; never log a cmd.vault.* frame.
+            **self.vault_ws.handler_map(),
         }.get(mtype)
 
         if handler is None:
@@ -828,8 +915,13 @@ class TessaDaemon:
             # `exited` means the session is gone regardless of who ended it.
             self.disarm_revoke_watchdog(session_id)
             self.registry.end_session(session_id)
+            # `killed` is the Console reporting that it complied with THIS
+            # DAEMON'S `evt.pty.revoke` after observing the death (apps/console
+            # pty-host.ts reports it from the revoke path and nowhere else). That
+            # is the daemon's own action completing, so it is `system` — it used
+            # to say "human", attributing a revoke he did not issue to him.
             self.audit.append(
-                actor="program" if event == "exited" else "human",
+                actor="program" if event == "exited" else "system",
                 tool=f"pty.{event}", tier="none",
                 summary=f"session {session_id[:8]} {event}" + (f": {detail}" if detail else ""),
                 detail={"sessionId": session_id},
@@ -961,13 +1053,24 @@ class TessaDaemon:
         tools = " | tools=" + (", ".join(
             f"{n}:{'ok' if ok else 'FAILED ' + err}" for n, ok, err in turn.tools
         ) if turn.tools else "none")
-        log(f"TURN heard={turn.heard!r} intent={turn.intent.value}{tools} | {t.describe()}")
-        log(f"     said={turn.said!r}")
+        # A PRIVATE turn (x.read_dm / x.send_dm, round 4, 2026-09-12): what
+        # he said carries the message he dictated, what she said carries the
+        # messages she read him. Neither is for the chain or the log — the
+        # tool's own READ-DM / DM lines already record the handle, a count
+        # and a digest. Withheld here, with the lengths, so the entry still
+        # says a turn happened and what ran.
+        _private = self._private_turn(turn.tools, turn.heard)
+        _heard = (f"<withheld: {len(turn.heard)} chars, a private-message turn>"
+                  if _private else turn.heard)
+        _said = (f"<withheld: {len(turn.said)} chars, a private-message turn>"
+                 if _private else turn.said)
+        log(f"TURN heard={_heard!r} intent={turn.intent.value}{tools} | {t.describe()}")
+        log(f"     said={_said!r}")
         self.audit.append(
             actor="human", tool=f"voice.turn.{turn.intent.value}", tier="green",
-            summary=f"voice turn: heard {turn.heard[:60]!r} -> {turn.intent.value}",
+            summary=f"voice turn: heard {_heard[:60]!r} -> {turn.intent.value}",
             detail={
-                "heard": turn.heard, "said": turn.said,
+                "heard": _heard, "said": _said,
                 "sttMs": round(t.stt_s * 1000), "ttsMs": round(t.tts_s * 1000),
                 "toFirstAudioMs": round(t.total_to_first_audio_s * 1000),
             },
@@ -1071,11 +1174,17 @@ class TessaDaemon:
             return
         if self.voice is not None:
             self.voice.session_open = True
+        # E3: WHO OPENED IT. A chord is a key he pressed — `human`, the only
+        # trusted source (CONTRACT §6.2). A wake phrase proves only that a
+        # phrase was heard: a television or a recording can produce one, so it
+        # is `program`, exactly as the adjacent `voice.wake.fired` entry already
+        # records it. This used to write `human` for both.
+        opener = "human" if by == "chord" else "program"
         self.audit.append(
-            actor="human", tool="voice.session.start", tier="amber",
+            actor=opener, tool="voice.session.start", tier="amber",
             summary=(f"conversation session opened by {by} — the microphone "
                      f"will re-arm after every turn until he closes it"),
-            detail={"openedBy": by}, provenance="human",
+            detail={"openedBy": by}, provenance=opener,
         )
         log(f"  [session] OPEN (by {by}) — she will keep listening until you "
             f"say you are done")
@@ -1205,7 +1314,8 @@ class TessaDaemon:
             from core.brain.router import Router
             loop_ref = asyncio.get_running_loop()
             ex = Executor(
-                session=self.session, audit=self.audit,
+                session=self.session, audit=self.audit, claims=self.claims,
+                style=self.style, relevance=self.relevance,
                 on_permission_request=lambda pl: asyncio.run_coroutine_threadsafe(
                     self.broadcast("evt.permission.request", pl), loop_ref),
             )
@@ -1231,6 +1341,19 @@ class TessaDaemon:
         passed the per-launch token and the Origin check at `cmd.hello`. Running
         it here would fail closed with no voiceprint and lock him out of his own
         Console for a reason that does not apply.
+
+        THE ACK IS IMMEDIATE (live-selector round, 2026-09-22). CONTRACT §5.1:
+        `cmd.agent.message` answers `res.agent.accepted { messageId }` — an
+        ACCEPTANCE, not the result. This used to reply only after the whole
+        turn had run, and the Console's request timeout is 5 s: a turn that
+        opens Chrome and waits for X to hydrate takes 10–25 s, so the pane
+        said "no reply to cmd.agent.message within 5000 ms" while the answer
+        was still on its way — and, because a connection's frames are
+        dispatched in order, every other command on that socket (ping,
+        permission.respond) queued behind the turn. Now the ack goes out
+        first and the turn runs as a task under `_typed_lock`; the result
+        reaches every subscribed surface as `evt.transcript.message`, exactly
+        as it always did. The reply carries nothing the pane read.
         """
         text = str(payload.get("text") or "").strip()
         if not text:
@@ -1239,15 +1362,33 @@ class TessaDaemon:
             }, corr=corr))
             return
 
+        message_id = ulid()
         # HIS LINE GOES OUT FIRST, so the pane can render it before she thinks.
         # Broadcast rather than replied, so a spoken turn and a typed turn land
         # on the SAME event and every subscribed surface sees one thread.
         await self.broadcast("evt.transcript.message", {
             "companionId": DEFAULT_COMPANION_ID,
-            "message": {"messageId": ulid(), "role": "user",
+            "message": {"messageId": message_id, "role": "user",
                         "text": text, "ts": now_iso(), "via": "typed"},
         })
+        # THE ACK, BEFORE ANY THINKING. The same id as his line, so a surface
+        # can tie the acceptance to the message it rendered.
+        await ws.send(envelope("res.agent.accepted",
+                               {"accepted": True, "messageId": message_id}, corr=corr))
+        task = asyncio.create_task(self._typed_turn_task(text, message_id))
+        self._typed_tasks.add(task)
+        task.add_done_callback(self._typed_tasks.discard)
 
+    async def _typed_turn_task(self, text: str, message_id: str) -> None:
+        """One typed turn, serialised behind any turn already running."""
+        async with self._typed_lock:
+            try:
+                await self._typed_turn(text, message_id)
+            except Exception as exc:  # noqa: BLE001 — a task's exception is otherwise a log line at exit
+                log(f"!! typed turn task failed: {type(exc).__name__}: {exc}")
+
+    async def _typed_turn(self, text: str, message_id: str) -> None:
+        """The turn itself — everything `_h_agent_message` did after the ack."""
         router, executor = self._text_agent()
         loop_ref = asyncio.get_running_loop()
 
@@ -1270,12 +1411,20 @@ class TessaDaemon:
             self.audit.append(
                 actor="human", tool="agent.message", tier="amber",
                 summary=f"typed turn failed: {type(exc).__name__}",
-                detail={"via": "typed", "error": str(exc)[:200]}, provenance="human",
+                detail={"via": "typed", "error": str(exc)[:200], "messageId": message_id},
+                provenance="human",
             )
             await self.broadcast("evt.agent.state",
                                  {"companionId": DEFAULT_COMPANION_ID, "state": "idle"})
-            await ws.send(envelope("res.agent.message",
-                                   {"accepted": True, "ok": False}, corr=corr))
+            # THE ACK HAS ALREADY GONE, so the pane hears about a failure the
+            # way it hears an answer: a line in her register, on the thread.
+            await self.broadcast("evt.transcript.message", {
+                "companionId": DEFAULT_COMPANION_ID,
+                "message": {"messageId": ulid(), "role": "assistant",
+                            "text": ("Something went wrong while I was on that, Emperor. "
+                                     "It is in the audit log; say it again and I will retry."),
+                            "ts": now_iso(), "via": "typed"},
+            })
             return
 
         # A TYPED TURN COUNTS AS A TURN. The session's turn counter is shared
@@ -1334,10 +1483,6 @@ class TessaDaemon:
 
         await self.broadcast("evt.agent.state",
                              {"companionId": DEFAULT_COMPANION_ID, "state": "idle"})
-        await ws.send(envelope("res.agent.message", {
-            "accepted": True, "ok": True, "intent": turn.intent,
-            "awaitingApproval": turn.awaiting_approval,
-        }, corr=corr))
 
     async def _h_voice_push_to_talk(self, ws, state, payload, corr) -> None:
         """
@@ -1437,6 +1582,32 @@ class TessaDaemon:
             "changed": was != self.ptt_active,
         }, corr=corr))
 
+    def _private_turn(self, tools: Any, heard: str = "") -> bool:
+        """
+        True when a tool that ran this turn is PRIVATE (ToolSpec.private /
+        private_args — x.read_dm, x.send_dm), OR when what he said has the
+        SHAPE of a private message (core/brain/intents.is_private_utterance):
+        the turn's heard and said text are then withheld from the chain and
+        the log, because either would carry his private messages. The shape
+        test covers the utterance the router missed — "direct message ada
+        bob saying …" ran no tool and must not be logged either. Asked of the
+        executor, which owns the registry; no executor, only the shape.
+        """
+        try:
+            if heard and is_private_utterance(str(heard)):
+                return True
+        except Exception:  # noqa: BLE001
+            pass
+        ex = getattr(getattr(self, "voice", None), "executor", None)
+        probe = getattr(ex, "is_private", None)
+        if probe is None:
+            return False
+        try:
+            return any(bool(probe(str(t[0] if isinstance(t, (tuple, list)) else t)))
+                       for t in (tools or []))
+        except Exception:  # noqa: BLE001
+            return False
+
     async def _h_permission_respond(self, ws, state, payload, corr) -> None:
         """
         CONTRACT §5.1 — `cmd.permission.respond { requestId, decision, remember?,
@@ -1484,13 +1655,31 @@ class TessaDaemon:
                 "retryable": False}, corr=corr))
             return
 
+        # WHO INITIATED THE ACTION HE IS DECIDING ON — the value the card was
+        # shown, resolved by the SAME `_actor_of` the executor uses at
+        # dispatch. The deny path used to say "human" unconditionally, so an
+        # agent-built request the owner denied was chained as his own act: the
+        # mirror of the audit-actor bug, on the rejection path. His decision is
+        # a human act; the ACTION was still initiated by whoever built the
+        # call, and that is what `actor` means on the chain.
+        #
+        # HOISTED ABOVE THE BRANCH (E2). The APPROVAL REFUSED and APPROVAL
+        # FAILED entries further down wrote a blanket `system`, so a terminal
+        # entry for an agent-built request named nobody. Every outcome of this
+        # decision — denied, refused, failed — now names the same initiator.
+        origin = executor._actor_of(pending.provenance)
+
         if decision == "deny":
             gate.pending.pop(request_id, None)
+            # A PRIVATE argument (x.send_dm's message, round 4) is withheld
+            # on the deny path too: the executor's chain view swaps the
+            # detail for the audit line and the value for its digest.
+            _detail, _args = executor.chain_view(pending.tool, pending.args, pending.detail)
             self.audit.append(
-                actor="human", tool=pending.tool, tier=pending.tier,
-                summary=f"DENIED {pending.tool}: {pending.detail}",
-                detail={"requestId": request_id, "requestedArgs": pending.args},
-                provenance="human")
+                actor=origin, tool=pending.tool, tier=pending.tier,
+                summary=f"DENIED {pending.tool}: {_detail}",
+                detail={"requestId": request_id, "requestedArgs": _args},
+                provenance=origin)
             # BROADCAST FIRST, REPLY SECOND, and the order is the fix.
             #
             # The reply goes to ONE socket; the broadcast tells the OTHER
@@ -1523,9 +1712,9 @@ class TessaDaemon:
                 executor.execute_approved, request_id, edited)
         except ApprovalError as err:
             self.audit.append(
-                actor="system", tool=pending.tool, tier=pending.tier,
+                actor=origin, tool=pending.tool, tier=pending.tier,
                 summary=f"APPROVAL REFUSED {pending.tool}: {err.message}",
-                detail={"requestId": request_id}, provenance="system")
+                detail={"requestId": request_id}, provenance=origin)
             await ws.send(envelope(f"err.{err.code}", {
                 "code": err.code, "message": err.message,
                 "retryable": False}, corr=corr))
@@ -1533,9 +1722,9 @@ class TessaDaemon:
             return
         except Exception as exc:  # noqa: BLE001
             self.audit.append(
-                actor="system", tool=pending.tool, tier=pending.tier,
+                actor=origin, tool=pending.tool, tier=pending.tier,
                 summary=f"APPROVAL FAILED {pending.tool}: {type(exc).__name__}",
-                detail={"requestId": request_id}, provenance="system")
+                detail={"requestId": request_id}, provenance=origin)
             await ws.send(envelope("err.internal", {
                 "code": "internal", "message": f"{type(exc).__name__}",
                 "retryable": False}, corr=corr))
@@ -1599,22 +1788,136 @@ class TessaDaemon:
         """
         while True:
             await asyncio.sleep(60.0)
-            gate = getattr(getattr(self, "voice", None), "executor", None)
-            gate = getattr(gate, "approvals", None)
+            executor = getattr(getattr(self, "voice", None), "executor", None)
+            gate = getattr(executor, "approvals", None)
             if gate is None:
                 continue
             for req in gate.sweep():
+                # E2: the TRUE initiator of the lapsed request, resolved by the
+                # same `_actor_of` the card and the executor use — not a blanket
+                # `system`. The daemon noticed the lapse; it did not initiate
+                # the action, and the chain must say who did.
+                origin = executor._actor_of(req.provenance)
+                # A PRIVATE argument (x.send_dm's message, round 4) is withheld
+                # on the expiry path too. This entry carried the card's spoken
+                # line and the raw args, so an unanswered DM card put the
+                # words on the chain — the one path the deny/approve fix
+                # missed. Same chain view as the deny path: the audit line
+                # (length + digest) and the args with the text withheld.
+                _detail, _args = executor.chain_view(req.tool, req.args, req.detail)
                 self.audit.append(
-                    actor="system", tool=req.tool, tier=req.tier,
-                    summary=f"EXPIRED unanswered approval {req.tool}: {req.detail}",
-                    detail={"requestId": req.request_id, "requestedArgs": req.args},
-                    provenance="system")
+                    actor=origin, tool=req.tool, tier=req.tier,
+                    summary=f"EXPIRED unanswered approval {req.tool}: {_detail}",
+                    detail={"requestId": req.request_id, "requestedArgs": _args},
+                    provenance=origin)
                 # CONTRACT §4.1: `expired` is daemon-emitted only, and this is
                 # the daemon emitting it.
                 await self.broadcast("evt.permission.resolved", {
                     "requestId": req.request_id, "decision": "expired",
                     "decidedBy": "daemon", "remembered": False})
                 log(f"approval EXPIRED {req.tool} ({req.request_id[:8]})")
+
+    #: How often the schedule is checked. See `sweep_schedule`.
+    SCHEDULE_TICK_S = 60.0
+
+    async def sweep_schedule(self) -> None:
+        """
+        Send anything he approved that is now due. THE FEATURE'S MISSING HALF.
+
+        `core/system/schedule.py` and `core/system/abilities/x_schedule.py` were
+        built and proven — enqueue-only-on-approval, grace window, fire-once,
+        persistence across restarts — and then nothing ever called the tick. The
+        queue filled, times passed, and no post was ever sent. This is the timer
+        that was missing, and it is deliberately the whole of the change: every
+        decision about WHAT to send stays in `fire_due`.
+
+        ⚠⚠ THIS CALLS `schedule.fire_due()` AND DECIDES NOTHING ITSELF.
+        No due-check, no grace arithmetic, no fired/missed bookkeeping, no post
+        call. A second implementation of any of those would be a second posting
+        path — one that had never been through the round-3 proof, and one that
+        could drift from the proven one silently. `fire_due`'s DEFAULT posters
+        are `x_tools.post`/`x_tools.reply` with the approval flag, so the send
+        that happens here is byte for byte the send the scheduling proof
+        exercised.
+
+        ⚠ EVERYTHING RUNS IN A THREAD, AND THAT IS NOT A DETAIL.
+        `fire_due` reads the queue off disk and then drives PLAYWRIGHT — a
+        browser navigation that routinely takes several seconds and can take
+        thirty. Awaiting that inline would block this event loop, which is the
+        WebSocket to both surfaces AND the voice loop's turn handling: she would
+        go deaf and unresponsive for the duration of every tweet she sent.
+        `asyncio.to_thread` keeps the loop free, which is why the whole body is
+        one offloaded call rather than a sequence of them.
+        """
+        from core.system import schedule
+
+        complained = False
+        while True:
+            await asyncio.sleep(self.SCHEDULE_TICK_S)
+
+            # The common case is an empty queue, and it costs one stat() rather
+            # than building a store and parsing JSON every minute forever.
+            if not schedule.DEFAULT_PATH.exists():
+                continue
+
+            def _tick() -> dict[str, Any]:
+                # Constructed per tick, not held: another process — the
+                # approval path inside this same daemon — appends to this file,
+                # so a long-lived store would fire against a stale snapshot and
+                # miss everything he approved since the daemon started.
+                store = schedule.ScheduleStore()
+                return schedule.fire_due(store)
+
+            try:
+                result = await asyncio.to_thread(_tick)
+            except schedule.ScheduleError as exc:
+                # A corrupt queue is reported ONCE. Repeating it every minute
+                # would bury the log in the same line forever, and the condition
+                # cannot resolve itself.
+                if not complained:
+                    complained = True
+                    log(f"!! schedule unreadable, nothing will be sent: {exc}")
+                continue
+            except Exception as exc:  # noqa: BLE001
+                # A tick that throws must not kill the task and silently end
+                # scheduling for the rest of the daemon's life.
+                log(f"!! schedule tick failed: {type(exc).__name__}: {exc}")
+                continue
+            complained = False
+
+            for item in result.get("sent", []):
+                # ⚠ ACTOR `schedule`, NOT `human`. CONTRACT §6.2's vocabulary
+                # has a value for exactly this: an unattended trigger. He
+                # authorised the post — and the entry says which card did it,
+                # by request id — but he did not press anything at 2pm, and an
+                # audit line claiming he did would be a lie about provenance.
+                self.audit.append(
+                    actor="schedule", tool="system.x.post_tweet", tier="red",
+                    summary=(f"SCHEDULED SENT {item.kind} at "
+                             f"{time.strftime('%H:%M', time.localtime(item.at))}: "
+                             f"{item.text[:80]}"),
+                    detail={"itemId": item.id, "requestId": item.request_id,
+                            "approvedAt": item.created},
+                    provenance="schedule")
+                log(f"schedule: SENT {item.kind} {item.id[:8]} "
+                    f"(card {item.request_id[:8] or 'unknown'})")
+
+            for item in result.get("missed", []):
+                self.audit.append(
+                    actor="schedule", tool="system.x.post_tweet", tier="red",
+                    summary=(f"SCHEDULED MISSED {item.kind} — its time passed while "
+                             f"nothing was running; NOT sent late: {item.text[:60]}"),
+                    detail={"itemId": item.id, "requestId": item.request_id},
+                    provenance="schedule")
+                log(f"schedule: MISSED {item.id[:8]} — not sent late")
+
+            for item in result.get("failed", []):
+                self.audit.append(
+                    actor="schedule", tool="system.x.post_tweet", tier="red",
+                    summary=f"SCHEDULED FAILED {item.kind}: {item.note}",
+                    detail={"itemId": item.id, "requestId": item.request_id},
+                    provenance="schedule")
+                log(f"schedule: FAILED {item.id[:8]} — {item.note}")
 
     async def heartbeat(self) -> None:
         """
@@ -1712,6 +2015,12 @@ async def main() -> None:
                         help="whisper size: tiny | base | small (default base)")
     args = parser.parse_args()
 
+    # THE ONE STOP DOOR (core/lifecycle.py). Bound first, so a console close, a
+    # sign-out or a tcli stop that lands during the ~20 s startup is queued and
+    # honoured as soon as the socket is up, instead of being lost.
+    stop = asyncio.Event()
+    lifecycle.STOPPER.bind(asyncio.get_running_loop(), stop)
+
     # ── spec §7.5, BEFORE anything else exists ───────────────────────────────
     #
     # First, because a LocalSystem daemon writes its runtime file and its audit
@@ -1755,6 +2064,22 @@ async def main() -> None:
             f"- starting with an empty thread")
     else:
         log(f"memory: {daemon.conversation.describe()} loaded")
+    if daemon.claims.load_error:
+        log(f"claims: claims.json UNREADABLE ({daemon.claims.load_error}) "
+            f"- starting empty")
+    else:
+        log(f"claims: {daemon.claims.describe()} loaded (all external-untrusted)")
+    if daemon.style is None:
+        log("style: disabled in settings.yaml (style.enabled) - nothing learned")
+    elif daemon.style.load_error:
+        log(f"style: style.json UNREADABLE ({daemon.style.load_error}) - starting empty")
+    else:
+        log(f"style: {daemon.style.describe()} (patterns only)")
+    if daemon.relevance is None:
+        log("claims filter: off (claims.filter.enabled) - every claim from a read is noted")
+    else:
+        log(f"claims filter: on - {daemon.relevance.describe()}; "
+            f"relevance decides note-or-skip only, never truth")
 
     _persona_ok, _persona_path = persona_loaded()
     log(f"brain: persona tessa.md {'loaded' if _persona_ok else 'MISSING'} "
@@ -1924,7 +2249,8 @@ async def main() -> None:
                 loop_ref),
             dump_segments=args.dump_segments,
             session=daemon.session, audit=daemon.audit, brain=daemon.brain,
-            conversation=daemon.conversation, speaker=_speaker,
+            conversation=daemon.conversation, speaker=_speaker, claims=daemon.claims,
+            style=daemon.style, relevance=daemon.relevance,
         )
         # CONTRACT §4.1 `evt.permission.request`. The red gate raises these and
         # nothing can answer them yet — the approval card is P5 and Session 2's.
@@ -2131,10 +2457,8 @@ async def main() -> None:
         detail={"protocolVersion": PROTOCOL_VERSION, "daemonVersion": DAEMON_VERSION},
     )
 
-    stop = asyncio.Event()
-
-    def shutdown(*_: Any) -> None:
-        stop.set()
+    def shutdown(signum: int, *_: Any) -> None:
+        lifecycle.STOPPER.request(f"signal {signal.Signals(signum).name}")
 
     try:
         signal.signal(signal.SIGINT, shutdown)
@@ -2150,6 +2474,9 @@ async def main() -> None:
         max_size=MAX_FRAME_BYTES,
         ping_interval=20,
         ping_timeout=20,
+        # Bounds the close handshake. A surface that never answers a close must
+        # not hold the clean shutdown past the 4.5 s a console close allows.
+        close_timeout=2.0,
     ):
         # NOW the daemon exists. The socket is bound and accepting, Whisper and
         # Piper are resident, and the brain has been selected — so a surface
@@ -2165,25 +2492,93 @@ async def main() -> None:
         hb = asyncio.create_task(daemon.heartbeat())
         sweeper = asyncio.create_task(daemon.sweep_grants())
         approval_sweeper = asyncio.create_task(daemon.sweep_approvals())
+        # The schedule's timer. Without this task the queue fills and nothing is
+        # ever sent — see `sweep_schedule`.
+        schedule_ticker = asyncio.create_task(daemon.sweep_schedule())
+        # `tcli daemon stop` — a local request that proves this launch's token.
+        stop_watch = asyncio.create_task(lifecycle.watch_stop_requests(
+            rt.local_appdata_root(), daemon.token, daemon.audit))
+        log_cap = asyncio.create_task(lifecycle.log_cap_task(ROOT / "data" / "logs"))
         try:
             await stop.wait()
         finally:
             hb.cancel()
             sweeper.cancel()
             approval_sweeper.cancel()
+            schedule_ticker.cancel()
+            stop_watch.cancel()
+            log_cap.cancel()
 
-    _closed = close_browser_on_shutdown(reason="daemon shutdown")
-    if _closed.get("was_open"):
-        log(f"browser: closed on shutdown (up {_closed.get('up_s')}s)")
+        reason = lifecycle.STOPPER.reason or "stop"
+        restarting = lifecycle.STOPPER.restarting
+        log(f"shutdown: {reason} - stopping cleanly"
+            f"{' (a restart follows)' if restarting else ''}")
+        # CONTRACT §4 `evt.daemon.shutdown`, sent while the sockets are still
+        # open, so a surface shows "reconnecting" rather than a dead link.
+        try:
+            await daemon.broadcast("evt.daemon.shutdown",
+                                   {"reason": reason, "restarting": restarting})
+        except Exception as exc:  # noqa: BLE001
+            log(f"!! shutdown broadcast failed: {type(exc).__name__}: {exc}")
 
-    daemon.audit.append(actor="system", tool="daemon.stop", tier="none",
-                        summary="Daemon stopped cleanly")
-    rt.remove_runtime_file()
-    log("stopped; runtime file removed")
+    # THE TAIL. Each step is guarded on its own: an exception in one once skipped
+    # both the daemon.stop row and the runtime.json removal (see close_browser).
+    # The audit row and the runtime file go FIRST — under a console close the
+    # whole tail has 4.5 s, and those two are what the next start relies on.
+    try:
+        daemon.vault.lock("daemon.stop")     # zeroes the derived key; audited as LOCKED (daemon.stop)
+    except Exception as exc:  # noqa: BLE001
+        log(f"!! vault lock on shutdown failed: {type(exc).__name__}: {exc}")
+    try:
+        daemon.audit.append(actor="system", tool="daemon.stop", tier="none",
+                            summary="Daemon stopped cleanly",
+                            detail={"reason": reason, "restarting": restarting})
+    except Exception as exc:  # noqa: BLE001
+        log(f"!! daemon.stop audit failed: {type(exc).__name__}: {exc}")
+    try:
+        if rt.remove_runtime_file(daemon.token):
+            log("stopped; runtime file removed")
+        else:
+            log("stopped; runtime file left alone - it does not name this daemon")
+    except Exception as exc:  # noqa: BLE001
+        log(f"!! runtime file removal failed: {type(exc).__name__}: {exc}")
+    try:
+        _closed = close_browser_on_shutdown(reason="daemon shutdown")
+        if _closed.get("was_open"):
+            log(f"browser: closed on shutdown (up {_closed.get('up_s')}s)")
+    except Exception as exc:  # noqa: BLE001
+        log(f"!! browser close on shutdown failed: {type(exc).__name__}: {exc}")
 
 
 if __name__ == "__main__":
+    # THE MAIN PATH ONLY. A multiprocessing child re-imports this module as
+    # `__mp_main__`, so nothing below can run in one: no handler, no guard.
+    #
+    # ONE DAEMON PER DATA DIR AND PER RUNTIME DIR, decided by OWNING the guard
+    # on this main thread — before a port is bound, the audit log opened or
+    # runtime.json touched. Two overlapping daemons forked the audit chain at
+    # seq 69 and, on 28 Sep, un-advertised a live daemon. A refused launch
+    # writes one line and exits 3; it binds and writes nothing else.
+    _data_dir = ROOT / "data"
+    _guard, _held = lifecycle.take_guard(_data_dir, rt.local_appdata_root())
+    if _guard is None:
+        lifecycle.refuse_second_launch(rt.runtime_path(), _data_dir / "logs", _held)
+    lifecycle.after_guard(guard=_guard, data_dir=_data_dir, runtime_dir=rt.local_appdata_root(),
+                          runtime_file=rt.runtime_path(), flags=sys.argv[1:],
+                          for_disable_inherited=_FOR_DISABLE_INHERITED)
+    _code, _why = 0, "main returned (see the lines above)"
     try:
         asyncio.run(main())
+        if lifecycle.STOPPER.reason:
+            _why = f"clean stop - {lifecycle.STOPPER.reason}"
     except KeyboardInterrupt:
-        pass
+        _why = "KeyboardInterrupt"
+    except SystemExit as _exc:
+        _code = _exc.code if isinstance(_exc.code, int) else 1
+        _why = f"exit requested ({_exc.code})"
+    except BaseException as _exc:  # noqa: BLE001 - recorded, then the process ends
+        import traceback
+
+        traceback.print_exc()
+        _code, _why = lifecycle.EXIT_CRASHED, f"CRASHED - {type(_exc).__name__}: {_exc}"
+    lifecycle.finish(_guard, _code, _why)

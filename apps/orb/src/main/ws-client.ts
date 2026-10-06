@@ -58,16 +58,19 @@ import {
   type Surface,
 } from '@tessa/protocol';
 
-import type {
-  ApprovalDecision,
-  AuditEntry,
-  ConnectionStatus,
-  DaemonHealth,
-  PermissionRequest,
-  PtySession,
-  CalendarToday,
-  TranscriptLine,
-  TurnTiming,
+import {
+  AGENT_ACK_TIMEOUT_MS,
+  type AgentCancelReply,
+  type AgentSendResult,
+  type ApprovalDecision,
+  type AuditEntry,
+  type ConnectionStatus,
+  type DaemonHealth,
+  type PermissionRequest,
+  type PtySession,
+  type CalendarToday,
+  type TranscriptLine,
+  type TurnTiming,
 } from '../shared/ipc-contract.ts';
 import { readRuntimeFile, type RuntimeInfo } from './runtime-file.ts';
 import { TranscriptAssembler, type TranscriptDelta } from './transcript-assembler.ts';
@@ -321,6 +324,27 @@ export class DaemonConnection {
    */
   private readonly pendingPermission = new Map<string, string>();
 
+  /**
+   * In-flight `cmd.agent.message` frames, by frame id, each holding the
+   * promise the renderer is waiting on and the timer that fails it.
+   *
+   * The daemon acks BEFORE it thinks (`_h_agent_message` broadcasts his line,
+   * replies `res.agent.accepted`, then runs the turn as a task), so the ack
+   * is a loopback round trip and a missing one inside AGENT_ACK_TIMEOUT_MS is
+   * a dead link — not a slow answer. The answer itself never comes through
+   * here; it is a transcript line like everything else she says.
+   */
+  private readonly pendingAgent = new Map<
+    string,
+    { resolve: (result: AgentSendResult) => void; timer: NodeJS.Timeout; sentAt: number }
+  >();
+
+  /** In-flight `cmd.agent.cancel` frames. Correlated so the reply is recorded verbatim. */
+  private readonly pendingCancel = new Map<
+    string,
+    { resolve: (reply: AgentCancelReply) => void; timer: NodeJS.Timeout; messageId: string }
+  >();
+
   constructor(options: DaemonConnectionOptions) {
     this.opts = options;
   }
@@ -438,6 +462,111 @@ export class DaemonConnection {
     this.pendingPermission.set(frame.id, requestId);
     this.socket.send(text);
     return { ok: true, frame: text };
+  }
+
+  /**
+   * CONTRACT §5.1 `cmd.agent.message { companionId, text }` →
+   * `res.agent.accepted { messageId }`.
+   *
+   * Built with `makeEnvelope`: the type IS in the protocol's PayloadMap, so
+   * the payload is compile-checked field by field. `attachments` is left
+   * absent — not this round. `companionId` is sent because §5.1 requires it,
+   * even though the daemon ignores it today (Session 1's fix, not ours).
+   *
+   * Resolves, never rejects: the renderer's box needs one of two answers —
+   * accepted (clear the box) or not (keep the text, show why) — and a thrown
+   * error is the one shape that could leave it in neither state.
+   */
+  sendAgentMessage(companionId: string, text: string): Promise<AgentSendResult> {
+    if (!this.socket || this.socket.readyState !== WebSocket.OPEN) {
+      return Promise.resolve({
+        ok: false,
+        error: 'not connected to the daemon',
+        code: 'unavailable',
+      });
+    }
+    const frame = makeEnvelope('cmd.agent.message', { companionId, text });
+    if (!isEnvelope(frame)) {
+      return Promise.resolve({
+        ok: false,
+        error: 'built an invalid envelope',
+        code: 'internal',
+      });
+    }
+    const wire = JSON.stringify(frame);
+    if (Buffer.byteLength(wire, 'utf8') > MAX_FRAME_BYTES) {
+      return Promise.resolve({
+        ok: false,
+        error: 'the line makes the frame too large to send',
+        code: 'tooLong',
+      });
+    }
+    const socket = this.socket;
+    return new Promise((resolve) => {
+      const sentAt = Date.now();
+      const timer = setTimeout(() => {
+        this.pendingAgent.delete(frame.id);
+        this.opts.log(
+          `AGENT-TIMEOUT id=${frame.id} — no reply to cmd.agent.message within ${AGENT_ACK_TIMEOUT_MS} ms`,
+        );
+        resolve({
+          ok: false,
+          error: `no reply from the daemon within ${AGENT_ACK_TIMEOUT_MS} ms`,
+          code: 'timeout',
+        });
+      }, AGENT_ACK_TIMEOUT_MS);
+      this.pendingAgent.set(frame.id, { resolve, timer, sentAt });
+      socket.send(wire);
+      // Identity and size only — never the text. It is whatever he typed to
+      // her, and the process log is a file on disk that outlives the window.
+      this.opts.log(
+        `AGENT-OUT id=${frame.id} companion=${companionId} chars=${text.length} t=${sentAt}`,
+      );
+    });
+  }
+
+  /**
+   * CONTRACT §5.1 `cmd.agent.cancel { companionId, messageId? }` → `res.ok`.
+   *
+   * The reply is recorded whatever it is. The daemon has this type in its
+   * KNOWN_COMMANDS and no handler for it (core/server.py `_dispatch` falls
+   * through to `err.internal "... not yet implemented"`), and the surface's
+   * job is to send the contract's command and report what came back, not to
+   * pre-empt the answer.
+   */
+  sendAgentCancel(companionId: string, messageId: string): Promise<AgentCancelReply> {
+    if (!this.socket || this.socket.readyState !== WebSocket.OPEN) {
+      return Promise.resolve({
+        messageId,
+        ok: false,
+        type: 'unavailable',
+        message: 'not connected to the daemon',
+      });
+    }
+    const frame = makeEnvelope('cmd.agent.cancel', { companionId, messageId });
+    if (!isEnvelope(frame)) {
+      return Promise.resolve({
+        messageId,
+        ok: false,
+        type: 'internal',
+        message: 'built an invalid envelope',
+      });
+    }
+    const socket = this.socket;
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => {
+        this.pendingCancel.delete(frame.id);
+        resolve({
+          messageId,
+          ok: false,
+          type: 'timeout',
+          message: `no reply to cmd.agent.cancel within ${AGENT_ACK_TIMEOUT_MS} ms`,
+        });
+      }, AGENT_ACK_TIMEOUT_MS);
+      this.pendingCancel.set(frame.id, { resolve, timer, messageId });
+      socket.send(JSON.stringify(frame));
+      this.opts.log(`CANCEL-OUT id=${frame.id} messageId=${messageId} t=${Date.now()}`);
+    });
   }
 
   dispose(): void {
@@ -579,10 +708,79 @@ export class DaemonConnection {
       // owner said out loud, and a debug line is not a place to put that.
       this.opts.log(
         `TRANSCRIPT-IN ${parsed.type} keys=[${Object.keys(p).join(',')}] ` +
+          `companion=${String(p['companionId'] ?? '(none)')} ` +
           `messageId=${String(msg?.['messageId'] ?? '(none)')} ` +
           `role=${String(msg?.['role'] ?? '(none)')} ` +
-          `chars=${typeof msg?.['text'] === 'string' ? (msg['text'] as string).length : 0}`,
+          `via=${typeof msg?.['via'] === 'string' ? String(msg['via']) : '(absent)'} ` +
+          `chars=${typeof msg?.['text'] === 'string' ? (msg['text'] as string).length : 0} ` +
+          `t=${Date.now()}`,
       );
+    }
+
+    /**
+     * The daemon's answer to a typed line — ACCEPTANCE or refusal, matched by
+     * correlation id so it can never be mistaken for the answer to a different
+     * command. `res.agent.accepted` carries `messageId` and, today, an extra
+     * `accepted: true`; the extra field is never read (CONTRACT §3.2).
+     */
+    if (parsed.corr && this.pendingAgent.has(parsed.corr)) {
+      const pending = this.pendingAgent.get(parsed.corr) as {
+        resolve: (result: AgentSendResult) => void;
+        timer: NodeJS.Timeout;
+        sentAt: number;
+      };
+      this.pendingAgent.delete(parsed.corr);
+      clearTimeout(pending.timer);
+      const ackAt = Date.now();
+
+      if (parsed.type === 'res.agent.accepted') {
+        const messageId = (parsed.payload as { messageId?: unknown }).messageId;
+        if (typeof messageId === 'string' && messageId.length > 0) {
+          this.opts.log(
+            `AGENT-ACK id=${parsed.corr} messageId=${messageId} dt=${ackAt - pending.sentAt}ms t=${ackAt}`,
+          );
+          pending.resolve({ ok: true, messageId, sentAt: pending.sentAt, ackAt });
+        } else {
+          // Accepted in name only. Without an id the box cannot pair the echo
+          // or cancel the turn, so it is treated as not taken rather than
+          // clearing on a promise the surface cannot hold the daemon to.
+          this.opts.log(`!! res.agent.accepted for ${parsed.corr} carried no messageId — treating as refused`);
+          pending.resolve({
+            ok: false,
+            error: 'the daemon accepted without a messageId',
+            code: 'protocol.badEnvelope',
+          });
+        }
+        return;
+      }
+
+      const payload = parsed.payload as { code?: unknown; message?: unknown };
+      const code = typeof payload.code === 'string' ? payload.code : parsed.type.replace(/^err\./, '');
+      const message = typeof payload.message === 'string' ? payload.message : parsed.type;
+      this.opts.log(`AGENT-REFUSED id=${parsed.corr} ${parsed.type} code=${code}: ${scrub(message)}`);
+      pending.resolve({ ok: false, error: scrub(message), code });
+      return;
+    }
+
+    if (parsed.corr && this.pendingCancel.has(parsed.corr)) {
+      const pending = this.pendingCancel.get(parsed.corr) as {
+        resolve: (reply: AgentCancelReply) => void;
+        timer: NodeJS.Timeout;
+        messageId: string;
+      };
+      this.pendingCancel.delete(parsed.corr);
+      clearTimeout(pending.timer);
+      // Whole, for the same reason the approval reply is: the question this
+      // answers is "what does the daemon actually do with a cancel".
+      this.opts.log(`CANCEL-REPLY for ${pending.messageId}: ${scrub(JSON.stringify(parsed))}`);
+      const payload = parsed.payload as { message?: unknown };
+      pending.resolve({
+        messageId: pending.messageId,
+        ok: parsed.type === 'res.ok',
+        type: parsed.type,
+        message: typeof payload.message === 'string' ? scrub(payload.message) : parsed.type,
+      });
+      return;
     }
 
     if (parsed.type === 'res.hello' && parsed.corr === this.helloId) {
@@ -886,12 +1084,30 @@ export class DaemonConnection {
       }
       {
         const role = typeof m['role'] === 'string' ? m['role'] : 'system';
+        /**
+         * `via` crosses the bridge ONLY when the daemon sent a string.
+         * CONTRACT §4.1: optional, open set, absent means unspecified — so an
+         * absent field stays absent rather than defaulting to "voice". Bounded
+         * and stripped of control characters like every other string that
+         * reaches a label.
+         */
+        const viaRaw = m['via'];
+        let via: string | undefined;
+        if (typeof viaRaw === 'string' && viaRaw.length > 0) {
+          let out = '';
+          for (const ch of viaRaw.slice(0, 16)) {
+            const code = ch.codePointAt(0) ?? 0;
+            out += code < 0x20 || code === 0x7f ? ' ' : ch;
+          }
+          via = out.trim() || undefined;
+        }
         this.opts.onTranscriptLine({
           messageId: String(m['messageId'] ?? ''),
           role,
           provenance: ROLE_PROVENANCE[role] ?? 'system',
           text: m['text'],
           ts: typeof m['ts'] === 'string' ? m['ts'] : new Date().toISOString(),
+          ...(via ? { via } : {}),
         });
       }
       return;
@@ -1205,6 +1421,29 @@ export class DaemonConnection {
       );
     }
     this.pendingPermission.clear();
+
+    // A typed line with no ack is a line the daemon may never have read. The
+    // renderer keeps the text and says so; nothing is assumed either way.
+    for (const [id, pending] of this.pendingAgent) {
+      clearTimeout(pending.timer);
+      this.opts.log(`!! cmd.agent.message ${id} was never answered — socket closed (${code})`);
+      pending.resolve({
+        ok: false,
+        error: `connection closed (${code}) before the daemon answered`,
+        code: 'unavailable',
+      });
+    }
+    this.pendingAgent.clear();
+    for (const [, pending] of this.pendingCancel) {
+      clearTimeout(pending.timer);
+      pending.resolve({
+        messageId: pending.messageId,
+        ok: false,
+        type: 'unavailable',
+        message: `connection closed (${code}) before the daemon answered`,
+      });
+    }
+    this.pendingCancel.clear();
 
     if (this.stopped) return;
 

@@ -35,7 +35,9 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
+from core.brain import intent_model
 from core.brain.conversation import CLEARED_LINES, is_clear_request
+from core.brain.intents import PRIVATE_UNROUTED, is_private_utterance
 from core.brain.repair import repair, strip_wake_name
 from core.brain.router import Intent, Routed, action_failed, _pick
 from core.brain.tools_local import ToolCall
@@ -133,6 +135,13 @@ def run_typed_turn(
     # ── 4. THE ROUTER FIRST. Free, instant, and handles most of what he types.
     routed: Routed = router.route(typed)
 
+    # ── 4b. A DOUBTED FAST-PATH RESULT GETS A SECOND OPINION ─────────────────
+    # The mirror of loop.py's block, same module, same rule: the router says
+    # when it is not sure, the brain confirms or corrects, nothing has run.
+    if routed.doubt and brain is not None:
+        said_log(f"typed: fast path in doubt — {routed.doubt}")
+        routed = intent_model.second_opinion(routed, typed, brain, log=said_log)
+
     # ── 5. UNROUTED IS A HANDOFF, NOT AN ANSWER ──────────────────────────────
     if routed.intent is Intent.UNROUTED and routed.score == 0.0:
         disposition = classify(typed)
@@ -147,15 +156,36 @@ def run_typed_turn(
                 routed.speech = _ask_brain(typed, brain, conversation, said_log)
             else:
                 routed.speech = action_refusal()
+        elif is_private_utterance(typed):
+            # A PRIVATE MESSAGE SHAPE never reaches a model — the voice path's
+            # rule (DM round), now on the typed path too. Names the shape.
+            routed.speech = PRIVATE_UNROUTED
         elif disposition is Disposition.ACTION:
             routed.speech = action_refusal()
+        elif (disposition in (Disposition.UNRESOLVED, Disposition.QUESTION)
+                and brain is not None):
+            # THE BRAIN RESOLVES INTENT — the mirror of loop.py's branch; read
+            # the reasoning there. Tool -> run it as origin="agent"; clarify ->
+            # ask; chat (or a question nothing owns) -> the chat brain; an
+            # owned verb even the brain could not place -> the honest refusal.
+            res = intent_model.resolve(typed, brain, log=said_log)
+            if res.kind == intent_model.KIND_TOOL and res.call is not None:
+                routed = Routed(Intent.TOOL, "", score=1.0, calls=[res.call])
+            elif res.kind == intent_model.KIND_CLARIFY and res.question:
+                routed = Routed(Intent.TOOL, res.question, score=1.0)
+            elif res.kind == intent_model.KIND_CHAT or disposition is Disposition.QUESTION:
+                routed.speech = _ask_brain(typed, brain, conversation, said_log)
+            else:
+                routed.speech = res.spoken or unresolved_refusal(typed)
         elif disposition is Disposition.UNRESOLVED:
             routed.speech = unresolved_refusal(typed)
         elif disposition is Disposition.LIVE_DATA:
             query = repair(typed)[0] or typed
             routed = Routed(Intent.TOOL, "", score=1.0,
                             calls=[ToolCall(name="web.search", args={"query": query},
-                                            speech="Looking it up.")])
+                                            speech="Looking it up.",
+                                            # He typed it; see loop.py's twin.
+                                            origin="human")])
         elif brain is not None:
             routed.speech = _ask_brain(typed, brain, conversation, said_log)
 
@@ -206,16 +236,36 @@ def _ask_brain(question: str, brain: Any, conversation: Any,
     deliberately close to it so the two answer the same way. Every failure is
     ANSWERED rather than raised: `LLMUnavailable` already carries a sentence.
     """
-    from core.brain.llm import LLMUnavailable, Message
+    from core.brain.llm import QUALITY_ROUTINE, LLMUnavailable, Message
     from core.brain.persona import system_prompt
 
     question = strip_wake_name(question)[0] or question
     history = conversation.messages()
+    # CLAIMS SHE HAS NOTED FROM X, if any are about this — FENCED, and labelled
+    # as strangers' posts, so the model can mention one as a claim and cannot
+    # read one as a fact or as an instruction. See core/brain/claims.py.
+    from core.brain import claims as _claims
+
+    block = _claims.prompt_block(question)
+    asked = f"{block}\n\n{question}" if block else question
+    # HOW PEOPLE AROUND HIM WRITE, appended to tessa.md as style notes —
+    # measured numbers and single words, never a sentence, so it can loosen
+    # her phrasing and cannot put a claim in front of the model. None until
+    # she has read enough. See core/brain/style.py.
+    from core.brain import style as _style
+
     try:
+        # ROUTINE, declared. A chat answer is one he reads immediately and can
+        # judge on sight, so when Gemini's quota is spent the local model
+        # answering is better than her going quiet — and if it answers badly he
+        # loses one re-ask. X drafting declares nothing and stays critical, so
+        # a weak model never writes a tweet in his voice without him knowing.
+        # See core/brain/llm/base.py.
         parts = list(brain.stream(
-            system_prompt(),
-            history + [Message(role="user", content=question)],
+            _style.with_style(system_prompt()),
+            history + [Message(role="user", content=asked)],
             max_tokens=BRAIN_MAX_TOKENS,
+            quality=QUALITY_ROUTINE,
         ))
     except LLMUnavailable as exc:
         log(f"typed: brain unavailable — {exc}")
@@ -224,8 +274,26 @@ def _ask_brain(question: str, brain: Any, conversation: Any,
         log(f"typed: brain failed {type(exc).__name__}: {exc}")
         return action_failed(f"my thinking brain errored: {type(exc).__name__}",
                              "Ask me again, or check the connection.")
-    text = "".join(parts).strip()
+    # THE ANTI-AI-TELLS FILTER. tessa.md steers the model away from machine
+    # register; this removes what still gets through. It strips only filler
+    # that asserts nothing — a "Certainly!" opener, an "I hope this helps"
+    # sign-off, markdown Piper would pronounce — and FLAGS the rest rather than
+    # rewriting it, because a filter that edits meaning can turn a correct
+    # answer into a friendlier wrong one. See core/brain/humanness.py.
+    from core.brain import humanness
+
+    result = humanness.humanise("".join(parts))
+    # WHICH BRAIN ANSWERED, on every typed turn. The voice loop already logs it
+    # at the top of the turn; this path did not, and under a quota fallback
+    # "why is she suddenly worse" needs to be answerable from the log.
+    log(f"typed: answered by {getattr(brain, 'name', '?')}")
+    if not result.clean:
+        log(f"typed: humanness {humanness.describe(result)}")
+    text = result.text
     if text:
         conversation.add("user", question)
-        conversation.add("assistant", text)
+        # A reply written with claims in front of it is claim-DERIVED, like a
+        # page summary: re-fenced on replay so it cannot become her own prior
+        # word to herself. See conversation.py.
+        conversation.add("assistant", text, external=bool(block))
     return text

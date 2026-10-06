@@ -29,12 +29,70 @@ budget:
 # draft something. Everything the router already handles stays local, free and
 # instant regardless of what is set here.
 #
-# There is deliberately NO automatic fallback. If the selected engine cannot
-# answer she SAYS SO, in her own voice, and the local tools keep working. A
-# brain that silently swaps itself is lying about what answered him — the same
-# objection as an Opus-to-Sonnet downgrade nobody was told about.
+# A BROKEN engine is never swapped for a working one. If the selected engine
+# cannot answer — no key, no network, a rejected model — she SAYS SO, in her own
+# voice, and the local tools keep working. A brain that silently swaps itself is
+# lying about what answered him, the same objection as an Opus-to-Sonnet
+# downgrade nobody was told about.
+#
+# A SPENT FREE-TIER QUOTA is the one exception, and it is not silent — see
+# `fallback` below.
 brain:
   engine: gemini            # gemini | anthropic | local
+
+  # ── Quota fallback ──────────────────────────────────────────────────────────
+  #
+  # Gemini's free tier runs out, daily and per-minute. Without this she simply
+  # stops thinking for the rest of the day. With it, a SPENT QUOTA — and only a
+  # spent quota, never an error — routes to the local model so she keeps
+  # working, and the switch is visible everywhere: `brainEngine` on the health
+  # frame, the voice loop's stage log, and a draft's `model` field all report
+  # whichever engine actually answered.
+  #
+  # ⚠ THE LOCAL MODEL IS QWEN2.5-0.5B ON TWO CORES. It is fine at a short
+  # answer and bad at writing in his voice, so quality-critical work does NOT
+  # quietly use it. See core/brain/llm/fallback.py.
+  fallback:
+    enabled: true
+    backup: local           # which engine answers while the quota is spent
+    # What happens when quality-critical work (X drafting) meets a spent quota:
+    #   ask   — she says the quota is out and offers the weak model. DEFAULT.
+    #   local — write it on the local model anyway. It will not sound like him;
+    #           the draft still goes to the same approval card, and `model` on
+    #           the card says which brain wrote it.
+    #   never — do not write at all until the quota is back.
+    drafting: ask
+    # A per-minute limit clears itself, so it is waited out rather than fallen
+    # back from. Capped, because a voice turn that stalls is a broken one.
+    transient_max_wait_s: 8.0
+    transient_retries: 1
+    # After a daily exhaustion, how long before the next REAL call tries Gemini
+    # again (there is no separate probe call — spending quota to ask whether
+    # there is quota is the one thing a free tier cannot afford).
+    recheck_after_s: 1800
+
+  # ── Brain-driven intent (2026-09-22) ───────────────────────────────────────
+  #
+  # What the regex router cannot place, or is not sure of, goes to the model
+  # with the catalogue of her tools, and the model returns the tool he MEANT
+  # plus structured arguments — "open X so I can login", "bring up X", "show my
+  # feed" all resolve instead of dead-ending on "give me the full path". The
+  # fast path still answers first and for free; this costs one model call
+  # (~3.5 s) only at its edges. Every call the model builds is origin=agent:
+  # the card, the hold, the fence and the chain treat it as model-built.
+  # `enabled: false` restores the old dead ends exactly. core/brain/intent_model.py.
+  intent:
+    enabled: true
+    max_tokens: 220
+    # ITS OWN MODEL, ITS OWN QUOTA. The free tier caps requests per day PER
+    # MODEL, and the first live run spent gemini-3.6-flash's cap in an
+    # afternoon. Intent goes to the lite model — measured 2026-09-22: valid
+    # JSON for 7 of 7 utterances in 3–5 s on the full catalogue — so working
+    # out what he meant never eats the quota he talks to her on. Empty = use
+    # the brain above. Same engine family and key; built by the same selector.
+    model: gemini-3.1-flash-lite
+    # The local 0.5B model took 138 s for one pick and got it wrong. Off.
+    allow_local: false
 
   gemini:
     # Free tier, no card. The key is read from the ENVIRONMENT and never
@@ -183,8 +241,26 @@ voice:
   # frame budget, and 0 of 46 frames late while a Whisper transcription
   # saturated the box at 77%.
   wake:
-    # OFF until his own model exists. Turning this on today makes her answer to
-    # "hey jarvis", which is not her name.
+    # ⚠ OFF BY THE OWNER'S CHOICE — HE DOES NOT WANT "HEY JARVIS".
+    #
+    # Briefly true. The wake word works, and the diagnosis behind that is worth
+    # keeping: nothing fired because this flag was false, so `core/server.py`
+    # skipped the whole WakeDetector block and the detector was never
+    # CONSTRUCTED — no model, no frames, no log line. Turning it on fixes that.
+    #
+    # But the only wake model on this machine is openWakeWord's bundled
+    # hey_jarvis_v0.1.onnx, and openWakeWord ships no "Hey Tessa" — so enabling
+    # it makes her answer to a name that is not hers. He would rather use the
+    # typed Console until her own name works. That is a preference, not a
+    # defect, and it is the right call: a wrong name answering is worse than
+    # nothing for an assistant he talks to every day.
+    #
+    # RE-ENABLE WHEN `data/models/wake/hey_tessa.onnx` EXISTS (Colab-trained —
+    # openWakeWord's own notebook, ~1 hour, free tier, ~1.2 MB out). Put its
+    # path in `model` below and set this back to true. No code change: the
+    # loader already handles a configured path, and `scripts/wake-check.py`
+    # will report the new phrase and the scores his voice actually produces so
+    # `threshold` can be tuned from a measurement rather than a guess.
     enabled: false
 
     # Absolute path or repo-relative path to a .onnx. Empty = the bundled
@@ -216,3 +292,46 @@ voice:
     # `loudest`, which raises the relative silence threshold, which makes her
     # slower to notice he stopped talking.
     chime: false
+
+# ── Style learning (core/brain/style.py) ─────────────────────────────────────
+#
+# HOW people write, learned as measured patterns from the posts she reads on
+# X: length, casing, punctuation, emoji, and the single words they reuse.
+# Never WHAT they said — the store holds counters and single tokens only, so
+# it cannot carry a claim. Toxic and instruction-shaped posts teach shape and
+# no words. It feeds her chat register and, from his own posts only, X drafts.
+style:
+  enabled: true
+  # His X handle, with or without the @. Posts from this handle feed the
+  # "owner" corpus that sharpens X drafts; every other post feeds "others",
+  # which only loosens chat rhythm and vocabulary. Left empty, the handle he
+  # gave "learn my voice from X" is used; if neither is set, nothing is his.
+  owner_handle: ""
+
+# ── Claim filter (core/brain/relevance.py) ────────────────────────────────────
+#
+# WHICH claims she bothers to keep. Every post she reads on X is a claim
+# (core/brain/claims.py) and a timeline is mostly rage-bait, so this keeps
+# only the posts about HIS topics: what he has said to her lately (the thread,
+# read and never written) and the topics listed here in his own words.
+#
+# ⚠ RELEVANCE IS NEVER TRUTH. This decides note-or-skip and nothing else. A
+# kept claim is exactly as UNVERIFIED as it was before this filter existed,
+# and only his own confirmation ever changes that. A post cannot vote itself
+# relevant or trusted: the score is computed from his words, not the post's.
+claims:
+  filter:
+    # false = Stage 1 behaviour: every claim from every read is noted.
+    enabled: true
+    # Topics in his own words, e.g. ["naira", "Titan Wave", "Aptech"]. One
+    # hit keeps a claim; a multi-word topic needs all of its words. Empty is
+    # fine: the thread alone then decides.
+    topics: []
+    # A post is kept when its score reaches this: 2 per listed topic it
+    # contains, plus, for each topic word it shares with his recent turns,
+    # the number of his turns that used that word (capped at 2). So 2 = one
+    # listed topic, or one word he has come back to twice, or two words he
+    # used once each. 1 keeps anything sharing a single word with him (more
+    # noise kept); 3 keeps only what he clearly keeps talking about. With no
+    # topics known at all nothing is kept, and the audit chain says so.
+    min_score: 2

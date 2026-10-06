@@ -44,6 +44,14 @@ class Parse:
     #: Set when she must ask instead of act (spec §Q).
     question: str | None = None
     unrouted_text: str | None = None
+    #: WHY THE FAST PATH IS NOT SURE OF ITS OWN ANSWER (intent round,
+    #: 2026-09-22): "ambiguous app: Xagent, Xftp, Xshell" or "fuzzy app:
+    #: feedback hub". Empty when it is sure. The router carries it on
+    #: `Routed.doubt`, and the brain is asked to confirm or correct before
+    #: anything runs — see core/brain/intent_model.py. Nothing reads it to
+    #: decide whether a tool is ALLOWED; it only decides whether the parse
+    #: is TRUSTED.
+    doubt: str = ""
 
     @property
     def ok(self) -> bool:
@@ -85,7 +93,13 @@ def greeting(now: datetime | None = None, variant: int = 0, late_fact: str | Non
 
 # ── clause splitting, so one utterance can carry two jobs ────────────────────
 
-_CONNECTORS = re.compile(r"\s*(?:,\s*)?\b(?:and then|then|and also|and|also)\b\s+", re.I)
+# "download and install vlc" is ONE job (software-change round, 2026-09-12):
+# before the two lookbehinds it split into "download" — which routed to the
+# Downloads FOLDER — and "install vlc". Both lookbehinds are needed: the first
+# blocks a match that starts on the space after "download", the second one
+# that starts on the "and" itself.
+_CONNECTORS = re.compile(
+    r"(?<!download)(?<!download\s)\s*(?:,\s*)?\b(?:and then|then|and also|and|also)\b\s+", re.I)
 
 
 #: Self-correction mid-sentence. Speech is not typing — he changes his mind
@@ -94,6 +108,53 @@ _CONNECTORS = re.compile(r"\s*(?:,\s*)?\b(?:and then|then|and also|and|also)\b\s
 #: it as two would open Chrome he did not want.
 _CORRECTIONS = re.compile(
     r"\b(?:actually|no wait|wait no|scratch that|i mean|rather|instead|sorry)\b", re.I)
+
+#: A PRIVATE MESSAGE IS ONE JOB (X direct messages, round 4, 2026-09-12). The
+#: words after "saying" ARE the message: "dm ada saying see you at six and
+#: bring the papers" is one message, not a DM plus a window switch; and "dm
+#: @ada and @bob saying hi" must reach the DM rule WHOLE, so it is refused as
+#: bulk, rather than arrive as "dm @ada" and be sent to the first name with
+#: nothing. Anchored to the verbs the DM rules own (core/brain/phrasings.py);
+#: "send the file to bob and open notepad" is not matched and splits as before.
+_ONE_JOB = re.compile(
+    r"^\s*(?:(?:can|could|would|will)\s+you\s+(?:please\s+)?)?"
+    r"(?:dm|d\.m\.|direct[- ]message|private[- ]message|"
+    r"message\s+@?[A-Za-z0-9_]{1,15}\s*(?:on\s+(?:x|twitter)\s*)?(?:saying|with|that\s+says|:|,)|"
+    r"send\s+(?:@?[A-Za-z0-9_]{1,15}\s+)?(?:a\s+)?(?:dm|d\.m\.|direct\s+message|private\s+message|message)\b|"
+    r"(?:reply|respond|answer)\s+(?:to\s+)?@?[A-Za-z0-9_]{1,15}(?:'s|s'|’s)\s+"
+    r"(?:dm|d\.m\.|direct\s+message|private\s+message|message))(?:\b|(?<=[:,]))", re.I)
+
+#: A message TO HIM is not a private message he is sending: "dm me the link",
+#: "send me a message when it's done", "message us" are requests, and stay on
+#: the ordinary path.
+_TO_SELF = re.compile(
+    r"^\s*(?:(?:can|could|would|will)\s+you\s+(?:please\s+)?)?(?:please\s+)?"
+    r"(?:send|dm|d\.m\.|direct[- ]message|private[- ]message|message)\s+(?:me|us)\b", re.I)
+
+
+#: What she says to a private-message SHAPE the DM rules could not place. A
+#: dictated DM never goes to the brain — his private words to a cloud model,
+#: and into the thread on disk — so she names the shape she needs instead.
+#: Shared by the voice loop and the typed path (intent round, 2026-09-22): the
+#: sentence lived only in core/voice/loop.py, and the typed path had no guard.
+PRIVATE_UNROUTED = ("That sounded like a private message, Emperor, and I could not tell "
+                    "who it was for. Say DM, one @name, then saying, and the words.")
+
+
+def is_private_utterance(text: str) -> bool:
+    """
+    True when an utterance has the SHAPE of a private message he is sending
+    (X direct messages, round 4, 2026-09-12): it starts with a DM verb the DM
+    rules own (`_ONE_JOB`) and is not a message to himself. The voice loop
+    and the daemon use this for what they LOG about a turn, never for what
+    they do — a dictated private message must not land in the daemon log,
+    on the chain or in a cloud model's context because the router happened
+    to miss it ("direct message ada bob saying …"). Routing is unchanged.
+    """
+    # The spoken lead comes off first, as it does before routing: "Tessa,
+    # please dm ada saying hi" is the same shape as "dm ada saying hi".
+    t = strip_lead(str(text or ""))
+    return bool(_ONE_JOB.match(t)) and not bool(_TO_SELF.match(t))
 
 
 def split_clauses(text: str) -> list[str]:
@@ -107,6 +168,15 @@ def split_clauses(text: str) -> list[str]:
     A self-correction wins outright — everything before it is discarded, because
     that is what he meant by saying it.
     """
+    if _ONE_JOB.match(text):
+        # A self-correction inside a private message stays inside it ("dm
+        # ada saying sorry I'm late" is the message) unless the correction
+        # itself starts a new one ("... actually dm bob saying hi").
+        if _CORRECTIONS.search(text):
+            tail = _CORRECTIONS.split(text)[-1].strip(" ,.")
+            if tail and _ONE_JOB.match(tail):
+                return [tail]
+        return [text.strip()]
     if _CORRECTIONS.search(text):
         tail = _CORRECTIONS.split(text)[-1].strip(" ,.")
         if tail:
@@ -186,6 +256,8 @@ class IntentParser:
         # See core/brain/appindex.py for what it covers and what it costs.
         from .appindex import get_index
         self._index = get_index()
+        #: Set per clause by `_parse_one`, read by `parse` — see `Parse.doubt`.
+        self.doubt = ""
 
     @property
     def apps(self) -> dict[str, Path]:
@@ -195,7 +267,10 @@ class IntentParser:
     def parse(self, utterance: str) -> Parse:
         out = Parse()
         for clause in split_clauses(strip_lead(utterance)):
+            self.doubt = ""
             call, question = self._parse_one(clause)
+            if self.doubt and not out.doubt:
+                out.doubt = self.doubt
             if question:
                 out.question = question
                 return out
@@ -346,10 +421,20 @@ class IntentParser:
             entries, how = self._index.resolve(clause)
             if len(entries) == 1:
                 e = entries[0]
+                if how.startswith("fuzzy"):
+                    # A RATIO IS A GUESS, NOT EVIDENCE (appindex._score). "show
+                    # my feed" fuzzy-matched Feedback Hub at 0.75. The launch is
+                    # still parsed — the brain confirms or corrects it first.
+                    self.doubt = f"fuzzy app: {e.name}"
                 return ToolCall("app.open", {"app": e.key, "match": how},
                                 speech=f"Opening {e.name}."), None
             if len(entries) > 1:
                 names = ", ".join(e.name for e in entries[:3])
+                # "open X" scored Xagent, Xftp and Xshell as equals because
+                # "x" is a prefix of all three. The question below is what she
+                # asks when there is no brain to ask; with one, the sentence
+                # decides — see intent_model.second_opinion.
+                self.doubt = f"ambiguous app: {names}"
                 return None, (
                     f"I found more than one. Did you mean {names}?"
                 )

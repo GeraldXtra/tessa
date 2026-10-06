@@ -28,7 +28,7 @@ import os
 import subprocess
 import sys
 from ctypes import wintypes
-from pathlib import Path
+from pathlib import Path, PurePath
 from typing import Any, Iterator
 
 from .base import ToolError, ToolHold
@@ -445,6 +445,65 @@ def copy(path: str, to: str) -> dict[str, Any]:
 
 # ── RED ──────────────────────────────────────────────────────────────────────
 
+#: The protected roots from permissions.yaml, loaded once through the daemon's
+#: own `Guard` so this file never carries a second copy of that list.
+_PROTECTED_ROOTS: set[PurePath] | None = None
+
+
+def _protected_roots() -> set[PurePath]:
+    global _PROTECTED_ROOTS
+    if _PROTECTED_ROOTS is None:
+        from core.security.guard import Guard  # lazy: yaml is only read when a delete asks
+
+        guard = Guard(Path(__file__).resolve().parents[1] / "config" / "permissions.yaml")
+        _PROTECTED_ROOTS = {PurePath(p) for p in guard.protected_paths}
+    return _PROTECTED_ROOTS
+
+
+def _refuse_root(p: Path) -> None:
+    r"""
+    ⚠⚠ A WHOLE DRIVE, OR A PROTECTED ROOT, IS NOT SOMETHING HE CAN MEAN.
+
+    `_resolve` accepts any path that exists, and `C:\` exists. Before this
+    check an approved "delete C:\" reached `_recycle` with the drive root as
+    its one entry. The card would have shown it — but the card is the LAST
+    line, not the only one, and nothing past it looked at what the path WAS.
+    The Guard's protected-path rule (core/security/guard.py) never saw
+    fs.delete either: it is consulted for PTY spawns and the core/system
+    abilities, not here.
+
+    REFUSED, NOT HELD. A hold asks "are you sure" and a yes sends the drive to
+    the bin. There is no version of this he means, so there is nothing to
+    confirm.
+
+      * a drive or share root — `C:\`, `D:\`, `\\server\share` — is its own
+        parent once resolved, the one property every spelling of a root
+        shares (`C:/`, `C:\Windows\..`, a junction onto `D:\`).
+      * a protected root ITSELF — `C:\Windows`, `C:\Program Files`, this
+        repo, the OneDrive tree — from permissions.yaml `protected_paths`,
+        through the Guard's own loader and normalisation. Things UNDER a
+        protected root keep the red card they have today: that is the
+        "confirm" permissions.yaml promises, and binning one stale file in
+        OneDrive is a real request.
+      * a drive-RELATIVE or cwd-relative spelling - `C:`, `C:foo`, `drafts` -
+        resolves against a working directory he cannot see (the shell would
+        do the same with the raw string), so a delete must name a full path.
+    """
+    if not p.is_absolute():
+        raise ToolError(f"{p} is not a full path",
+                        "Say the full path and I will bin that.")
+    try:
+        r = p.resolve()
+    except (OSError, RuntimeError, ValueError):
+        r = Path(os.path.normpath(str(p)))
+    if r.parent == r:
+        raise ToolError(f"{r} is a whole drive",
+                        "Name a file or folder on it and I will bin that instead.")
+    if PurePath(os.path.normcase(str(r))) in _protected_roots():
+        raise ToolError(f"{r} is a protected root",
+                        "Name a file or folder inside it and I will bin that instead.")
+
+
 def delete(path: str, confirmed: bool = False) -> dict[str, Any]:
     """
     Recycle Bin, and it HOLDS on the first ask.
@@ -455,6 +514,7 @@ def delete(path: str, confirmed: bool = False) -> dict[str, Any]:
     happens.
     """
     p = _resolve(path)
+    _refuse_root(p)  # ⚠ a drive or a protected root: refused before it is even counted
     if p.is_dir():
         n = sum(1 for _ in _walk(p, max_entries=200_000))
         what = f"{p} holds {_plural(n, 'item')}"

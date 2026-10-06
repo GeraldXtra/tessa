@@ -124,7 +124,14 @@ class LocalLLM(LLMAdapter):
         tools: list[ToolDef] | None = None,
         max_tokens: int = 1024,
         thinking: bool = False,
+        quality: str = "critical",
+        json_object: bool = False,
     ) -> Iterator[str]:
+        # `quality` is accepted and ignored: this engine has nothing weaker to
+        # fall to, so the word cannot change what it does. Only the fallback
+        # wrapper acts on it. See base.py. `json_object` likewise: a 0.5B model
+        # has no constrained decoder here, so the prompt asks and the caller
+        # parses.
         self._load()
         tokens = self._prompt(system, messages)
         # `thinking` has no separate budget on a local model — there is no

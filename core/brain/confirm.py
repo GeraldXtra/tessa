@@ -60,19 +60,34 @@ class Hold:
     args: dict[str, Any]
     detail: str
     at: float
+    #: Who built the call that was held. Carried so that a "yes" re-runs the
+    #: action with the SAME origin it arrived with — a model-initiated amber
+    #: action confirmed by voice must not be re-dispatched as "human".
+    #: Defaults to "schedule", the fail-safe actor: a hold armed without saying
+    #: who asked is not the owner's, on the chain or on a repeat.
+    origin: str = "schedule"
 
     def expired(self, now: float | None = None) -> bool:
         return ((now or time.monotonic()) - self.at) > HOLD_TTL_S
 
-    def same_as(self, tool: str, args: dict[str, Any]) -> bool:
+    def same_as(self, tool: str, args: dict[str, Any], origin: str) -> bool:
         """
-        Same tool AND same target.
+        Same tool, same target, AND the same origin.
 
         `confirmed` is excluded from the comparison because the second utterance
         is the identical command — the flag is set by the ledger, not by him,
         and comparing it would make a repeat never match.
+
+        ORIGIN IS PART OF THE MATCH, and it was not. A repeat is a confirmation,
+        and a confirmation has to come from whoever was asked. Comparing tool
+        and args alone meant an AGENT-built call identical to the one the OWNER
+        was holding satisfied HIS hold — the agent rode his pending approval
+        and the action ran on a "yes" he never gave. A repeat from a different
+        origin is a different request: it does not confirm this one.
         """
         if tool != self.tool:
+            return False
+        if origin != self.origin:
             return False
         a = {k: v for k, v in args.items() if k != "confirmed"}
         b = {k: v for k, v in self.args.items() if k != "confirmed"}
@@ -91,8 +106,10 @@ class ConfirmLedger:
             self._hold = None
         return self._hold
 
-    def arm(self, tool: str, args: dict[str, Any], detail: str) -> None:
-        self._hold = Hold(tool=tool, args=dict(args), detail=detail, at=time.monotonic())
+    def arm(self, tool: str, args: dict[str, Any], detail: str,
+            origin: str = "schedule") -> None:
+        self._hold = Hold(tool=tool, args=dict(args), detail=detail,
+                          at=time.monotonic(), origin=origin)
 
     def clear(self) -> None:
         self._hold = None
@@ -120,13 +137,20 @@ class ConfirmLedger:
             return "confirm", held
         return "none", held
 
-    def resolve_repeat(self, tool: str, args: dict[str, Any]) -> Hold | None:
+    def resolve_repeat(self, tool: str, args: dict[str, Any],
+                       origin: str = "schedule") -> Hold | None:
         """
         He said the same destructive thing again. That IS the confirmation, and
         it is the one she promised out loud.
+
+        `origin` is who is repeating it, and it must match who armed the hold
+        (see `Hold.same_as`). The default is the fail-safe one: a caller that
+        does not say who is repeating can only confirm a hold that nobody
+        claimed either, never the owner's. The executor always passes the
+        resolved origin of the call in hand.
         """
         held = self.pending
-        if held is not None and held.same_as(tool, args):
+        if held is not None and held.same_as(tool, args, origin):
             self._hold = None
             return held
         return None

@@ -44,6 +44,25 @@ export const IPC = {
   agentStateChanged: 'tessa:agent-state-changed',
   /** main → renderer, push. evt.turn.timing — one turn's stage breakdown. */
   turnTiming: 'tessa:turn-timing',
+
+  /**
+   * widget renderer → main, send. The sphere was clicked: open the full Orb.
+   *
+   * `send`, not `invoke`: there is no answer to wait for, and the widget must
+   * not block its own render loop on the full window's ~1 s startup.
+   */
+  widgetExpand: 'tessa:widget-expand',
+  /**
+   * widget renderer → main, send. `true` while the pointer is over the disc.
+   *
+   * ⚠ THIS IS WHAT KEEPS HIS CORNER USABLE. The widget window is created
+   * click-through, so it swallows nothing; the renderer asks for interactivity
+   * only for the ~113 px circle the sphere actually occupies, and gives it back
+   * the moment the pointer leaves. Without this the window would eat every
+   * click in a 132 px square that, on a 1366x768 screen, sits exactly over the
+   * close button of whatever is maximised.
+   */
+  widgetInteractive: 'tessa:widget-interactive',
   /** main → renderer, push. res.calendar.today — the TODAY panel. */
   calendarToday: 'tessa:calendar-today',
   /** main → renderer, push. One audit entry, from evt.audit.appended. */
@@ -113,6 +132,33 @@ export const IPC = {
    * Main will not forward an id it never issued a card for.
    */
   approvalRespond: 'tessa:approval-respond',
+  /**
+   * renderer → main, invoke. `{ companionId, text }` — ONE TYPED LINE TO HER.
+   *
+   * The SECOND channel on this bridge carrying caller-supplied strings, and
+   * the first that carries free text. It is fenced the same way as the
+   * approval answer, one hop at a time: the preload narrows the types, main
+   * refuses anything that is not a non-empty string of at most
+   * AGENT_TEXT_MAX characters addressed to an id-shaped companion, and the
+   * frame is built with the protocol package's own `makeEnvelope` so the type
+   * name and payload shape are compile-checked. There is still no "send this
+   * frame" primitive: the renderer can say `cmd.agent.message` and nothing
+   * else, and the text it says is exactly what the daemon's guard then sees —
+   * the tiers, the fence and the approval card are the daemon's, not ours
+   * (CONTRACT §6.4). The reply is the daemon's ACCEPTANCE, never its answer;
+   * the answer comes back as a transcript line like everything she says.
+   */
+  agentSend: 'tessa:agent-send',
+  /**
+   * renderer → main, send. `{ companionId, messageId }` — cancel a turn.
+   *
+   * `messageId` is only ever echoed back against an id main received in a
+   * `res.agent.accepted`; an id main never saw is dropped. Same fence as the
+   * approval requestId.
+   */
+  agentCancel: 'tessa:agent-cancel',
+  /** main → renderer, push. What the daemon said to a cancel, verbatim-ish. */
+  agentCancelReply: 'tessa:agent-cancel-reply',
   /**
    * renderer → main, send. One of five theme ids, for persistence only.
    *
@@ -449,6 +495,58 @@ export interface TranscriptLine {
   provenance: string;
   text: string;
   ts: string;
+  /**
+   * CONTRACT §4.1's OPTIONAL `via` — `"typed"` | `"voice"` today, an OPEN
+   * set by design. Forwarded only when the daemon sent a string; ABSENT means
+   * unspecified and is rendered as no tag at all, never as "voice".
+   */
+  via?: string;
+}
+
+/* ─────────────────────────────────────────────────────────── typed chat */
+
+/**
+ * The cap on one typed line, in characters. Refused above it — never
+ * truncated silently — on both sides of the bridge, so the renderer's hint
+ * and main's refusal cannot disagree about the number.
+ */
+export const AGENT_TEXT_MAX = 4000;
+
+/**
+ * How long main waits for `res.agent.accepted` before telling the renderer
+ * the line was not taken. An IPC/loopback number: the daemon acks BEFORE it
+ * thinks (core/server.py `_h_agent_message`), so a silent 3 s is a dead link,
+ * not a slow answer.
+ */
+export const AGENT_ACK_TIMEOUT_MS = 3000;
+
+/**
+ * The one companion that exists. `id` is `DEFAULT_COMPANION_ID` in
+ * core/server.py — the value every `evt.agent.state` and `evt.transcript.*`
+ * frame carries today. When `evt.companion.roster` is ever emitted this
+ * becomes the seed of a list rather than the list.
+ */
+export const DEFAULT_COMPANION = { id: 'tessa', name: 'TESSA' } as const;
+
+/**
+ * What `agentSend` resolves to. `ok: true` is the daemon's `res.agent.accepted`
+ * and nothing weaker — the box clears on this and only this. The two
+ * timestamps are `Date.now()` in MAIN, so a renderer can pair them with its
+ * own clock only loosely; they exist for the process log, not the screen.
+ */
+export type AgentSendResult =
+  | { ok: true; messageId: string; sentAt: number; ackAt: number }
+  | { ok: false; error: string; code: string };
+
+/** The daemon's reply to `cmd.agent.cancel`, whatever it was. */
+export interface AgentCancelReply {
+  messageId: string;
+  /** True only for `res.ok`. */
+  ok: boolean;
+  /** The reply's envelope type, e.g. `res.ok` or `err.internal`. */
+  type: string;
+  /** The daemon's `message`, or the type when it sent none. */
+  message: string;
 }
 
 /* ──────────────────────────────────────────────────────────── sphere tiers */
@@ -599,6 +697,13 @@ export interface BootstrapInfo {
    */
   forcedFaceSat: number | null;
   forcedPaletteGain: boolean | null;
+  /**
+   * DEV ONLY. `--force-deform=<0|1>` (Orb round U). 0 renders round T's ROUND
+   * main shell from the same binary — the before/after for the deformation,
+   * taken the way `--force-depth=1` takes the depth term's. Null: the
+   * engine's own default (on).
+   */
+  forcedDeform: boolean | null;
 }
 
 /* ───────────────────────────────────────────────────── the bridge, in types */
@@ -639,6 +744,11 @@ export interface TessaBridge {
   /** Returns an unsubscribe function. Daemon-authoritative agent state. */
   onAgentState(listener: (payload: AgentStatePush) => void): () => void;
   onTurnTiming(listener: (timing: TurnTiming) => void): () => void;
+
+  /** The ambient widget's sphere was clicked — open the full Orb. */
+  widgetExpand(): void;
+  /** True while the pointer is over the disc; false the moment it leaves. */
+  widgetInteractive(over: boolean): void;
   onCalendarToday(listener: (today: CalendarToday) => void): () => void;
   /** Returns an unsubscribe function. Fires when the display layout changes. */
   onDisplayChanged(listener: () => void): () => void;
@@ -673,6 +783,16 @@ export interface TessaBridge {
     decision: ApprovalDecision,
     editedArgs?: Record<string, unknown>,
   ): void;
+  /**
+   * One typed line to the active companion. Resolves with the daemon's
+   * acceptance or a refusal; never with her answer, which arrives as a
+   * transcript line. See IPC.agentSend for the fence.
+   */
+  agentSend(companionId: string, text: string): Promise<AgentSendResult>;
+  /** Cancel a turn main accepted. Ids main never issued are dropped in main. */
+  agentCancel(companionId: string, messageId: string): void;
+  /** Returns an unsubscribe function. The daemon's answer to a cancel. */
+  onAgentCancelReply(listener: (reply: AgentCancelReply) => void): () => void;
   /** Persist the theme choice. Display has already changed; this only saves it. */
   setTheme(theme: string): void;
   /** Report a push-to-talk key edge. Main decides what it means. */

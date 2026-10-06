@@ -18,6 +18,13 @@
  *
  * It is a visual overlay only — it does not trap focus or dim the page. This is
  * an always-on companion surface, not a modal.
+ *
+ * ─── the footer ───
+ * An optional slot BELOW the scrolling body, pinned to the drawer's bottom
+ * edge. The body keeps `flex: 1` and its own scroll; the footer takes only
+ * its natural height, so whatever the panel renders scrolls above it and the
+ * last row stays reachable. TRACE uses it for the compose box; nothing else
+ * does today.
  */
 
 import type { ReactNode } from 'react';
@@ -27,9 +34,10 @@ interface DrawerProps {
   open: boolean;
   onClose: () => void;
   children: ReactNode;
+  footer?: ReactNode;
 }
 
-export function Drawer({ title, open, onClose, children }: DrawerProps) {
+export function Drawer({ title, open, onClose, children, footer }: DrawerProps) {
   return (
     <aside className="drawer" data-open={open} aria-hidden={!open} aria-label={title}>
       <div className="drawer__head">
@@ -41,6 +49,7 @@ export function Drawer({ title, open, onClose, children }: DrawerProps) {
         </button>
       </div>
       <div className="drawer__body">{children}</div>
+      {footer ? <div className="drawer__foot">{footer}</div> : null}
     </aside>
   );
 }
