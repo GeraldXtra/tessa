@@ -1,4 +1,4 @@
-import { RING_SLOTS, TAU } from './plasma-model.ts';
+import { BLOCKED_RING_R, MUTED_RING_R, RING_SLOTS, TAU } from './plasma-model.ts';
 
 export interface FallbackView {
   w: number;
@@ -179,16 +179,16 @@ export function drawFallback(ctx: CanvasRenderingContext2D, v: FallbackView): vo
     ctx.lineWidth = 2;
     ctx.strokeStyle = paint(mixInto(scratch, v.mid, v.hot, 0.35), lift, grey, 0.9 * v.hollow);
     ctx.beginPath();
-    ctx.arc(cx, cy, R * 1.17, 0, TAU);
+    ctx.arc(cx, cy, R * BLOCKED_RING_R, 0, TAU);
     ctx.stroke();
   }
   if (v.muted > 0.01) {
-    const seg = (TAU * R * 1.09) / 64;
+    const seg = (TAU * R * MUTED_RING_R) / 64;
     ctx.setLineDash([seg * 0.55, seg * 0.45]);
     ctx.lineWidth = 1.5;
     ctx.strokeStyle = paint(v.mid, lift, 0, 0.6 * v.muted);
     ctx.beginPath();
-    ctx.arc(cx, cy, R * 1.09, 0, TAU);
+    ctx.arc(cx, cy, R * MUTED_RING_R, 0, TAU);
     ctx.stroke();
     ctx.setLineDash([]);
   }

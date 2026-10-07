@@ -54,10 +54,10 @@ void main() {
     acc += mix(uHot, uAmberHead, A.w) * hg * A.z;
   }
   if (uPass < 0.5) {
-    acc += mix(uMid, uHot, 0.35) * clamp(1.4 - abs(r - 1.17) * uRp, 0.0, 1.0) * uHollow * 0.9;
+    acc += mix(uMid, uHot, 0.35) * clamp(1.4 - abs(r - 1.05) * uRp, 0.0, 1.0) * uHollow * 0.9;
     if (uMuted > 0.001) {
       float dash = step(0.45, fract(atan(q.y, q.x + 1e-6) * 10.18592));
-      acc += uMid * clamp(1.25 - abs(r - 1.09) * uRp, 0.0, 1.0) * dash * uMuted * 0.6;
+      acc += uMid * clamp(1.25 - abs(r - 1.03) * uRp, 0.0, 1.0) * dash * uMuted * 0.6;
     }
   }
   float lum = dot(acc, LUMA);

@@ -1,32 +1,10 @@
-/**
- * The collapsed layout — spec §8.1's "design the collapsed layout first".
- *
- *   ┌──────────────────────────────────────────────────────────┐
- *   │ status bar                                          28px │
- *   ├───────────────────────────────┬─────────────────────┬────┤
- *   │         sphere stage          │  drawer (overlay)   │rail│
- *   │      floats over the void     │        320          │ 48 │
- *   └───────────────────────────────┴─────────────────────┴────┘
- *
- * THE RAIL AND ITS DRAWER ARE ON THE RIGHT. They were on the left and opened
- * rightward, which put PULSE's drawer over the calendar — the one permanent
- * panel, docked bottom-left. Rail, drawer and approval card now share one
- * right-hand column and the calendar has the left side to itself.
- *
- * At 1366×768 with a drawer open that is 368px of chrome and ~998px of stage.
- * The four-panel arrangement would leave 478px, which spec §8.1 calls "not a
- * centre stage — a thumbnail". The drawer is an overlay, so the stage never
- * actually shrinks; the sphere is offset inside the scene instead.
- */
-
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 
 import { AGENT_STATES, type AgentState } from '@tessa/protocol';
 
 import type { BootstrapInfo } from '../shared/ipc-contract.ts';
 import { parseDevScript, runDevScript } from './dev-drive.ts';
 import { installDevKeys } from './dev-keys.ts';
-import { tokenPx } from './design-tokens.ts';
 import { applyTheme, currentTheme, isThemeId, themeForKey, type ThemeId } from './theme.ts';
 import {
   approvalArrived,
@@ -35,95 +13,60 @@ import {
   approvalsStore,
   approvalsSweepExpired,
 } from './state/approval-store.ts';
-import { StateDwell } from './state/state-dwell.ts';
+import { installChurnProbe } from './ui/churn.ts';
+import { Interface } from './ui/Interface.tsx';
 import {
-  composeNoteLine,
-  composeNoteState,
-  composePatch,
-  requestComposeFocus,
-} from './state/compose-store.ts';
-import { ApprovalStack } from './layout/ApprovalCard.tsx';
-import { Calendar } from './layout/Calendar.tsx';
-import { Caption } from './layout/Caption.tsx';
-import { Clock } from './layout/Clock.tsx';
-import { Today } from './layout/Today.tsx';
-import { Drawer } from './layout/Drawer.tsx';
+  auditLoadedStore,
+  diskStore,
+  lastHealthStore,
+  memTotalStore,
+  noteJobs,
+  pushBeat,
+  pushMachine,
+  pushNote,
+  stateSinceStore,
+  threatStore,
+} from './ui/stores.ts';
+import { StateDwell } from './state/state-dwell.ts';
+import { composeLinkDropped, composeNoteLine, composeNoteState, composePatch } from './state/compose-store.ts';
 import { startTick } from './state/tick.ts';
 import { DevOverlay } from './layout/DevOverlay.tsx';
-import { LastLine } from './layout/LastLine.tsx';
-import { NotificationStack } from './layout/NotificationStack.tsx';
-import { Rail } from './layout/Rail.tsx';
-import { StateChip } from './layout/StateChip.tsx';
-import { StatusBar } from './layout/StatusBar.tsx';
-import { railById } from './rails/rails.tsx';
 import { Sphere } from './scene/Sphere.tsx';
 import type { MarkReport, PlasmaEngine, RenderPath } from './scene/plasma-engine.ts';
-import { STAGE_BANDS, plasmaLayout, type Box } from './scene/plasma-layout.ts';
 import { captionText, captionWords, jobsStore } from './state/plasma-inputs.ts';
 import {
   agentDetailStore,
   agentStateStore,
   auditStore,
   AUDIT_MAX,
+  calendarStore,
   connectionStore,
   devStore,
   healthStore,
   micStore,
   ptySessionsStore,
   pushHealthSample,
-  pushNotification,
-  railStore,
   transcriptStore,
   turnTimingStore,
   TRANSCRIPT_MAX,
   useStore,
-  type RailId,
 } from './state/store.ts';
 
-/* ─────────────────────────────────────────────────────── the composition ──
- *
- * Direction A. The sphere is placed OFF-CENTRE by design and the right column
- * occupies the space that opens up. A circle centred in a rectangle with equal
- * emptiness on all four sides is the least dynamic arrangement available, and
- * that bullseye is most of what read as unfinished.
- *
- * These fractions are of the WINDOW, not of the stage, because the composition
- * is a property of what he sees rather than of an internal box.
- */
+const AUDIT_QUERY_LIMIT = 800;
 
-/** Status bar height. The column's own width lives in CSS (`--col-w`). */
-const STATUS_H = 28;
-const CARD_MAX_W = 460;
-
-function sameBox(a: Box | null, b: Box | null): boolean {
-  if (a === null || b === null) return a === b;
-  return a.left === b.left && a.top === b.top && a.right === b.right && a.bottom === b.bottom;
+function editableTarget(target: EventTarget | null): boolean {
+  if (!(target instanceof HTMLElement)) return false;
+  const tag = target.tagName;
+  return tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || target.isContentEditable;
 }
 
 export function App() {
-  const rail = useStore(railStore);
   const mic = useStore(micStore);
 
   const [bootstrap, setBootstrap] = useState<BootstrapInfo | null>(null);
   const [engine, setEngine] = useState<PlasmaEngine | null>(null);
   const readStats = engine ? engine.stats : null;
   const [showOverlay, setShowOverlay] = useState(false);
-  const [calBox, setCalBox] = useState<Box | null>(null);
-  const calRef = useRef<HTMLElement>(null);
-
-  /**
-   * Window size, tracked so the composition can collapse rather than overflow.
-   * `resize` only; there is no polling and no rAF involvement.
-   */
-  const [viewport, setViewport] = useState(() => ({
-    w: window.innerWidth,
-    h: window.innerHeight,
-  }));
-  useEffect(() => {
-    const onResize = () => setViewport({ w: window.innerWidth, h: window.innerHeight });
-    window.addEventListener('resize', onResize);
-    return () => window.removeEventListener('resize', onResize);
-  }, []);
 
   // The 1 Hz clock the whole telemetry layer reads. See state/tick.ts — this is
   // the mechanism behind "an instrument reads as advanced because it is live".
@@ -169,6 +112,7 @@ export function App() {
       // Per-keystroke instrumentation in the compose box reads this rather
       // than paying for an IPC message it cannot know is a no-op.
       devStore.set(info.isDev);
+      memTotalStore.set(info.memTotalMB);
 
       /**
        * Paint the theme before anything else in this callback.
@@ -198,14 +142,26 @@ export function App() {
     // res.audit in milliseconds, while this bundle is still parsing. Main
     // logged "audit history → renderer: 100 entries" and SENTINEL still showed
     // NO DATA, because nothing was listening yet.
+    let wasConnected = false;
+    let everConnected = false;
     void window.tessa.getSnapshot().then((snap) => {
       if (!alive) return;
+      if (snap.connection.phase === 'connected') {
+        wasConnected = true;
+        everConnected = true;
+      }
       connectionStore.set(snap.connection);
       if (snap.health) {
         healthStore.set(snap.health);
+        lastHealthStore.set(snap.health);
         pushHealthSample(snap.health);
       }
-      if (snap.audit.length > 0) auditStore.set([...snap.audit].reverse().slice(0, AUDIT_MAX));
+      if (snap.audit.length > 0) {
+        auditStore.set([...snap.audit].reverse().slice(0, AUDIT_MAX));
+        auditLoadedStore.set({ at: Date.now(), rows: snap.audit.length, limit: AUDIT_QUERY_LIMIT });
+      }
+      if (snap.calendar) calendarStore.set(snap.calendar);
+      if (snap.disk) diskStore.set(snap.disk);
       if (snap.ptySessions.length > 0) ptySessionsStore.set(snap.ptySessions);
       // Unconditional, unlike the two above: `claimed: false` is a real answer
       // and must overwrite the placeholder, not be skipped as "empty".
@@ -215,6 +171,22 @@ export function App() {
       for (const request of snap.approvals) approvalArrived(request);
     });
     const offConnection = window.tessa.onConnection((status) => {
+      const up = status.phase === 'connected';
+      if (wasConnected && !up) {
+        pushNote('LINK', `Daemon link lost (${status.phase}). Retrying.`);
+        const unconfirmed = composeLinkDropped(Date.now());
+        if (unconfirmed) {
+          pushNote(
+            'CHAT',
+            unconfirmed.stage === 'ack'
+              ? 'Your message was not confirmed before the link dropped. Nothing was queued. It is still in the box.'
+              : 'Her answer to your message did not arrive before the link dropped. Nothing was queued or resent.',
+          );
+        }
+      }
+      if (!wasConnected && up && everConnected) pushNote('LINK', 'Daemon link back. Values are live again.');
+      wasConnected = up;
+      if (up) everConnected = true;
       connectionStore.set(status);
       // A dropped link must not leave a frozen uptime on screen looking live.
       // The aura goes out with it, for the same reason and by the same rule the
@@ -226,9 +198,21 @@ export function App() {
     });
     const offHealth = window.tessa.onHealth((health) => {
       healthStore.set(health);
+      lastHealthStore.set(health);
       pushHealthSample(health);
+      pushBeat(Date.now());
     });
-    const offJobs = window.tessa.onJobs((jobs) => jobsStore.set(jobs));
+    const offJobs = window.tessa.onJobs((jobs) => {
+      jobsStore.set(jobs);
+      noteJobs(jobs);
+    });
+    const offCalendar = window.tessa.onCalendarToday((today) => calendarStore.set(today));
+    const offDisk = window.tessa.onDisk((disk) => diskStore.set(disk));
+    const offMachine = window.tessa.onMachineLoad((load) => pushMachine(load.cpu, load.mem));
+    const offState = agentStateStore.subscribe(() => {
+      const state = agentStateStore.get();
+      if (stateSinceStore.get().state !== state) stateSinceStore.set({ state, at: Date.now() });
+    });
     const offPartial = window.tessa.onTranscriptPartial((partial) => {
       if (partial.role === 'assistant') captionText(partial.messageId, partial.text, partial.done);
     });
@@ -237,20 +221,41 @@ export function App() {
     // SENTINEL's two real sources. History seeds the list; the live stream
     // prepends onto it, newest first, bounded so a long-running surface cannot
     // grow without limit.
-    const offAuditHistory = window.tessa.onAuditHistory((entries) =>
-      auditStore.set([...entries].reverse().slice(0, AUDIT_MAX)),
-    );
+    const offAuditHistory = window.tessa.onAuditHistory((entries) => {
+      auditStore.set([...entries].reverse().slice(0, AUDIT_MAX));
+      auditLoadedStore.set({ at: Date.now(), rows: entries.length, limit: AUDIT_QUERY_LIMIT });
+    });
     const offAuditAppended = window.tessa.onAuditAppended((entry) =>
       auditStore.set([entry, ...auditStore.get()].slice(0, AUDIT_MAX)),
     );
     const offPty = window.tessa.onPtySessions((sessions) => ptySessionsStore.set(sessions));
     const offMic = window.tessa.onMicState((state) => micStore.set(state));
-    const offNote = window.tessa.onNotification((note) => pushNotification(note));
-    const offApproval = window.tessa.onApprovalRequested((request) => approvalArrived(request));
-    const offApprovalCleared = window.tessa.onApprovalCleared((cleared) =>
-      approvalCleared(cleared.requestId, cleared.reason, cleared.decision),
-    );
+    const offNote = window.tessa.onNotification((note) => {
+      if (note.id === 'ptt-chord-failed') return;
+      pushNote(note.level === 'info' ? 'ORB' : note.level.toUpperCase(), `${note.title}. ${note.body}`);
+    });
+    const offApproval = window.tessa.onApprovalRequested((request) => {
+      const fresh = !approvalsStore.get().some((e) => e.request.requestId === request.requestId);
+      approvalArrived(request);
+      if (fresh) pushNote('APPROVAL', `${request.tool} is waiting on you.`, 'wait');
+    });
+    const offApprovalCleared = window.tessa.onApprovalCleared((cleared) => {
+      const gone = approvalCleared(cleared.requestId);
+      if (!gone) return;
+      const what = gone.request.tool;
+      const msg =
+        cleared.reason === 'daemonRestarted'
+          ? `${what}: the daemon restarted, the request is gone. Nothing ran.`
+          : cleared.reason === 'expired'
+            ? `${what}: the 30-minute window lapsed. Nothing ran.`
+            : `${what}: ${(cleared.decision ?? 'resolved').toUpperCase()}${gone.request.fixture ? ' (fixture, not sent)' : ''}.`;
+      pushNote('APPROVAL', msg);
+    });
     const offApprovalRefused = window.tessa.onApprovalRefused((refusal) => {
+      const entry = approvalsStore.get().find((e) => e.request.requestId === refusal.requestId);
+      if (entry && !refusal.requestStillPending) {
+        pushNote('APPROVAL', `${entry.request.tool}: the daemon refused (${refusal.code}): ${refusal.message}`);
+      }
       approvalRefused(
         refusal.requestId,
         refusal.code,
@@ -328,6 +333,10 @@ export function App() {
       offConnection();
       offHealth();
       offJobs();
+      offCalendar();
+      offDisk();
+      offMachine();
+      offState();
       offPartial();
       offWords();
       offAgentState();
@@ -354,24 +363,9 @@ export function App() {
   const isDev = bootstrap?.isDev ?? false;
   const devKeys = bootstrap?.devKeys ?? false;
 
-  /**
-   * A dead global chord is news, and it must not depend on winning a race.
-   *
-   * Main registers the shortcut before the renderer has mounted, so its pushed
-   * notification arrives at a window with no listener yet — the same race that
-   * left SENTINEL empty while main's log said it had forwarded 100 audit
-   * entries. `chordRegistered` rides the snapshot, so deriving the message from
-   * the state is race-free. Deduped by id against main's push, so a runtime
-   * mode switch does not produce two of them.
-   */
   useEffect(() => {
     if (mic.mode !== 'toggle' || !mic.chord || mic.chordRegistered) return;
-    pushNotification({
-      id: 'ptt-chord-failed',
-      level: 'error',
-      title: 'Push-to-talk shortcut unavailable',
-      body: `${mic.chord} is already held by another application. Push-to-talk still works while the Orb has focus.`,
-    });
+    pushNote('MIC', `Push-to-talk shortcut unavailable. ${mic.chord} is already held by another application. Push-to-talk still works while the Orb has focus.`);
   }, [mic.mode, mic.chord, mic.chordRegistered]);
 
   /**
@@ -390,7 +384,8 @@ export function App() {
    */
   useEffect(() => {
     function onThemeKey(event: KeyboardEvent) {
-      if (!event.ctrlKey || !event.shiftKey || event.altKey) return;
+      if (!event.ctrlKey || !event.shiftKey || event.altKey || event.metaKey) return;
+      if (editableTarget(event.target)) return;
       const next = themeForKey(event.code, event.key);
       if (!next || next === currentTheme()) return;
       event.preventDefault();
@@ -419,11 +414,14 @@ export function App() {
    */
   useEffect(() => {
     const id = window.setInterval(() => {
+      const before = approvalsStore.get();
       const expired = approvalsSweepExpired();
       for (const requestId of expired) {
         window.tessa.reportMetrics(
           `APPROVAL-EXPIRED ${requestId} — invalidated locally, nothing sent (CONTRACT §5.1)`,
         );
+        const tool = before.find((e) => e.request.requestId === requestId)?.request.tool ?? requestId;
+        pushNote('APPROVAL', `${tool}: the approval window lapsed. Nothing was sent.`);
       }
     }, 1000);
     return () => window.clearInterval(id);
@@ -484,7 +482,8 @@ export function App() {
 
     function onDown(event: KeyboardEvent) {
       if (held || event.repeat) return;
-      const match = event.ctrlKey && event.altKey && isSpace(event);
+      if (editableTarget(event.target)) return;
+      const match = event.ctrlKey && event.altKey && !event.metaKey && isSpace(event);
       // Dev-only, and it earned its place: the first hold-mode run produced no
       // edges at all and there was no way to tell whether the window lacked
       // focus, the chord was still globally grabbed, or the matcher was simply
@@ -523,79 +522,25 @@ export function App() {
   }, [holdMode, isDev]);
 
   useEffect(() => {
+    if (!isDev) return;
     function onKeyDown(event: KeyboardEvent) {
-      if (event.key === 'Escape') {
-        railStore.set(null);
-        return;
-      }
-
-      /**
-       * Ctrl+Shift+Space — open TRACE with focus in the compose box, from
-       * anywhere in the Orb including the canvas. NOT dev-gated.
-       *
-       * Chosen, not inherited: the Console's chat pane has no chord at all
-       * (a toolbar button and a pane-menu command), so there was no muscle
-       * memory to match. This one is the push-to-talk chord minus Alt —
-       * Ctrl+Alt+Shift+Space is TALK, Ctrl+Shift+Space is TYPE, same key —
-       * and it is free of every other binding here (themes are Ctrl+Shift+
-       * letter; the hold-mode PTT needs Alt), of Electron (no menu, so no
-       * default accelerators), and of Windows. A renderer keydown, not a
-       * global grab: it takes nothing from any other application.
-       *
-       * `code` then `key`, for the same reason every other chord here does:
-       * synthetic input arrives with no usable `code`.
-       *
-       * Refused while an approval is pending, for the reason the rail refuses
-       * (Rail.tsx): a red-tier request must not be dismissable by opening a
-       * panel, and the card owns the right-hand column until it is answered.
-       */
-      const isSpace = event.code === 'Space' || event.key === ' ';
-      if (event.ctrlKey && event.shiftKey && !event.altKey && !event.metaKey && isSpace) {
-        event.preventDefault();
-        if (approvalsStore.get().length > 0) {
-          window.tessa.reportMetrics('CHORD ctrl+shift+space refused — approval pending');
-          return;
-        }
-        railStore.set('trace');
-        requestComposeFocus();
-        return;
-      }
-
-      // The dev state cycler. Phase 1 subscribes to no events, so this is the
-      // only way to exercise all six states — and exercising all six is the
-      // deliverable, not a convenience.
-      if (!isDev || !event.altKey) return;
-
-      // `code` first (layout-independent physical key), then `key` as a
-      // fallback. The fallback is not redundant: `code` is derived from the
-      // hardware scancode, and synthetic input — on-screen keyboards, remote
-      // desktop, accessibility tools, and the keybd_event injection used to
-      // verify this build — arrives with scancode 0 and therefore no usable
-      // `code`. Matching only `code` makes the shortcut silently dead for all
-      // of them.
+      if (!event.altKey || event.ctrlKey || event.shiftKey || event.metaKey) return;
+      if (editableTarget(event.target)) return;
       // Alt+0 toggles the frame-metrics overlay. Same family as the Alt+1…6
       // state cycler and the only digit it does not already use.
       if (/^Digit0$/.test(event.code) || event.key === '0') {
         setShowOverlay((v) => !v);
         event.preventDefault();
-        return;
-      }
-
-      const digit =
-        /^Digit([1-6])$/.exec(event.code)?.[1] ?? (/^[1-6]$/.test(event.key) ? event.key : null);
-      if (!digit || !devKeys) return;
-
-      const index = Number.parseInt(digit, 10) - 1;
-      const next = AGENT_STATES[index];
-      if (next) {
-        agentStateStore.set(next);
-        event.preventDefault();
       }
     }
-
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [isDev, devKeys]);
+  }, [isDev]);
+
+  useEffect(() => {
+    if (!bootstrap?.churn) return;
+    return installChurnProbe((line) => window.tessa.reportMetrics(line));
+  }, [bootstrap?.churn]);
 
   /* ── dev metrics → main process log ────────────────────────────────────── */
 
@@ -629,6 +574,10 @@ export function App() {
       engine,
       report: (line) => window.tessa.reportMetrics(line),
       toggleOverlay: () => setShowOverlay((v) => !v),
+      onThreat: () => {
+        threatStore.set({ at: Date.now(), seen: false });
+        pushNote('SENTINEL', 'Dev threat flare (T key). Not a real event.', 'threat');
+      },
     });
   }, [devKeys, engine]);
 
@@ -643,117 +592,6 @@ export function App() {
     }, contextLoss.atMs);
     return () => window.clearTimeout(id);
   }, [contextLoss, engine]);
-
-  /* ── the drawer, and what it does to the sphere ────────────────────────── */
-
-  // Keep the last panel mounted while the drawer slides shut, so the content
-  // does not vanish a beat before the panel does.
-  const lastRail = useRef<RailId>('trace');
-  if (rail) lastRail.current = rail;
-
-  /* ── where the sphere goes, and it is ONE computation ──────────────────────
-   *
-   * The drawer used to own this value outright (`rail ? -drawerWidth : 0`),
-   * which was fine while the sphere lived at the stage centre and fatal the
-   * moment the composition placed it elsewhere: the two systems would each
-   * write the same number and the last one to run would win.
-   *
-   * So the target position is derived from the WHOLE layout at once — base
-   * placement, drawer open or shut — and converted to the engine's offset
-   * convention exactly once, here.
-   */
-  const railW = tokenPx('--rail-w', 48);
-  const drawerWidth = tokenPx('--transcript-w', 320);
-
-  const canvasW = Math.max(1, viewport.w - railW);
-  const canvasH = Math.max(1, viewport.h - STATUS_H);
-
-  /**
-   * BOTH COLUMNS TOGETHER, OR NEITHER.
-   *
-   * The old build dropped the left panel first and kept the right, which let
-   * the sphere slide sideways into the gap and put the calendar over it — his
-   * second complaint. In the reference the two columns are a symmetric frame
-   * with the sphere clear between them, so they are one decision now: there is
-   * room for the pair, or the stage is bare and the sphere takes the middle.
-   *
-   * They yield to the drawer and to the approval card for the reasons they
-   * always did — both are deliberate where a column is ambient, and the card
-   * is opaque.
-   */
-  const cardPresent = useStore(approvalsStore).length > 0;
-
-  /**
-   * AN APPROVAL CARD CLOSES ANY OPEN DRAWER. His ruling: one thing on the right
-   * at a time, and with the rail moved to the right edge the card, the drawer
-   * and the rail are literally the same column.
-   *
-   * It closes on the card's ARRIVAL only. When the card is answered the drawer
-   * STAYS CLOSED — he reopens it — so there is deliberately no restore here and
-   * no memory of what was open. Restoring would put a panel back on screen at
-   * the exact moment he has just made a decision and is looking at the result.
-   */
-  const hadCard = useRef(false);
-  useEffect(() => {
-    if (cardPresent && !hadCard.current) railStore.set(null);
-    hadCard.current = cardPresent;
-  }, [cardPresent]);
-
-  useLayoutEffect(() => {
-    const el = calRef.current;
-    const stage = el?.parentElement;
-    if (!el || !stage) return;
-    const measure = (): void => {
-      const a = el.getBoundingClientRect();
-      const s = stage.getBoundingClientRect();
-      const next: Box = {
-        left: Math.round(a.left - s.left),
-        top: Math.round(a.top - s.top),
-        right: Math.round(a.right - s.left),
-        bottom: Math.round(a.bottom - s.top),
-      };
-      setCalBox((prev) => (sameBox(prev, next) ? prev : next));
-    };
-    measure();
-    const ro = new ResizeObserver(measure);
-    ro.observe(el);
-    ro.observe(stage);
-    return () => ro.disconnect();
-  }, []);
-
-  const cardLeft = cardPresent
-    ? canvasW - tokenPx('--sp-5', 24) - Math.min(CARD_MAX_W, canvasW - tokenPx('--sp-6', 32))
-    : null;
-  const layout = plasmaLayout({
-    width: canvasW,
-    height: canvasH,
-    calendar: calBox,
-    drawerLeft: rail ? canvasW - drawerWidth : null,
-    cardLeft,
-  });
-  const offsetPx = layout.offsetX;
-  const offsetYPx = layout.offsetY;
-  const fit = layout.fit;
-
-  /**
-   * Published to CSS so the aura, the floor and the wordmark track the sphere
-   * without a second copy of this arithmetic.
-   *
-   * (This used to say "the contact ellipse". That is gone — deleted, not
-   * dimmed — and the floor replaced it. One ground under the sphere, not two.)
-   *
-   * The aura is a radial centred on the sphere; if the sphere moves and the
-   * glow does not, it becomes a light with nothing in it. The floor is anchored
-   * to `--sphere-cy + --sphere-r`, so a refit moves the horizon with the object
-   * standing on it rather than leaving a stripe behind.
-   */
-  const stageVars = {
-    '--sphere-cx': `${layout.cx.toFixed(1)}px`,
-    '--sphere-cy': `${layout.cy.toFixed(1)}px`,
-    '--sphere-r': `${layout.r.toFixed(1)}px`,
-    '--readout-top': `${layout.readoutTop.toFixed(1)}px`,
-    '--readout-w': `${layout.readoutWidth.toFixed(1)}px`,
-  } as React.CSSProperties;
 
   const onEngineReady = useCallback((next: PlasmaEngine) => {
     setEngine(next);
@@ -771,53 +609,6 @@ export function App() {
     );
   }, []);
 
-  useEffect(() => {
-    // The layout's own numbers, reported so a disagreement between what this
-    // computes and what the sphere renders is visible in a log rather than
-    // inferred from a screenshot. It was inferred once and the inference was
-    // wrong by 50 px.
-    if (isDev) {
-      window.tessa.reportMetrics(
-        `LAYOUT canvas=${canvasW}x${canvasH} rail=${rail ?? 'none'} card=${cardPresent} ` +
-          `cal=${calBox ? `${calBox.left},${calBox.top}..${calBox.right},${calBox.bottom}` : 'none'} ` +
-          `naturalR=${layout.naturalR.toFixed(1)} R=${layout.r.toFixed(1)} fit=${layout.fit.toFixed(3)} ` +
-          `cx=${layout.cx.toFixed(1)} cy=${layout.cy.toFixed(1)} ` +
-          `ribbon=${layout.ribbonLeft.toFixed(0)}..${layout.ribbonRight.toFixed(0)}x${layout.ribbonTop.toFixed(0)}..${layout.ribbonBottom.toFixed(0)} ` +
-          `readout=${layout.readoutTop.toFixed(0)}+${STAGE_BANDS.readout} w${layout.readoutWidth.toFixed(0)} ` +
-          `calendarClash=${layout.calendarClash}`,
-      );
-    }
-  }, [isDev, canvasW, canvasH, rail, cardPresent, calBox, layout]);
-
-  /**
-   * JOBS OPENS ITSELF WHEN THERE IS SOMETHING IN IT.
-   *
-   * His ruling: a panel appears when it becomes active, and stays until he
-   * dismisses it — no timeout, no auto-close. The trigger is built; NOTHING
-   * FIRES IT TODAY. Jobs waits on a Phase 5 queue that does not exist, so the
-   * condition below is permanently false right now, and that is the honest
-   * state rather than a stub that opens on nothing.
-   *
-   * CHAT no longer has an entry here: the typed input lives in TRACE and is
-   * opened by hand (the rail, or Ctrl+Shift+Space). A reply to something he
-   * typed arrives in a drawer he already has open, and a spoken turn lands
-   * in TRACE exactly as it did before — neither is a reason to open a panel
-   * he did not ask for.
-   *
-   * One-shot per transition, not per render: `openedFor` remembers what it has
-   * already opened for, so dismissing a panel does not have it spring back on
-   * the next tick. That is the difference between "opens when it becomes
-   * active" and "cannot be closed while active".
-   */
-  const openedFor = useRef<{ jobs: boolean }>({ jobs: false });
-  const jobsActive = false; // no producer: evt.job.* is never emitted
-  useEffect(() => {
-    if (jobsActive && !openedFor.current.jobs) {
-      openedFor.current.jobs = true;
-      railStore.set('jobs');
-    }
-    if (!jobsActive) openedFor.current.jobs = false;
-  }, [jobsActive]);
 
   /**
    * Spec §4: "sphere state change → visible, p95 80 ms, hard fail 200 ms".
@@ -852,27 +643,13 @@ export function App() {
   }, []);
 
   return (
-    <div className="app">
-      <StatusBar />
-
-      <div className="app__body">
-        <main className="stage" style={stageVars} data-bare={rail === null && !cardPresent}>
-          {/* Nothing is drawn until bootstrap resolves and the tier is known.
-              Rendering <Sphere> on the default 'med' first would create a WebGL
-              context and allocate particle buffers, only to tear both down a
-              frame later when the probe answers 'dom' — the exact machine where
-              that answer is likeliest is the one least able to afford it.
-
-              THE FLOOR AND THE EDGE DETAIL ARE GONE, and the time axis with
-              them. None appears in any of the sixteen reference images, and the
-              axis's "-3m -2m -1m" ruler plus its second rule across the bottom
-              cut the composition in half — his words. The telemetry those
-              served now lives in the PULSE rail. */}
-          {!bootstrap ? null : (
+    <>
+      {!bootstrap ? null : (
+        <Interface
+          bootstrap={bootstrap}
+          engine={engine}
+          sphere={
             <Sphere
-              offsetPx={offsetPx}
-              offsetYPx={offsetYPx}
-              fit={fit}
               forceFallback={bootstrap.forceFallback}
               clock={bootstrap.clock}
               onEngineReady={onEngineReady}
@@ -880,61 +657,16 @@ export function App() {
               onMark={onMark}
               onPath={onPath}
             />
-          )}
+          }
+        />
+      )}
 
-          {/* Top row, as the reference has it: the state centre, the clock
-              right. The CALM pill beside the clock is NOT built — nothing in
-              core/ maps to it. See the report. */}
-          <StateChip />
-          <Clock />
-
-          {/* §R.2 — the HUD sits over the stage, never inside a drawer.
-              The approval stack is FIRST and above the others: it interrupts
-              where they are ambient, and a toast must never cover the buttons
-              of a red action. */}
-          <ApprovalStack />
-          <NotificationStack />
-          <div className="readout">
-            <Caption />
-            <LastLine />
-          </div>
-
-          {/* THE CALENDAR IS THE ONLY PERMANENT PANEL, bottom-left.
-              His ruling: nothing else shows until it has something to say or he
-              opens it. Everything that used to sit on the stage — the status
-              card, the jobs list, the chat, the telemetry column — is behind a
-              rail now, which is the mechanism that already existed for exactly
-              this. See RAIL_IDS.
-
-              It is the one panel always on screen because the month with today
-              marked is true without a producer, and because a glanceable
-              always-on surface at 2am should say the date. */}
-          <aside className="cal-dock" ref={calRef}>
-            <Calendar />
-            <Today />
-          </aside>
-        </main>
-
-        <Drawer
-          title={railById(lastRail.current).label}
-          open={rail !== null}
-          onClose={() => railStore.set(null)}
-          footer={railById(lastRail.current).footer?.()}
-        >
-          {railById(lastRail.current).render()}
-        </Drawer>
-
-        {/* LAST, so grid auto-placement puts it in the second column. The rail
-            is a grid item; the drawer above it is absolutely positioned and so
-            takes no track. */}
-        <Rail blocked={cardPresent} />
-      </div>
 
       {/* Dev-only AND off by default. `isDev` alone was the wrong gate: the
           owner runs `npm run dev`, so it was true for him, and the overlay sat
           over the lower-left of his sphere every day. --dev-overlay shows it at
           launch; Alt+0 toggles it. */}
       {isDev && showOverlay ? <DevOverlay readStats={readStats} devKeys={devKeys} /> : null}
-    </div>
+    </>
   );
 }

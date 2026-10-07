@@ -68,6 +68,7 @@ import {
   type ConnectionStatus,
   type DaemonHealth,
   type PermissionRequest,
+  type PingResult,
   type PtySession,
   type CalendarToday,
   type TranscriptLine,
@@ -76,6 +77,18 @@ import {
   type VoiceWords,
 } from '../shared/ipc-contract.ts';
 import type { JobEvent } from './job-table.ts';
+
+export interface FixtureTurn {
+  text: string;
+  ackMs?: number;
+  thinkMs?: number;
+}
+
+export interface FixtureTyped {
+  ackMs: number;
+  thinkMs: number;
+  answers: FixtureTurn[];
+}
 import { readRuntimeFile, type RuntimeInfo } from './runtime-file.ts';
 import { TranscriptAssembler, type TranscriptDelta } from './transcript-assembler.ts';
 
@@ -122,7 +135,7 @@ function finiteOrNull(v: unknown): number | null {
 }
 
 /** How much audit history SENTINEL asks for on connect. */
-const AUDIT_HISTORY_LIMIT = 100;
+const AUDIT_HISTORY_LIMIT = 800;
 
 /**
  * Role → provenance, for the TRACE gutter (§R.6).
@@ -370,6 +383,15 @@ export class DaemonConnection {
     { resolve: (reply: AgentCancelReply) => void; timer: NodeJS.Timeout; messageId: string }
   >();
 
+  private readonly pendingPing = new Map<
+    string,
+    { resolve: (result: PingResult) => void; timer: NodeJS.Timeout; t0: number }
+  >();
+
+  private fixture = false;
+  private fixtureTyped: FixtureTyped | null = null;
+  private fixtureAnswerIdx = 0;
+
   constructor(options: DaemonConnectionOptions) {
     this.opts = options;
   }
@@ -508,6 +530,7 @@ export class DaemonConnection {
    * error is the one shape that could leave it in neither state.
    */
   sendAgentMessage(companionId: string, text: string): Promise<AgentSendResult> {
+    if (this.fixture) return this.fixtureAgentMessage(companionId, text);
     if (!this.socket || this.socket.readyState !== WebSocket.OPEN) {
       return Promise.resolve({
         ok: false,
@@ -597,6 +620,96 @@ export class DaemonConnection {
       this.transmit(socket, frame.type, JSON.stringify(frame));
       this.opts.log(`CANCEL-OUT id=${frame.id} messageId=${messageId} t=${Date.now()}`);
     });
+  }
+
+  sendPing(): Promise<PingResult> {
+    const socket = this.socket;
+    if (this.fixture) return Promise.resolve({ ok: false, error: 'fixture: no daemon socket', at: Date.now() });
+    if (!socket || this.status.phase !== 'connected' || socket.readyState !== WebSocket.OPEN) {
+      return Promise.resolve({ ok: false, error: 'no daemon link', at: Date.now() });
+    }
+    const frame = {
+      v: PROTOCOL_VERSION,
+      id: ulid(),
+      ts: new Date().toISOString().replace(/(\.\d{3})\d*Z$/, '$1Z'),
+      type: 'cmd.ping',
+      corr: null,
+      payload: {},
+    };
+    if (!isEnvelope(frame)) return Promise.resolve({ ok: false, error: 'ping frame failed validation', at: Date.now() });
+    return new Promise<PingResult>((resolve) => {
+      const timer = setTimeout(() => {
+        this.pendingPing.delete(frame.id);
+        resolve({ ok: false, error: `no res.pong within ${AGENT_ACK_TIMEOUT_MS} ms`, at: Date.now() });
+      }, AGENT_ACK_TIMEOUT_MS);
+      this.pendingPing.set(frame.id, { resolve, timer, t0: performance.now() });
+      this.transmit(socket, frame.type, JSON.stringify(frame));
+    });
+  }
+
+  private fixtureAgentMessage(companionId: string, text: string): Promise<AgentSendResult> {
+    const typed = this.fixtureTyped;
+    if (this.status.phase !== 'connected') {
+      return Promise.resolve({ ok: false, error: 'not connected to the daemon', code: 'unavailable' });
+    }
+    if (!typed || typed.answers.length === 0) {
+      return Promise.resolve({ ok: false, error: 'FIXTURE: this fixture has no typed turn. Nothing was sent.', code: 'fixture' });
+    }
+    const turn = typed.answers[this.fixtureAnswerIdx % typed.answers.length] ?? { text: '' };
+    this.fixtureAnswerIdx += 1;
+    const ackMs = turn.ackMs ?? typed.ackMs;
+    const thinkMs = turn.thinkMs ?? typed.thinkMs;
+    const id = ulid();
+    const sentAt = Date.now();
+    const stamp = (): string => new Date().toISOString().replace(/(\.\d{3})\d*Z$/, '$1Z');
+    this.opts.log(`AGENT-OUT id=${id} companion=${companionId} chars=${text.length} t=${sentAt} FIXTURE: nothing leaves this process`);
+    return new Promise((resolve) => {
+      setTimeout(() => {
+        if (this.status.phase !== 'connected') {
+          this.opts.log(`!! cmd.agent.message ${id} was never answered — FIXTURE link drop`);
+          resolve({ ok: false, error: 'connection closed (fixture link drop) before the daemon answered', code: 'unavailable' });
+          return;
+        }
+        const messageId = ulid();
+        this.ingestFixture('evt.transcript.message', { companionId, message: { messageId, role: 'user', text, ts: stamp(), via: 'typed' } }, null);
+        const ackAt = Date.now();
+        this.opts.log(`AGENT-ACK id=${id} messageId=${messageId} dt=${ackAt - sentAt}ms t=${ackAt} FIXTURE`);
+        resolve({ ok: true, messageId, sentAt, ackAt });
+        setTimeout(() => this.ingestFixture('evt.agent.state', { companionId, state: 'thinking' }, null), 30);
+        setTimeout(() => {
+          this.ingestFixture('evt.transcript.message', { companionId, message: { messageId: ulid(), role: 'assistant', text: turn.text, ts: stamp(), via: 'typed' } }, null);
+          this.ingestFixture('evt.agent.state', { companionId, state: 'idle' }, null);
+        }, thinkMs);
+      }, ackMs);
+    });
+  }
+
+  startFixture(daemonVersion: string, typed: FixtureTyped | null = null): void {
+    this.fixture = true;
+    this.fixtureTyped = typed;
+    this.stopped = true;
+    this.auditQueryId = ulid();
+    this.calendarQueryId = ulid();
+    this.emit({ phase: 'connected', daemonVersion, sessionId: 'fixture', detail: 'FIXTURE DATA' });
+  }
+
+  fixtureStatus(status: ConnectionStatus): void {
+    if (!this.fixture) return;
+    this.emit(status);
+  }
+
+  ingestFixture(type: string, payload: unknown, corr: string | null): void {
+    if (!this.fixture || this.status.phase !== 'connected') return;
+    const mapped = corr === '$audit' ? this.auditQueryId : corr === '$calendar' ? this.calendarQueryId : corr;
+    const frame = {
+      v: PROTOCOL_VERSION,
+      id: ulid(),
+      ts: new Date().toISOString().replace(/(\.\d{3})\d*Z$/, '$1Z'),
+      type,
+      corr: mapped,
+      payload,
+    };
+    this.onMessage(Buffer.from(JSON.stringify(frame), 'utf8'));
   }
 
   dispose(): void {
@@ -792,6 +905,19 @@ export class DaemonConnection {
       return;
     }
 
+    if (parsed.corr && this.pendingPing.has(parsed.corr)) {
+      const pending = this.pendingPing.get(parsed.corr) as { resolve: (r: PingResult) => void; timer: NodeJS.Timeout; t0: number };
+      this.pendingPing.delete(parsed.corr);
+      clearTimeout(pending.timer);
+      if (parsed.type === 'res.pong') {
+        pending.resolve({ ok: true, ms: performance.now() - pending.t0, at: Date.now() });
+      } else {
+        const payload = parsed.payload as { message?: unknown };
+        pending.resolve({ ok: false, error: typeof payload.message === 'string' ? scrub(payload.message) : parsed.type, at: Date.now() });
+      }
+      return;
+    }
+
     if (parsed.corr && this.pendingCancel.has(parsed.corr)) {
       const pending = this.pendingCancel.get(parsed.corr) as {
         resolve: (reply: AgentCancelReply) => void;
@@ -947,6 +1073,7 @@ export class DaemonConnection {
         ageSeconds: typeof p['ageSeconds'] === 'number' ? p['ageSeconds'] : 0,
         date: clean(p['date'], 32),
         reason: clean(p['reason'], 120) || undefined,
+        detail: clean(p['detail'], 200) || undefined,
         events: rows.slice(0, 12).map((e, i) => ({
           id: clean(e['id'], 96) || 'ev-' + i,
           title: clean(e['title'], 140),
@@ -1004,6 +1131,8 @@ export class DaemonConnection {
       const expiresAt = str('expiresAt');
       const args = p['args'];
       const argsOk = typeof args === 'object' && args !== null && !Array.isArray(args);
+      const frozenRaw = p['frozen'];
+      const frozen = Array.isArray(frozenRaw) && frozenRaw.every((k) => typeof k === 'string') ? (frozenRaw as string[]).slice(0, 64) : undefined;
 
       if (!requestId || !tier || !tool || !provenance || !expiresAt || !argsOk) {
         this.opts.log(
@@ -1024,7 +1153,7 @@ export class DaemonConnection {
       this.opts.log(
         `PERMISSION-IN requestId=${requestId} tier=${tier} tool=${tool} ` +
           `provenance=${provenance} args=[${Object.keys(args as object).join(',')}] ` +
-          `expiresAt=${expiresAt}`,
+          `expiresAt=${expiresAt} frozen=${frozen ? `[${frozen.join(',')}]` : 'ABSENT'}`,
       );
 
       this.opts.onApprovalRequest({
@@ -1035,6 +1164,7 @@ export class DaemonConnection {
         provenance,
         expiresAt,
         receivedAt: Date.now(),
+        ...(frozen ? { frozen } : {}),
       });
       return;
     }
@@ -1539,6 +1669,11 @@ export class DaemonConnection {
       });
     }
     this.pendingCancel.clear();
+    for (const [, pending] of this.pendingPing) {
+      clearTimeout(pending.timer);
+      pending.resolve({ ok: false, error: `connection closed (${code}) before res.pong`, at: Date.now() });
+    }
+    this.pendingPing.clear();
 
     if (this.stopped) return;
 
@@ -1588,6 +1723,7 @@ export class DaemonConnection {
 
   private armSilenceTimer(): void {
     this.clearSilenceTimer();
+    if (this.fixture) return;
     this.silenceTimer = setTimeout(() => {
       this.opts.log('no traffic from the daemon in 60 s — treating the link as dead');
       this.socket?.terminate();

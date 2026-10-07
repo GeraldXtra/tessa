@@ -80,7 +80,11 @@ export type DevAction =
   | 'count'
   | 'focus'
   | 'active'
-  | 'capture';
+  | 'capture'
+  | 'pclick'
+  | 'kclick'
+  | 'scroll'
+  | 'until';
 
 export interface DevStep {
   action: DevAction;
@@ -102,6 +106,10 @@ const ACTIONS: readonly DevAction[] = [
   'focus',
   'active',
   'capture',
+  'pclick',
+  'kclick',
+  'scroll',
+  'until',
 ];
 
 /**
@@ -217,7 +225,8 @@ function describeActive(): string {
   const el = document.activeElement;
   if (!el) return 'none';
   const cls = el.className && typeof el.className === 'string' ? `.${el.className.split(' ')[0]}` : '';
-  return `${el.tagName.toLowerCase()}${cls}`;
+  const place = el instanceof HTMLElement && el.dataset['place'] ? `[${el.dataset['place']}]` : '';
+  return `${el.tagName.toLowerCase()}${cls}${place}`;
 }
 
 /**
@@ -458,6 +467,77 @@ export async function runDevScript(
     if (step.action === 'capture') {
       report(`CAPTURE ${step.arg.trim()}`);
       report(`DEV-DRIVE ${i} capture ${step.arg.trim()} requested t=${performance.now().toFixed(1)}`);
+      continue;
+    }
+
+    if (step.action === 'until') {
+      const bar = step.arg.lastIndexOf('~');
+      const selector = bar < 0 ? step.arg.trim() : step.arg.slice(0, bar).trim();
+      const max = bar < 0 ? 10_000 : Number.parseInt(step.arg.slice(bar + 1), 10);
+      const started = performance.now();
+      let found = false;
+      try {
+        while (performance.now() - started < (Number.isFinite(max) ? Math.min(max, 60_000) : 10_000)) {
+          if (document.querySelector(selector)) {
+            found = true;
+            break;
+          }
+          await sleep(10);
+        }
+      } catch {
+        report(`DEV-DRIVE ${i} until "${selector}" INVALID SELECTOR`);
+        continue;
+      }
+      report(`DEV-DRIVE ${i} until "${selector}" ${found ? 'matched' : 'TIMED OUT'} after ${(performance.now() - started).toFixed(0)} ms t=${performance.now().toFixed(1)} active=${describeActive()}`);
+      continue;
+    }
+
+    if (step.action === 'scroll') {
+      const [selector, deltaRaw, stepsRaw, paceRaw] = step.arg.split('~');
+      let node: Element | null = null;
+      try {
+        node = document.querySelector(selector ?? '');
+      } catch {
+        node = null;
+      }
+      if (!(node instanceof HTMLElement)) {
+        report(`DEV-DRIVE ${i} scroll "${step.arg}" NO MATCH`);
+        continue;
+      }
+      const delta = Number.parseFloat(deltaRaw ?? '0');
+      const count = Math.min(2000, Math.max(1, Number.parseInt(stepsRaw ?? '1', 10)));
+      const pace = Math.min(1000, Math.max(0, Number.parseInt(paceRaw ?? '16', 10)));
+      const started = performance.now();
+      const top0 = node.scrollTop;
+      for (let k = 0; k < count; k++) {
+        node.scrollTop += delta;
+        await sleep(pace);
+      }
+      report(`DEV-DRIVE ${i} scroll "${selector}" ${count} steps of ${delta}px every ${pace} ms: scrollTop ${top0.toFixed(0)} -> ${node.scrollTop.toFixed(0)} of ${node.scrollHeight} in ${(performance.now() - started).toFixed(0)} ms`);
+      continue;
+    }
+
+    if (step.action === 'pclick' || step.action === 'kclick') {
+      let node: Element | null = null;
+      try {
+        node = document.querySelector(step.arg);
+      } catch {
+        report(`DEV-DRIVE ${i} ${step.action} "${step.arg}" INVALID SELECTOR`);
+        continue;
+      }
+      if (!(node instanceof HTMLElement)) {
+        report(`DEV-DRIVE ${i} ${step.action} "${step.arg}" NO MATCH`);
+        continue;
+      }
+      const disabled = node instanceof HTMLButtonElement ? node.disabled : false;
+      if (step.action === 'pclick') {
+        node.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, cancelable: true, pointerType: 'mouse', button: 0, isPrimary: true }));
+        node.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, cancelable: true, pointerType: 'mouse', button: 0, isPrimary: true }));
+        node.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, detail: 1, button: 0 }));
+      } else {
+        node.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, detail: 0, button: 0 }));
+      }
+      report(`DEV-DRIVE ${i} ${step.action} "${step.arg}" dispatched disabled=${disabled} t=${performance.now().toFixed(1)} active=${describeActive()}`);
       continue;
     }
 

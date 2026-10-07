@@ -26,13 +26,24 @@
  * already show thinking; this only decides what Escape does.
  */
 
+import { useSyncExternalStore } from 'react';
+
 import type { TranscriptLine } from '../../shared/ipc-contract.ts';
 import { createStore } from './store.ts';
 
+export type ComposePlace = 'drawer' | 'dock' | 'quick';
+
+export interface Unconfirmed {
+  text: string;
+  stage: 'ack' | 'answer';
+  sentAt: number;
+  droppedAt: number;
+}
+
 export interface ComposeState {
   draft: string;
-  awaitingAck: { text: string; sentAt: number } | null;
-  inflight: { messageId: string; ackAt: number; sawBusy: boolean } | null;
+  awaitingAck: { text: string; sentAt: number; from: ComposePlace } | null;
+  inflight: { messageId: string; ackAt: number; sawBusy: boolean; text: string; sentAt: number } | null;
   /**
    * What the hint line says instead of ENTER TO SEND. Only ever the daemon's
    * own `message`, the client's own timeout, or the character cap — never a
@@ -41,6 +52,9 @@ export interface ComposeState {
   error: string | null;
   /** Bumped to ask the box to take focus (the chord). */
   focusRequest: number;
+  focusPlace: ComposePlace;
+  quickOpen: boolean;
+  unconfirmed: Unconfirmed | null;
 }
 
 export const composeStore = createStore<ComposeState>({
@@ -49,14 +63,43 @@ export const composeStore = createStore<ComposeState>({
   inflight: null,
   error: null,
   focusRequest: 0,
+  focusPlace: 'drawer',
+  quickOpen: false,
+  unconfirmed: null,
 });
 
 export function composePatch(patch: Partial<ComposeState>): void {
   composeStore.set({ ...composeStore.get(), ...patch });
 }
 
-export function requestComposeFocus(): void {
-  composePatch({ focusRequest: composeStore.get().focusRequest + 1 });
+export function requestComposeFocus(place: ComposePlace = 'drawer'): void {
+  composePatch({ focusRequest: composeStore.get().focusRequest + 1, focusPlace: place });
+}
+
+export function useComposeField<K extends keyof ComposeState>(key: K): ComposeState[K] {
+  const get = (): ComposeState[K] => composeStore.get()[key];
+  return useSyncExternalStore(composeStore.subscribe, get, get);
+}
+
+export function openQuick(): void {
+  const s = composeStore.get();
+  composeStore.set({ ...s, quickOpen: true, focusRequest: s.focusRequest + 1, focusPlace: 'quick' });
+}
+
+export function closeQuick(): void {
+  if (composeStore.get().quickOpen) composePatch({ quickOpen: false });
+}
+
+export function composeLinkDropped(at: number): Unconfirmed | null {
+  const s = composeStore.get();
+  const unconfirmed: Unconfirmed | null = s.awaitingAck
+    ? { text: s.awaitingAck.text, stage: 'ack', sentAt: s.awaitingAck.sentAt, droppedAt: at }
+    : s.inflight
+      ? { text: s.inflight.text, stage: 'answer', sentAt: s.inflight.sentAt, droppedAt: at }
+      : null;
+  if (!unconfirmed) return null;
+  composeStore.set({ ...s, inflight: null, unconfirmed });
+  return unconfirmed;
 }
 
 /**
@@ -75,9 +118,18 @@ export function composeAccepted(sent: string, messageId: string, ackAt: number):
     ...s,
     draft,
     awaitingAck: null,
-    inflight: { messageId, ackAt, sawBusy: false },
+    inflight: { messageId, ackAt, sawBusy: false, text: sent, sentAt: s.awaitingAck?.sentAt ?? ackAt },
     error: null,
+    quickOpen: s.awaitingAck?.from === 'quick' ? false : s.quickOpen,
+    unconfirmed: null,
   });
+}
+
+export function composeUnsentOnDrop(text: string, sentAt: number, at: number): boolean {
+  const s = composeStore.get();
+  if (s.unconfirmed) return false;
+  composeStore.set({ ...s, unconfirmed: { text, stage: 'ack', sentAt, droppedAt: at } });
+  return true;
 }
 
 /** The daemon refused, or never answered. The text stays; the reason shows. */

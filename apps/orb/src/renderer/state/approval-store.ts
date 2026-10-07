@@ -143,11 +143,15 @@ export function approvalRefused(
   message: string,
   requestStillPending: boolean,
 ): void {
+  if (!requestStillPending) {
+    approvalsStore.set(approvalsStore.get().filter((entry) => entry.request.requestId !== requestId));
+    return;
+  }
   update(requestId, (entry) => ({
     ...entry,
     refusal: { code, message },
-    sent: requestStillPending ? null : entry.sent,
-    invalidated: requestStillPending ? null : (entry.invalidated ?? 'resolved'),
+    sent: null,
+    invalidated: null,
   }));
 }
 
@@ -176,23 +180,11 @@ export function approvalClaim(requestId: string, decision: ApprovalDecision): bo
 }
 
 /** The daemon answered, or the card must leave. Rule 5. */
-export function approvalCleared(
-  requestId: string,
-  reason: ApprovalClearReason,
-  decision?: string,
-): void {
-  update(requestId, (entry) => ({
-    ...entry,
-    invalidated: reason,
-    resolved: decision ?? entry.resolved,
-  }));
-}
-
-/** The owner acknowledged a dead card. The only path that removes an entry. */
-export function approvalDismissed(requestId: string): void {
-  approvalsStore.set(
-    approvalsStore.get().filter((entry) => entry.request.requestId !== requestId),
-  );
+export function approvalCleared(requestId: string): ApprovalEntry | null {
+  const list = approvalsStore.get();
+  const gone = list.find((entry) => entry.request.requestId === requestId) ?? null;
+  if (gone) approvalsStore.set(list.filter((entry) => entry.request.requestId !== requestId));
+  return gone;
 }
 
 /**
@@ -230,7 +222,7 @@ export function approvalsSweepExpired(now: number = Date.now()): string[] {
     if (!Number.isFinite(at) || now < at) continue;
     expired.push(entry.request.requestId);
   }
-  for (const id of expired) approvalCleared(id, 'expired');
+  for (const id of expired) approvalCleared(id);
   return expired;
 }
 

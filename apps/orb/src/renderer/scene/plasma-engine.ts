@@ -3,11 +3,16 @@ import type { AgentState } from '@tessa/protocol';
 import { tokenValue } from '../design-tokens.ts';
 import { drawFallback, type FallbackView } from './plasma-fallback.ts';
 import { bindProgram, buildGl, getContext, shortRenderer, type GlState } from './plasma-gl.ts';
-import { naturalRadius } from './plasma-layout.ts';
 import {
   BREATH_ENERGY,
   BREATH_PERIOD_S,
   BREATH_SIZE,
+  CAPTION_GAP_PX,
+  CAPTION_H_PX,
+  CAPTION_W_R,
+  CHIP_ABOVE_PX,
+  QUICK_H_PX,
+  QUICK_W_MAX_PX,
   CHANGE_JUMP,
   CPU_TAU_S,
   DIM_SPEED,
@@ -24,6 +29,7 @@ import {
   HEART_SIZE,
   HEART_WINDOW_S,
   IDLE_FLOW,
+  LAYOUT_SNAP_PX,
   LAYOUT_TAU_S,
   LOAD_CPU_WEIGHT,
   LOAD_MEM_WEIGHT,
@@ -38,13 +44,10 @@ import {
   OVERLAY_QUAD,
   PALETTE_TAU_S,
   PARAM_KEYS,
-  RIBBON_HEIGHT_R,
   RIBBON_IN_TAU_S,
   RIBBON_OUT_TAU_S,
   RIBBON_RATE_HZ,
   RIBBON_SAMPLES,
-  RIBBON_TOP_R,
-  RIBBON_WIDTH_R,
   RING_AMBER_TAU_S,
   RING_CANCEL_TAU_S,
   RING_DONE_HOLD_S,
@@ -55,6 +58,8 @@ import {
   RING_PROGRESS_TAU_S,
   RING_REMOVE_S,
   RING_SLOTS,
+  RING_WOBBLE_X,
+  RING_WOBBLE_Z,
   SETTLE_FRACTION,
   SPARK_RATE_X,
   SPARK_RATE_Y,
@@ -80,6 +85,7 @@ import {
   approach,
   flareEnvelope,
   heartEnvelope,
+  ribbonBox,
   transitionTau,
   wrap,
   type StateParams,
@@ -127,6 +133,7 @@ export interface PlasmaStats {
   lastSettle: { label: string; ms: number; budget: number } | null;
   canvas: { cssW: number; cssH: number; bufW: number; bufH: number };
   radius: number;
+  centre: { x: number; y: number };
   maxShaderInput: number;
   load: number;
   cpu: number;
@@ -147,7 +154,15 @@ export interface PlasmaEngineOptions {
   onPath?: (path: RenderPath, reason: string) => void;
 }
 
+export interface Followers {
+  chip?: HTMLElement | null;
+  caption?: HTMLElement | null;
+  quick?: HTMLElement | null;
+}
+
 export interface PlasmaEngine {
+  setPlacement(cx: number, cy: number, r: number): void;
+  setFollowers(f: Followers): void;
   setCentreOffset(xPx: number, yPx: number): void;
   setFit(factor: number): void;
   retint(): void;
@@ -206,7 +221,7 @@ const SCALE_STEP = 0.1;
 const GPU_HIGH = 0.7;
 const GPU_LOW = 0.45;
 const DROP_LIMIT = 0.05;
-const RAISE_AFTER_MS = 6000;
+const RAISE_AFTER_MS = 8000;
 const WARMUP_MS = 3000;
 const STALL_MS = 250;
 const HIST_BINS = 128;
@@ -217,7 +232,7 @@ const FREEZE_TICK = 0.005;
 const FREEZE_MAX_MS = 1500;
 const FLOW_JS_PERIOD = 20 * Math.PI;
 const SCENE_PERIOD = 200 * Math.PI;
-const STAGE_RADIUS = (w: number, h: number): number => naturalRadius(w, h);
+const STAGE_RADIUS = (_w: number, h: number): number => 0.4 * h;
 
 function parseColour(value: string, out: Float32Array): boolean {
   const v = value.trim();
@@ -364,6 +379,22 @@ export function createPlasmaEngine(options: PlasmaEngineOptions): PlasmaEngine {
   let offXC = 0;
   let offYC = 0;
   let layoutSet = false;
+  let placeSet = false;
+  let pcxT = 0;
+  let pcyT = 0;
+  let prT = 100;
+  let pcx = 0;
+  let pcy = 0;
+  let pr = 100;
+  let followers: Followers = {};
+  let chipX = -1e9;
+  let chipY = -1e9;
+  let capX = -1e9;
+  let capY = -1e9;
+  let capW = -1;
+  let quickX = -1e9;
+  let quickY = -1e9;
+  let quickW = -1;
   let cx = 0;
   let cy = 0;
   let R = 100;
@@ -460,7 +491,7 @@ export function createPlasmaEngine(options: PlasmaEngineOptions): PlasmaEngine {
     readToken('--blocked-mid', amber.mid);
     readToken('--blocked-hot', amber.hot);
     for (let i = 0; i < 3; i++) amber.head[i] = (amber.mid[i] ?? 0) + ((amber.hot[i] ?? 0) - (amber.mid[i] ?? 0)) * 0.6;
-    readToken('--status-error', flareCol);
+    readToken('--threat', flareCol);
     themeIsRed = document.documentElement.dataset['theme'] === 'red';
   }
 
@@ -703,13 +734,29 @@ export function createPlasmaEngine(options: PlasmaEngineOptions): PlasmaEngine {
     loadA = approach(loadA, Math.max(0, Math.min(1, LOAD_CPU_WEIGHT * cpu + LOAD_MEM_WEIGHT * mem)), fx, LOAD_TAU_S);
 
     const lay = layoutSet ? (reduced ? 1e6 : dt) : 1e6;
-    fitC = approach(fitC, fitT, lay, LAYOUT_TAU_S);
-    offXC = approach(offXC, offXT, lay, LAYOUT_TAU_S);
-    offYC = approach(offYC, offYT, lay, LAYOUT_TAU_S);
-    layoutSet = true;
-    R = baseR * fitC;
-    cx = cssW / 2 - offXC / 2;
-    cy = cssH / 2 - offYC / 2;
+    if (placeSet) {
+      pcx = approach(pcx, pcxT, lay, LAYOUT_TAU_S);
+      pcy = approach(pcy, pcyT, lay, LAYOUT_TAU_S);
+      pr = approach(pr, prT, lay, LAYOUT_TAU_S);
+      if (Math.abs(pcx - pcxT) < LAYOUT_SNAP_PX && Math.abs(pcy - pcyT) < LAYOUT_SNAP_PX && Math.abs(pr - prT) < LAYOUT_SNAP_PX) {
+        pcx = pcxT;
+        pcy = pcyT;
+        pr = prT;
+      }
+      layoutSet = true;
+      R = pr;
+      cx = pcx;
+      cy = pcy;
+    } else {
+      fitC = approach(fitC, fitT, lay, LAYOUT_TAU_S);
+      offXC = approach(offXC, offXT, lay, LAYOUT_TAU_S);
+      offYC = approach(offYC, offYT, lay, LAYOUT_TAU_S);
+      layoutSet = true;
+      R = baseR * fitC;
+      cx = cssW / 2 - offXC / 2;
+      cy = cssH / 2 - offYC / 2;
+    }
+    placeFollowers();
 
     for (let k = 0; k < MAX_RINGS; k++) {
       const s = slots[k];
@@ -731,8 +778,8 @@ export function createPlasmaEngine(options: PlasmaEngineOptions): PlasmaEngine {
         if (s.doneT > RING_REMOVE_S) s.id = null;
       }
       s.head = w(s.head + dt * (RING_HEAD_BASE + RING_HEAD_STEP * k) * rate * (1 - s.amb), TAU);
-      const zc = slot.c + 0.07 * Math.sin(scene * 0.23 + k * 1.7);
-      const xp = slot.phi + 0.05 * Math.sin(scene * 0.31 + k);
+      const zc = slot.c + RING_WOBBLE_Z * Math.sin(scene * 0.23 + k * 1.7);
+      const xp = slot.phi + RING_WOBBLE_X * Math.sin(scene * 0.31 + k);
       const cz = Math.cos(zc);
       const sz = Math.sin(zc);
       const cxr = Math.cos(xp);
@@ -907,12 +954,57 @@ export function createPlasmaEngine(options: PlasmaEngineOptions): PlasmaEngine {
     drawFallback(fbCtx, fbView);
   }
 
+  function placeFollowers(): void {
+    const chip = followers.chip;
+    if (chip) {
+      const y = cy - R - CHIP_ABOVE_PX;
+      if (Math.abs(cx - chipX) > 0.25 || Math.abs(y - chipY) > 0.25) {
+        chipX = cx;
+        chipY = y;
+        chip.style.transform = `translate(${cx.toFixed(1)}px,${y.toFixed(1)}px) translateX(-50%)`;
+      }
+    }
+    const caption = followers.caption;
+    if (caption) {
+      const box = ribbonBox(cx, cy, R);
+      const w = Math.round(CAPTION_W_R * R);
+      const x = cx - w / 2;
+      const y = box.y + box.h + CAPTION_GAP_PX;
+      if (w !== capW) {
+        capW = w;
+        caption.style.width = `${w}px`;
+      }
+      if (Math.abs(x - capX) > 0.25 || Math.abs(y - capY) > 0.25) {
+        capX = x;
+        capY = y;
+        caption.style.transform = `translate(${x.toFixed(1)}px,${y.toFixed(1)}px)`;
+      }
+    }
+    const quick = followers.quick;
+    if (quick) {
+      const box = ribbonBox(cx, cy, R);
+      const w = Math.round(Math.min(CAPTION_W_R * R, QUICK_W_MAX_PX));
+      const x = cx - w / 2;
+      const y = box.y + (box.h + CAPTION_GAP_PX + CAPTION_H_PX - QUICK_H_PX) / 2;
+      if (w !== quickW) {
+        quickW = w;
+        quick.style.width = `${w}px`;
+      }
+      if (Math.abs(x - quickX) > 0.25 || Math.abs(y - quickY) > 0.25) {
+        quickX = x;
+        quickY = y;
+        quick.style.transform = `translate(${x.toFixed(1)}px,${y.toFixed(1)}px)`;
+      }
+    }
+  }
+
   function placeRibbon(): void {
     if (!ribbonCanvas) return;
-    const rw = RIBBON_WIDTH_R * R;
-    const rh = RIBBON_HEIGHT_R * R;
-    const x = cx - rw / 2;
-    const y = cy + RIBBON_TOP_R * R;
+    const box = ribbonBox(cx, cy, R);
+    const rw = box.w;
+    const rh = box.h;
+    const x = box.x;
+    const y = box.y;
     if (ribbonDirty || Math.abs(rw - ribW) > 1 || Math.abs(rh - ribH) > 1) {
       ribW = rw;
       ribH = rh;
@@ -1267,6 +1359,31 @@ export function createPlasmaEngine(options: PlasmaEngineOptions): PlasmaEngine {
   requestDraw();
 
   return {
+    setPlacement(x, y, r) {
+      if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(r) || r <= 0) return;
+      pcxT = x;
+      pcyT = y;
+      prT = r;
+      if (!placeSet) {
+        placeSet = true;
+        pcx = x;
+        pcy = y;
+        pr = r;
+      }
+      requestDraw();
+    },
+    setFollowers(f) {
+      followers = f;
+      chipX = -1e9;
+      chipY = -1e9;
+      capX = -1e9;
+      capY = -1e9;
+      capW = -1;
+      quickX = -1e9;
+      quickY = -1e9;
+      quickW = -1;
+      requestDraw();
+    },
     setCentreOffset(xPx, yPx) {
       offXT = Number.isFinite(xPx) ? xPx : 0;
       offYT = Number.isFinite(yPx) ? yPx : 0;
@@ -1368,6 +1485,16 @@ export function createPlasmaEngine(options: PlasmaEngineOptions): PlasmaEngine {
       reducedLater(FLARE_WINDOW_S * 1000 + 50);
     },
     noteStateChange(at, tauS) {
+      const slot = marks.find((mk) => !mk.live);
+      if (slot) {
+        slot.live = true;
+        slot.label = 'State';
+        slot.t0 = at;
+        slot.budget = 0;
+        slot.first = -1;
+        slot.settle = -1;
+        slot.dropped = false;
+      }
       pendingAt = at;
       pendingTau = typeof tauS === 'number' && tauS > 0 ? tauS : -1;
       requestDraw();
@@ -1470,6 +1597,7 @@ export function createPlasmaEngine(options: PlasmaEngineOptions): PlasmaEngine {
         lastSettle,
         canvas: { cssW, cssH, bufW: canvas.width, bufH: canvas.height },
         radius: R,
+        centre: { x: cx, y: cy },
         maxShaderInput,
         load: loadA,
         cpu,

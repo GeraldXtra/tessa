@@ -1,54 +1,3 @@
-/**
- * The ambient Orb — a small sphere pinned to the top-right corner, all day.
- *
- * ────────────────────────────────────────────────────────────────────────────
- * WHY THIS IS A SECOND WINDOW AND NOT A MODE OF THE FIRST
- *
- * The full Orb is a maximised, framed-in-void surface with a drawer, rails and
- * a chat panel. The widget is 132 px of transparent nothing with a sphere in
- * it. They differ in every window-level property that exists — transparency,
- * always-on-top, taskbar presence, click-through, resizability — and every one
- * of those is fixed at construction in Electron. `setAlwaysOnTop` can be
- * toggled; `transparent` cannot, and neither can `frame`. A single window that
- * tried to be both would have to be transparent and frameless ALWAYS, which
- * would give the full Orb no title bar, no resize border and a compositor path
- * it does not need.
- *
- * So: two windows, one renderer bundle, one engine, one WebSocket. `broadcast`
- * in main/index.ts already sends every daemon push to EVERY BrowserWindow, so
- * the widget receives agent state with no new client, no new subscription and
- * no change to ws-client.ts.
- *
- * ────────────────────────────────────────────────────────────────────────────
- * ⚠ THE FOUR SETTINGS THAT ARE EASY TO GET WRONG, AND WHAT EACH ONE COSTS
- *
- *   transparent: true       Without it, the corner is a BLACK BOX. It also
- *                           cannot be changed after construction, and on
- *                           Windows it is mutually exclusive with a `frame`.
- *   backgroundColor         Must be fully transparent ('#00000000'). A named
- *                           colour or an opaque hex silently defeats
- *                           `transparent: true` — this is the single most
- *                           common way a transparent window renders black.
- *   frame: false            A title bar on a 132 px sphere is absurd, and on
- *                           Windows a framed window cannot be transparent.
- *   skipTaskbar: true       An always-on-top ornament should not eat a slot in
- *                           his Alt+Tab or his taskbar.
- *
- * ⚠ AND THE CLICK-THROUGH RULE, WHICH IS THE ONE WITH TEETH
- *
- * A 132x132 always-on-top window sitting over his screen would swallow every
- * click in that square — including the window controls of whatever is
- * maximised underneath, which on a 1366x768 screen is exactly where the close
- * button lives. That is not a cosmetic bug; it would make his top-right corner
- * unusable all day.
- *
- * So the window is created click-through (`setIgnoreMouseEvents(true, {
- * forward: true })`) and the RENDERER turns it off only while the pointer is
- * actually inside the sphere's disc. `forward: true` is what makes that
- * possible: it keeps delivering move events to the renderer while the window
- * ignores clicks, so the page can still see where the pointer is.
- */
-
 import { join } from 'node:path';
 
 import { BrowserWindow, screen } from 'electron';
@@ -105,8 +54,6 @@ export function createWidgetWindow(options: WidgetOptions): BrowserWindow {
     // ── the four that make it an ornament rather than a window ──
     frame: false,
     transparent: true,
-    // FULLY transparent. '#00000000' — eight hex digits, the last two alpha.
-    // Six digits here means opaque black and the whole feature reads as broken.
     backgroundColor: `${tokens.color['theme-void'].value}00`,
     skipTaskbar: true,
 

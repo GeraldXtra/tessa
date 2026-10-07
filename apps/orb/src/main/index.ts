@@ -21,7 +21,9 @@ import {
   type Session,
 } from 'electron';
 
-import { writeFile } from 'node:fs/promises';
+import { readFileSync } from 'node:fs';
+import { statfs, writeFile } from 'node:fs/promises';
+import { totalmem } from 'node:os';
 import { join } from 'node:path';
 
 import { AGENT_STATES } from '@tessa/protocol';
@@ -33,8 +35,10 @@ import {
   type AgentSendResult,
   type AuditEntry,
   type BootstrapInfo,
+  type CalendarToday,
   type ConnectionStatus,
   type DaemonHealth,
+  type DiskUsage,
   type MicState,
   type PermissionRequest,
   type PtySession,
@@ -47,7 +51,7 @@ import { PttController } from './ptt-controller.ts';
 import { DEFAULT_THEME, isThemeId, loadTheme, orbThemePath, saveTheme } from './theme-state.ts';
 import { createOrbWindow, hardenWebContents, isInstrumentedLaunch } from './window.ts';
 import { createWidgetWindow, widgetBounds } from './widget-window.ts';
-import { DaemonConnection } from './ws-client.ts';
+import { DaemonConnection, type FixtureTurn, type FixtureTyped } from './ws-client.ts';
 
 const isDev = !app.isPackaged;
 const rendererUrl = process.env['ELECTRON_RENDERER_URL'];
@@ -67,9 +71,16 @@ const rendererUrl = process.env['ELECTRON_RENDERER_URL'];
  * ready, and gated on the capture flag so a normal launch keeps Chromium's
  * power-saving behaviour intact.
  */
-const wantsCapture = isDev && process.argv.some((a) => a.startsWith('--capture-every='));
+const wantsCapture =
+  isDev &&
+  process.argv.some(
+    (a) => a.startsWith('--capture-every=') || a === '--dev-noactivate' || (a.startsWith('--dev-drive=') && a.includes('capture:')),
+  );
 if (wantsCapture) {
   app.commandLine.appendSwitch('disable-features', 'CalculateNativeWinOcclusion');
+}
+if (isDev && process.argv.some((a) => a.startsWith('--dev-heap-profile='))) {
+  app.commandLine.appendSwitch('enable-precise-memory-info');
 }
 
 /** Dev-only. See the note where it is used, in the health handler. */
@@ -254,6 +265,79 @@ function log(message: string): void {
   console.log(`[orb] ${message}`);
 }
 
+interface FixtureFrame {
+  at: number;
+  type?: string;
+  payload?: unknown;
+  corr?: string | null;
+  status?: ConnectionStatus;
+}
+
+interface FixtureRepeat {
+  ms: number;
+  type: string;
+  payload: Record<string, unknown>;
+  inc?: Record<string, number>;
+}
+
+interface Fixture {
+  label: string;
+  daemonVersion: string;
+  machine: { cpu: number; mem: number } | null;
+  disk: { usedBytes: number; totalBytes: number } | null;
+  frames: FixtureFrame[];
+  every: FixtureRepeat[];
+  typed: FixtureTyped | null;
+}
+
+function loadFixture(): Fixture | null {
+  if (app.isPackaged) return null;
+  const flag = process.argv.find((a) => a.startsWith('--dev-fixture='));
+  if (!flag) return null;
+  const path = flag.slice('--dev-fixture='.length);
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(readFileSync(path, 'utf8'));
+  } catch (err) {
+    log(`!! --dev-fixture could not be read: ${String(err)}`);
+    return null;
+  }
+  if (typeof parsed !== 'object' || parsed === null) return null;
+  const o = parsed as Record<string, unknown>;
+  const num = (v: unknown): number | null => (typeof v === 'number' && Number.isFinite(v) ? v : null);
+  const machine = o['machine'] as Record<string, unknown> | undefined;
+  const disk = o['disk'] as Record<string, unknown> | undefined;
+  const frames = Array.isArray(o['frames']) ? (o['frames'] as FixtureFrame[]).filter((f) => typeof f === 'object' && f !== null && num(f.at) !== null) : [];
+  const typedRaw = o['typed'] as Record<string, unknown> | undefined;
+  const typed: FixtureTyped | null =
+    typedRaw && Array.isArray(typedRaw['answers'])
+      ? {
+          ackMs: Math.max(0, num(typedRaw['ackMs']) ?? 45),
+          thinkMs: Math.max(50, num(typedRaw['thinkMs']) ?? 900),
+          answers: (typedRaw['answers'] as unknown[]).flatMap((a): FixtureTurn[] => {
+            if (typeof a === 'string') return [{ text: a.slice(0, 2000) }];
+            if (typeof a !== 'object' || a === null || typeof (a as FixtureTurn).text !== 'string') return [];
+            const turn = a as FixtureTurn;
+            return [{ text: turn.text.slice(0, 2000), ackMs: num(turn.ackMs) ?? undefined, thinkMs: num(turn.thinkMs) ?? undefined }];
+          }),
+        }
+      : null;
+  const every = Array.isArray(o['every'])
+    ? (o['every'] as FixtureRepeat[]).filter((f) => typeof f === 'object' && f !== null && (num(f.ms) ?? 0) >= 250 && typeof f.type === 'string')
+    : [];
+  return {
+    label: typeof o['label'] === 'string' ? (o['label'] as string).slice(0, 40) : 'FIXTURE',
+    daemonVersion: typeof o['daemonVersion'] === 'string' ? (o['daemonVersion'] as string).slice(0, 24) : 'fixture',
+    machine: machine && num(machine['cpu']) !== null && num(machine['mem']) !== null ? { cpu: num(machine['cpu']) as number, mem: num(machine['mem']) as number } : null,
+    disk: disk && num(disk['usedBytes']) !== null && num(disk['totalBytes']) !== null ? { usedBytes: num(disk['usedBytes']) as number, totalBytes: num(disk['totalBytes']) as number } : null,
+    frames,
+    every,
+    typed,
+  };
+}
+
+const fixture = loadFixture();
+
 /* ─────────────────────────────────────────────────────────── session policy */
 
 function applyContentSecurityPolicy(ses: Session): void {
@@ -351,6 +435,8 @@ if (!instrumentedDevLaunch && !app.requestSingleInstanceLock()) {
   let lastHealth: DaemonHealth | null = null;
   let lastAudit: AuditEntry[] = [];
   let lastPtySessions: PtySession[] = [];
+  let lastCalendar: CalendarToday | null = null;
+  let lastDisk: DiskUsage | null = null;
 
   /**
    * Approvals the DAEMON is holding, as far as main knows. The authority.
@@ -465,6 +551,9 @@ if (!instrumentedDevLaunch && !app.requestSingleInstanceLock()) {
       gpu,
       theme,
       themeReason,
+      fixture: fixture ? fixture.label : null,
+      memTotalMB: Math.round(totalmem() / (1024 * 1024)),
+      churn: isDev && process.argv.includes('--dev-churn'),
       devKeys: isDev && process.argv.includes('--dev-keys'),
       forceFallback: isDev && process.argv.includes('--force-fallback'),
       clock: (() => {
@@ -670,7 +759,7 @@ if (!instrumentedDevLaunch && !app.requestSingleInstanceLock()) {
     connection = new DaemonConnection({
       surfaceVersion: bootstrap.surfaceVersion,
       log,
-      logOutgoing: bootstrap.devKeys,
+      logOutgoing: isDev,
 
       onJobEvent: (event) => {
         log(`job ${event.kind} ${event.jobId}${'status' in event ? ` ${event.status}` : ''}`);
@@ -695,7 +784,7 @@ if (!instrumentedDevLaunch && !app.requestSingleInstanceLock()) {
           // about this daemon on this machine, not one to answer from the spec.
           log(
             `beat #${healthBeats} uptimeS=${health.uptimeS} ` +
-              `cpuPct=${health.cpuPct} memMB=${health.memMB}`,
+              `cpuPct=${health.cpuPct} memMB=${health.memMB} at=${new Date().toISOString()}`,
           );
         }
         lastHealth = health;
@@ -738,7 +827,7 @@ if (!instrumentedDevLaunch && !app.requestSingleInstanceLock()) {
         broadcast(IPC.auditHistory, entries);
       },
       onAuditAppended: (entry) => {
-        lastAudit = [...lastAudit, entry].slice(-200);
+        lastAudit = [...lastAudit, entry].slice(-1000);
         broadcast(IPC.auditAppended, entry);
       },
       onPtySessions: (sessions) => {
@@ -799,6 +888,7 @@ if (!instrumentedDevLaunch && !app.requestSingleInstanceLock()) {
             `${today.stale ? ` stale ${Math.round(today.ageSeconds)}s` : ''}` +
             `${today.reason ? ` reason=${today.reason}` : ''}`,
         );
+        lastCalendar = today;
         broadcast(IPC.calendarToday, today);
       },
 
@@ -816,7 +906,8 @@ if (!instrumentedDevLaunch && !app.requestSingleInstanceLock()) {
        * said it had forwarded 100 entries. Losing THIS one would leave a red
        * action pending for 30 minutes with no card ever drawn for it.
        */
-      onApprovalRequest: (request) => {
+      onApprovalRequest: (incoming) => {
+        const request: PermissionRequest = fixture ? { ...incoming, fixture: true } : incoming;
         pendingApprovals.set(request.requestId, request);
         log(`approval pending: ${request.requestId} (${pendingApprovals.size} open)`);
         broadcast(IPC.approvalRequested, request);
@@ -903,7 +994,7 @@ if (!instrumentedDevLaunch && !app.requestSingleInstanceLock()) {
         if (changed) {
           const from = lastPhase;
           lastPhase = status.phase;
-          log(`connection: ${status.phase}${status.detail ? ` — ${status.detail}` : ''}`);
+          log(`connection: ${status.phase}${status.detail ? ` — ${status.detail}` : ''} at=${new Date().toISOString()}`);
           if (status.phase !== 'connected' && jobTable.view(Date.now()).length > 0) {
             jobTable.clear();
             publishJobs();
@@ -944,6 +1035,15 @@ if (!instrumentedDevLaunch && !app.requestSingleInstanceLock()) {
     });
 
     ipcMain.handle(IPC.bootstrap, () => bootstrap);
+    let lastPingAt = 0;
+    ipcMain.handle(IPC.ping, async () => {
+      const now = Date.now();
+      if (now - lastPingAt < 4900) return { ok: false, error: 'rate limited: one ping per 5 s', at: now };
+      lastPingAt = now;
+      const result = connection ? await connection.sendPing() : { ok: false as const, error: 'no connection object', at: now };
+      if (isDev) log(`PING ${result.ok ? `${result.ms.toFixed(2)} ms` : `failed: ${result.error}`}`);
+      return result;
+    });
     ipcMain.handle(IPC.getConnection, () => connection?.current ?? { phase: 'offline' });
     ipcMain.handle(IPC.getSnapshot, () => {
       // Dev fixture hooks only; empty in every normal run. See FIXTURE_LINES.
@@ -959,6 +1059,8 @@ if (!instrumentedDevLaunch && !app.requestSingleInstanceLock()) {
       ptySessions: lastPtySessions,
       mic: lastMic,
       approvals: [...pendingApprovals.values()],
+      calendar: lastCalendar,
+      disk: lastDisk,
     });
 
     /**
@@ -1268,6 +1370,66 @@ if (!instrumentedDevLaunch && !app.requestSingleInstanceLock()) {
     let orbWindow: BrowserWindow | null = widgetOnly
       ? null
       : createOrbWindow({ isDev, rendererUrl });
+    const heapProfileS = (() => {
+      const raw = devFlagValue('--dev-heap-profile=');
+      if (raw === null) return 0;
+      const v = Number.parseFloat(raw);
+      return Number.isFinite(v) && v > 0 ? Math.min(v, 1800) : 0;
+    })();
+    if (orbWindow && heapProfileS > 0) {
+      const wc = orbWindow.webContents;
+      wc.once('did-finish-load', () => {
+        void (async () => {
+          try {
+            wc.debugger.attach('1.3');
+            await wc.debugger.sendCommand('HeapProfiler.enable');
+            await new Promise((r) => setTimeout(r, 15_000));
+            await wc.debugger.sendCommand('HeapProfiler.collectGarbage');
+            const u0 = Number(await wc.executeJavaScript('performance.memory.usedJSHeapSize'));
+            await wc.debugger.sendCommand('HeapProfiler.startSampling', {
+              samplingInterval: 16384,
+              includeObjectsCollectedByMajorGC: true,
+              includeObjectsCollectedByMinorGC: true,
+            });
+            const t0 = Date.now();
+            log(`HEAP-PROFILE started: ${heapProfileS} s, used after forced gc ${u0} bytes`);
+            setTimeout(() => {
+              void (async () => {
+                const res = (await wc.debugger.sendCommand('HeapProfiler.stopSampling')) as {
+                  profile: { head: unknown; samples?: { size: number; nodeId: number }[] };
+                };
+                await wc.debugger.sendCommand('HeapProfiler.collectGarbage');
+                const u1 = Number(await wc.executeJavaScript('performance.memory.usedJSHeapSize'));
+                const secs = (Date.now() - t0) / 1000;
+                const byFn = new Map<string, number>();
+                let total = 0;
+                const walk = (node: { callFrame: { functionName: string; url: string; lineNumber: number }; selfSize: number; children: unknown[] }, stack: string): void => {
+                  const cf = node.callFrame;
+                  const name = `${cf.functionName || '(anonymous)'} ${cf.url.split('/').pop() ?? ''}:${cf.lineNumber + 1}`;
+                  if (node.selfSize > 0) {
+                    byFn.set(`${name} <- ${stack}`, (byFn.get(`${name} <- ${stack}`) ?? 0) + node.selfSize);
+                    total += node.selfSize;
+                  }
+                  for (const c of node.children as typeof node[]) walk(c, name);
+                };
+                walk(res.profile.head as Parameters<typeof walk>[0], '(root)');
+                const top = [...byFn.entries()].sort((a, b) => b[1] - a[1]).slice(0, 30);
+                log(
+                  `HEAP-PROFILE done: ${secs.toFixed(1)} s, sampled allocations ${total} bytes = ${(total / secs / 1024).toFixed(1)} kB/s, ` +
+                    `used after forced gc ${u0} -> ${u1} bytes (${((u1 - u0) / secs).toFixed(1)} B/s retained)`,
+                );
+                for (const [k, v] of top) log(`HEAP-TOP ${(v / secs / 1024).toFixed(2)} kB/s ${k}`);
+                const dir = process.env['TESSA_CAPTURE_DIR'];
+                if (dir) await writeFile(join(dir, 'heap-profile.json'), JSON.stringify(res.profile));
+                wc.debugger.detach();
+              })().catch((err: unknown) => log(`HEAP-PROFILE stop failed: ${String(err)}`));
+            }, heapProfileS * 1000);
+          } catch (err) {
+            log(`HEAP-PROFILE failed: ${String(err)}`);
+          }
+        })();
+      });
+    }
     if (orbWindow && isDev && process.argv.includes('--dev-ontop')) {
       orbWindow.setAlwaysOnTop(true, 'floating');
       log('dev: --dev-ontop — this window stays above others for the measurement');
@@ -1413,7 +1575,8 @@ if (!instrumentedDevLaunch && !app.requestSingleInstanceLock()) {
 
     const initialMode: PttMode =
       process.argv.includes('--ptt-mode=hold') ? 'hold' : 'toggle';
-    applyPttMode(initialMode);
+    if (fixture) log('fixture: the global push-to-talk chord is NOT registered');
+    else applyPttMode(initialMode);
 
     // Hold mode's key-up will never arrive if the window loses focus mid-press.
     for (const win of BrowserWindow.getAllWindows()) {
@@ -1720,12 +1883,66 @@ if (!instrumentedDevLaunch && !app.requestSingleInstanceLock()) {
       log(`dev: --force-load=${v} — the load glow is pinned, machine load is NOT shown`);
       return v;
     })();
+    const hidden = (): boolean => BrowserWindow.getAllWindows().every((w) => w.isDestroyed() || w.isMinimized() || !w.isVisible());
+    const drive = `${(process.env['SystemDrive'] ?? 'C:').slice(0, 2)}\\`;
+    let diskAt = 0;
+    const sampleDisk = async (): Promise<void> => {
+      if (hidden()) return;
+      const now = Date.now();
+      if (now - diskAt < 10_000) return;
+      diskAt = now;
+      if (fixture) {
+        lastDisk = fixture.disk ? { drive, ...fixture.disk, at: now } : null;
+      } else {
+        try {
+          const st = await statfs(drive);
+          const total = Number(st.blocks) * Number(st.bsize);
+          const free = Number(st.bfree) * Number(st.bsize);
+          lastDisk = total > 0 ? { drive, usedBytes: total - free, totalBytes: total, at: now } : null;
+        } catch (err) {
+          lastDisk = null;
+          log(`disk: statfs ${drive} failed: ${String(err)}`);
+        }
+      }
+      broadcast(IPC.disk, lastDisk);
+    };
+
     setInterval(() => {
-      if (BrowserWindow.getAllWindows().every((w) => w.isDestroyed() || w.isMinimized() || !w.isVisible())) return;
-      broadcast(IPC.machineLoad, pinnedLoad === null ? machine.sample() : { cpu: pinnedLoad, mem: pinnedLoad });
+      if (hidden()) return;
+      void sampleDisk();
+      const sample = machine.sample();
+      broadcast(IPC.machineLoad, fixture?.machine ?? (pinnedLoad === null ? sample : { cpu: pinnedLoad, mem: pinnedLoad }));
     }, 1000);
 
-    connection.start();
+    if (fixture) {
+      log(`!! FIXTURE DATA from --dev-fixture (${fixture.label}): ${fixture.frames.length} frame(s), ${fixture.every.length} repeat(s). The daemon socket is NEVER opened.`);
+      connection.startFixture(fixture.daemonVersion, fixture.typed);
+      let started = false;
+      onSnapshotHooks.push(() => {
+        if (started) return;
+        started = true;
+        for (const f of fixture.frames) {
+          setTimeout(() => {
+            if (f.status) connection?.fixtureStatus(f.status);
+            if (typeof f.type === 'string') connection?.ingestFixture(f.type, f.payload ?? {}, f.corr ?? null);
+          }, Math.max(0, f.at));
+        }
+        for (const r of fixture.every) {
+          const payload: Record<string, unknown> = { ...r.payload };
+          const fire = (): void => {
+            connection?.ingestFixture(r.type, { ...payload }, null);
+            for (const [k, v] of Object.entries(r.inc ?? {})) {
+              const cur = payload[k];
+              if (typeof cur === 'number' && Number.isFinite(v)) payload[k] = cur + v;
+            }
+          };
+          setTimeout(fire, 300);
+          setInterval(fire, r.ms);
+        }
+      });
+    } else {
+      connection.start();
+    }
   });
 
   app.on('window-all-closed', () => app.quit());

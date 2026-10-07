@@ -10,6 +10,7 @@ export interface DevKeysOptions {
   engine: PlasmaEngine;
   report: (line: string) => void;
   toggleOverlay: () => void;
+  onThreat?: () => void;
 }
 
 const MAX_DEV_JOBS = 4;
@@ -20,7 +21,7 @@ function editable(target: EventTarget | null): boolean {
   return tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || target.isContentEditable;
 }
 
-export function installDevKeys({ engine, report, toggleOverlay }: DevKeysOptions): () => void {
+export function installDevKeys({ engine, report, toggleOverlay, onThreat }: DevKeysOptions): () => void {
   let cap30 = false;
   let jobSeq = 0;
   let reelToken = 0;
@@ -62,6 +63,7 @@ export function installDevKeys({ engine, report, toggleOverlay }: DevKeysOptions
   function threat(t0: number): void {
     engine.flare();
     engine.mark('Threat flare', t0, 0);
+    onThreat?.();
     report('DEVKEY Threat flare');
   }
 

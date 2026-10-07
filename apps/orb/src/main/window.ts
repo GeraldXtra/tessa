@@ -233,7 +233,9 @@ export function createOrbWindow(options: WindowOptions): BrowserWindow {
   // First launch, or a discarded restore, opens filling the work area exactly.
   if (initial.isMaximized) window.maximize();
 
-  window.once('ready-to-show', () => window.show());
+  const noActivate = options.isDev && process.argv.includes('--dev-noactivate');
+  if (noActivate) window.setFocusable(false);
+  window.once('ready-to-show', () => (noActivate ? window.showInactive() : window.show()));
 
   if (!instrumented) attachStatePersistence(window);
   attachFullscreenToggle(window);

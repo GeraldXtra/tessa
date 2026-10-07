@@ -3,14 +3,12 @@ import { useEffect, useRef } from 'react';
 import type { AgentState } from '@tessa/protocol';
 
 import { devVisualStore, jobRings, jobsStore, sentinelFlareStore } from '../state/plasma-inputs.ts';
+import { approvalsStore } from '../state/approval-store.ts';
 import { agentStateStore, connectionStore } from '../state/store.ts';
 import { createPlasmaEngine, type MarkReport, type PlasmaEngine, type RenderPath } from './plasma-engine.ts';
 import { BEAT_STALE_MS } from './plasma-model.ts';
 
 interface SphereProps {
-  offsetPx: number;
-  offsetYPx: number;
-  fit: number;
   forceFallback: boolean;
   clock: { hours: number; raw: boolean } | null;
   onEngineReady?: (engine: PlasmaEngine) => void;
@@ -20,9 +18,6 @@ interface SphereProps {
 }
 
 export function Sphere({
-  offsetPx,
-  offsetYPx,
-  fit,
   forceFallback,
   clock,
   onEngineReady,
@@ -49,7 +44,7 @@ export function Sphere({
     const engine = createPlasmaEngine({
       canvas,
       ribbon: ribbonRef.current,
-      getState: () => agentStateStore.get(),
+      getState: () => (approvalsStore.get().some((e) => e.invalidated === null) ? 'blocked' : agentStateStore.get()),
       forceFallback: initial.current.forceFallback,
       clock: initial.current.clock,
       onStateRendered: (state, at) => onStateRenderedRef.current?.(state, at),
@@ -116,14 +111,6 @@ export function Sphere({
       engineRef.current = null;
     };
   }, []);
-
-  useEffect(() => {
-    engineRef.current?.setCentreOffset(offsetPx, offsetYPx);
-  }, [offsetPx, offsetYPx]);
-
-  useEffect(() => {
-    engineRef.current?.setFit(fit);
-  }, [fit]);
 
   return (
     <>

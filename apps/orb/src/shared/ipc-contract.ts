@@ -189,7 +189,18 @@ export const IPC = {
   /** renderer → main, send. Frameless window needs its own controls. */
   windowMinimize: 'tessa:window-minimize',
   windowClose: 'tessa:window-close',
+  ping: 'tessa:ping',
+  disk: 'tessa:disk',
 } as const;
+
+export interface DiskUsage {
+  drive: string;
+  usedBytes: number;
+  totalBytes: number;
+  at: number;
+}
+
+export type PingResult = { ok: true; ms: number; at: number } | { ok: false; error: string; at: number };
 
 /**
  * `evt.turn.timing` — ONE TURN, BROKEN INTO STAGES. Item 9.
@@ -270,6 +281,7 @@ export interface CalendarToday {
   ageSeconds: number;
   date: string;
   reason?: string;
+  detail?: string;
 }
 
 export interface TurnTiming {
@@ -429,6 +441,7 @@ export interface PermissionRequest {
   expiresAt: string;
   /** Wall clock of arrival, so the countdown survives a clock skew. */
   receivedAt: number;
+  frozen?: readonly string[];
   /**
    * DEV ONLY. Set by `--fixture-approval=`, never by the socket.
    *
@@ -630,6 +643,9 @@ export interface BootstrapInfo {
   theme: string;
   /** Why that theme. Logged, so a silent fallback to cyan cannot look chosen. */
   themeReason: string;
+  fixture: string | null;
+  memTotalMB: number;
+  churn: boolean;
 }
 
 /* ───────────────────────────────────────────────────── the bridge, in types */
@@ -657,6 +673,8 @@ export interface Snapshot {
    * would look correct.
    */
   approvals: PermissionRequest[];
+  calendar: CalendarToday | null;
+  disk: DiskUsage | null;
 }
 
 export interface TessaBridge {
@@ -681,6 +699,8 @@ export interface TessaBridge {
   /** True while the pointer is over the disc; false the moment it leaves. */
   widgetInteractive(over: boolean): void;
   onCalendarToday(listener: (today: CalendarToday) => void): () => void;
+  onDisk(listener: (disk: DiskUsage | null) => void): () => void;
+  ping(): Promise<PingResult>;
   /** Returns an unsubscribe function. Fires when the display layout changes. */
   onDisplayChanged(listener: () => void): () => void;
   /** Returns an unsubscribe function. One newly appended audit entry. */

@@ -26,9 +26,11 @@ import {
   type BootstrapInfo,
   type ConnectionStatus,
   type DaemonHealth,
+  type DiskUsage,
   type MicState,
   type OrbNotification,
   type PermissionRequest,
+  type PingResult,
   type PtySession,
   type PttMode,
   type Snapshot,
@@ -90,6 +92,10 @@ const bridge: TessaBridge = {
       ipcRenderer.off(IPC.calendarToday, handler);
     };
   },
+
+  onDisk: subscribe<DiskUsage | null>(IPC.disk),
+
+  ping: (): Promise<PingResult> => ipcRenderer.invoke(IPC.ping),
 
   onTurnTiming: (listener: (timing: TurnTiming) => void): (() => void) => {
     const handler = (_e: IpcRendererEvent, timing: TurnTiming) => listener(timing);

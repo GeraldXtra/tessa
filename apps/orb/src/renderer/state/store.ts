@@ -147,6 +147,7 @@ export const RAIL_IDS = [
   'sentinel',
   'pulse',
   'jobs',
+  'chat',
   'arsenal',
   'recall',
   'signal',
@@ -177,7 +178,7 @@ export function pushHealthSample(sample: DaemonHealth): void {
 
 /** SENTINEL: newest first. Seeded by res.audit, extended by evt.audit.appended. */
 export const auditStore = createStore<readonly AuditEntry[]>([]);
-export const AUDIT_MAX = 200;
+export const AUDIT_MAX = 1000;
 
 /** SENTINEL: the live PTY roster the daemon assembles (CONTRACT §4.2). */
 export const ptySessionsStore = createStore<readonly PtySession[]>([]);

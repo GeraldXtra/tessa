@@ -1,7 +1,7 @@
 import { createRoot } from 'react-dom/client';
 
 import { App } from './App.tsx';
-import './styles/app.css';
+import './styles/orb.css';
 
 const container = document.getElementById('root');
 if (!container) throw new Error('#root is missing from index.html');

@@ -75,7 +75,8 @@ export const VOICE_STALE_S = 0.25;
 export const NIGHT_VOICE_CUT = 0.45;
 export const RIBBON_IN_TAU_S = 0.07;
 export const RIBBON_OUT_TAU_S = 0.16;
-export const LAYOUT_TAU_S = 0.12;
+export const LAYOUT_TAU_S = 0.085;
+export const LAYOUT_SNAP_PX = 0.2;
 
 export const BREATH_PERIOD_S = 5.2;
 export const BREATH_SIZE = 0.022;
@@ -112,15 +113,19 @@ export const FLARE_WINDOW_S = 1.9;
 export const BEAT_STALE_MS = 15_000;
 
 export const ORB_QUAD = 1.45;
-export const OVERLAY_QUAD = 1.8;
+export const OVERLAY_QUAD = 1.32;
 
 export const MAX_RINGS = 4;
 export const RING_SLOTS: readonly { r: number; phi: number; c: number }[] = [
-  { r: 1.3, phi: 0.42, c: 0.38 },
-  { r: 1.45, phi: 0.3, c: -0.62 },
-  { r: 1.6, phi: 0.4, c: 0.85 },
-  { r: 1.22, phi: 0.26, c: -1.28 },
+  { r: 1.1, phi: 0.42, c: 0.12 },
+  { r: 1.16, phi: 0.34, c: -0.15 },
+  { r: 1.22, phi: 0.46, c: 0.06 },
+  { r: 1.07, phi: 0.3, c: -0.05 },
 ];
+export const RING_WOBBLE_Z = 0.04;
+export const RING_WOBBLE_X = 0.03;
+export const BLOCKED_RING_R = 1.05;
+export const MUTED_RING_R = 1.03;
 export const RING_FADE_IN_TAU_S = 0.08;
 export const RING_DONE_HOLD_S = 0.5;
 export const RING_DONE_TAU_S = 0.16;
@@ -131,9 +136,23 @@ export const RING_PROGRESS_TAU_S = 0.25;
 export const RING_HEAD_BASE = 0.7;
 export const RING_HEAD_STEP = 0.22;
 
-export const RIBBON_TOP_R = 1.24;
-export const RIBBON_HEIGHT_R = 0.38;
-export const RIBBON_WIDTH_R = 2.4;
+export const RIBBON_GAP_PX = 6;
+export const RIBBON_H_R = 0.085;
+export const RIBBON_H_MIN = 18;
+export const RIBBON_H_MAX = 28;
+export const RIBBON_W_R = 1.6;
+export const CAPTION_GAP_PX = 2;
+export const CAPTION_W_R = 1.9;
+export const CHIP_ABOVE_PX = 34;
+export const CAPTION_H_PX = 22;
+export const QUICK_H_PX = 28;
+export const QUICK_W_MAX_PX = 620;
+
+export function ribbonBox(cx: number, cy: number, r: number): { x: number; y: number; w: number; h: number } {
+  const h = Math.round(Math.min(RIBBON_H_MAX, Math.max(RIBBON_H_MIN, RIBBON_H_R * r)));
+  const w = Math.round(RIBBON_W_R * r);
+  return { x: cx - w / 2, y: cy + r + RIBBON_GAP_PX, w, h };
+}
 export const RIBBON_SAMPLES = 112;
 export const RIBBON_RATE_HZ = 60;
 
