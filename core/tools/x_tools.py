@@ -1436,7 +1436,7 @@ def post(text: str, _approved_by_surface: bool = False) -> dict[str, Any]:
     build. A wrong delete is in the Recycle Bin. A wrong `like` is one click
     back. A wrong post has been seen, quoted and screenshotted before he knows
     it happened — and the transcription layer that would trigger it has produced
-    "Alicoy" and "The game is over" from ordinary sentences.
+    "Alicoy" and a sentence he never said from ordinary sentences.
     """
     body = str(text or "").strip()
     if not body:

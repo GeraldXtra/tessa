@@ -4,12 +4,12 @@ core/tests/test_reach.py — full reach, the greeting, and the near-miss boundar
 Four real faults from his own use, and the invariants that must hold after
 fixing them:
 
-  1. "Open my Chrome browser" offered Opera, Samsung and Epic. The diagnosis he
+  1. His request for Chrome, ending in "browser", offered Opera, Samsung and Epic. The diagnosis he
      was given (only the per-user Start Menu is indexed) was WRONG — both roots
      were indexed and Chrome was in there. The fault was the word "browser"
      surviving into the query, where a fuzzy ratio beat a whole-word match.
   2. Whisper fragments "stop listening".
-  3. "Stop List Me." reached `fs.list` with path="Me" and she answered "Me is
+  3. A three-word garble of "stop listening" reached `fs.list` with path="Me" and she answered "Me is
      not there" — a mistranscription turned into an action.
   4. "Stop listening." answered correctly. That one must not regress.
 
@@ -59,24 +59,24 @@ print("full reach, the greeting, and the near-miss boundary")
 # ── 1. THE CHROME FAULT ──────────────────────────────────────────────────────
 print("\n1. the category noun, which is what actually broke Chrome")
 check("'browser' is stripped from the query",
-      _norm_query("open my chrome browser") == "chrome",
-      _norm_query("open my chrome browser"))
+      _norm_query("open the browser chrome") == "chrome",
+      _norm_query("open the browser chrome"))
 check("...and so are 'app' and 'application'",
       _norm_query("open the spotify app") == "spotify",
       _norm_query("open the spotify app"))
 check("a bare category word SURVIVES when it is the whole request",
-      _norm_query("open my browser") == "browser",
-      _norm_query("open my browser"))
+      _norm_query("open the browser") == "browser",
+      _norm_query("open the browser"))
 
-for utt in ("Open my Chrome browser", "open chrome", "open google chrome",
-            "Open my chrome browser please"):
+for utt in ("open the browser chrome", "open chrome", "open google chrome",
+            "open the browser chrome please"):
     intent, calls, speech = route(utt)
     got = calls[0][1].get("app") if calls else None
     check(f"{utt!r} -> Chrome",
           bool(calls) and calls[0][0] == "app.open" and "chrome" in str(got),
           f"{intent} {calls} {speech[:60]}")
 
-_, calls, speech = route("Open my Chrome browser")
+_, calls, speech = route("open the browser chrome")
 check("...and NOT Opera, Samsung or Epic",
       not any(w in speech.lower() for w in ("opera", "samsung", "epic")), speech[:70])
 
@@ -120,7 +120,7 @@ check("an absolute path is recognised",
       _explicit_path(f"open {REPO}") == REPO)
 check("a bare drive is recognised",
       _explicit_path("open the D drive") == Path("D:\\"))
-check("ordinary words are NOT a path", _explicit_path("open my downloads") is None)
+check("ordinary words are NOT a path", _explicit_path("open my pictures") is None)
 
 intent, calls, speech = route(f"open {REPO}")
 check("an existing path opens as itself",
@@ -144,8 +144,8 @@ check("a path shape always can", _is_nameable(r"C:\dev"))
 check("'my invoices folder' can — he may name a folder that is missing",
       _is_nameable("invoices"))
 
-intent, calls, speech = route("Stop List Me.")
-check("'Stop List Me.' fires NO tool", not calls, str(calls))
+intent, calls, speech = route("Halt. List me.")
+check("'Halt. List me.' fires NO tool", not calls, str(calls))
 check("...and never fs.list with path='Me'",
       not any(c[0] == "fs.list" and c[1].get("path") == "Me" for c in calls))
 
@@ -154,13 +154,13 @@ for utt in ("read me that", "list it", "open this", "open it", "show me that"):
     check(f"{utt!r} fires no tool", not calls, str(calls))
 
 print("\n   ...without breaking the commands that work")
-for utt, want in (("what is in my downloads", "fs.list"),
+for utt, want in (("what is in my pictures", "fs.list"),
                   (r"list C:\dev", "fs.list"),
                   # RETARGETED 2026-09-07 to the indexed capability version.
                   # See core/system/abilities/search.py.
                   ("find a file called invoice", "system.files.search"),
                   ("read my clipboard", "clip.read"),
-                  ("open my downloads", "app.open_folder"),
+                  ("open my pictures", "app.open_folder"),
                   ("open chrome", "app.open")):
     _i, calls, _s = route(utt)
     check(f"{utt!r} still reaches {want}",
@@ -195,7 +195,7 @@ for when, words in TIMES:
           any(w in said for w in words), said)
 
 print("\n   a command after the phrase gets NO greeting")
-for utt in ("Hey Tessa, open my downloads", "Hey Tessa, open chrome"):
+for utt in ("Hey Tessa, open my pictures", "Hey Tessa, open chrome"):
     _i, calls, speech = route(utt)
     check(f"{utt!r} acts", bool(calls), str(calls))
     check("...with no greeting in front",

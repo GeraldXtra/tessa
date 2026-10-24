@@ -318,7 +318,7 @@ def remove_runtime_file(token: str, pid: int | None = None) -> bool:
 
     It used to unlink unconditionally, and on 28 Sep that cost a working daemon
     its advertisement: a second daemon lived 20 s on 47601, stopped cleanly, and
-    deleted the file the live 47600 daemon had written, leaving the Orb nothing
+    deleted the file the live daemon on the preferred port had written, leaving the Orb nothing
     to connect to. The file is removed only when BOTH its pid and its token are
     this launch's; anything else — another daemon's entry, an unreadable file —
     is left exactly where it is. Returns True if it removed the file.

@@ -10,9 +10,9 @@ subject matter:
   1. UNROUTED never consulted the model. The engine was built, wired, reported
      at boot and imported by nothing in the voice path.
   2. "The" became a spoken turn.
-  3. "Open My Taluts" reached the model, which replied "I am opening Taluts for
+  3. A request to open a mangled folder name reached the model, which replied "I am opening Taluts for
      you now" — an action it had not taken and cannot take.
-  4. "what is the weather" got "not yet" while she was holding a browser.
+  4. A weather question got "not yet" while she was holding a browser.
 
 Run: python core/tests/test_unrouted.py
 """
@@ -48,14 +48,14 @@ print("\nunrouted: the router reaching the brain\n")
 
 # ── 1. HIS EIGHT TRANSCRIPTS, verbatim, each to the right disposition ────────
 EIGHT = [
-    ("Tessa, what is the weather?",            Disposition.LIVE_DATA),
-    ("Tessa, what is a closure in JavaScript?", Disposition.QUESTION),
+    ("Tessa, what's the temperature in Abuja right now?",            Disposition.LIVE_DATA),
+    ("Tessa, what is a hash table?", Disposition.QUESTION),
     ("The",                                   Disposition.FRAGMENT),
-    ("Tessa, Open My Taluts",                  Disposition.UNRESOLVED),
-    ("Zoi, OpenGoogle.com",                   None),   # routes — never classified
-    ("Tessa, OpenGoogle.com",                  None),
-    ("TESSA, Open My Downloads",               None),
-    ("Tessa, Tweets, Data Mbudinon AI Assist", None),
+    ("Tessa, Open My Zorblats",                  Disposition.UNRESOLVED),
+    ("OpenWikipedia.org",                   None),   # routes — never classified
+    ("Tessa, OpenWikipedia.org",                  None),
+    ("TESSA, open my pictures",               None),
+    ("Tessa, tweets, the new build is green", None),
 ]
 for text, want in EIGHT:
     r = Router()
@@ -70,8 +70,8 @@ for text, want in EIGHT:
               f"got {'routed' if routed_locally else classify(text).value}")
 
 # ── 2. THE MODEL IS THE DEFAULT, not a special intent ───────────────────────
-for q in ["what is a closure in javascript", "explain recursion to me",
-          "why is the sky blue", "teach me about pointers",
+for q in ["what is a hash table", "explain recursion to me",
+          "what is a linked list", "teach me about pointers",
           "how does a hash map work", "what does idempotent mean"]:
     check(f"{q!r} goes to the brain", classify(q) is Disposition.QUESTION,
           classify(q).value)
@@ -82,17 +82,17 @@ for a in ["order me a pizza", "book me a flight", "call my mother",
     check(f"{a!r} is refused, not answered", classify(a) is Disposition.ACTION,
           classify(a).value)
 
-for u in ["open my taluts", "show me the thingummy", "close the wotsit"]:
+for u in ["open my zorblats", "show me the thingummy", "close the wotsit"]:
     check(f"{u!r} names the word she could not place",
           classify(u) is Disposition.UNRESOLVED, classify(u).value)
 check("the refusal names the object, not the verb",
-      "Taluts" in unresolved_refusal("Tessa, Open My Taluts"),
-      unresolved_refusal("Tessa, Open My Taluts"))
+      "Zorblats" in unresolved_refusal("Tessa, Open My Zorblats"),
+      unresolved_refusal("Tessa, Open My Zorblats"))
 check("...and never claims to have done it",
-      not any(w in unresolved_refusal("Tessa, Open My Taluts").lower()
+      not any(w in unresolved_refusal("Tessa, Open My Zorblats").lower()
               for w in ("opening", "on it", "i have opened", "done")))
 
-for live in ["what is the weather", "what is the naira rate",
+for live in ["what's the temperature in Abuja right now", "what is the naira rate",
              "what is in the news today", "what is the bitcoin price"]:
     check(f"{live!r} searches rather than guessing",
           classify(live) is Disposition.LIVE_DATA, classify(live).value)
@@ -131,13 +131,13 @@ check("no UNROUTED line opens with an acknowledgement",
 # measured for "Tessa" over twenty synthesised utterances with no initial_prompt:
 # Tesser (5), Tessa (3), Chester (4), Tessor, Tessir, Tester, Pessar.
 for raw, want in [
-    ("Tesser, OpenGoogle.com", "Open Google.com"),
-    ("Tessa, Open My Downloads", "Open My Downloads"),
+    ("Tesser, OpenWikipedia.org", "Open Wikipedia.org"),
+    ("Tessa, open my pictures", "open my pictures"),
     ("Chester, open my documents", "open my documents"),
-    ("Tester, open my downloads", "open my downloads"),
+    ("Tester, open my pictures", "open my pictures"),
     # The question mark SURVIVES on purpose: it is a signal to the
     # classifier and to the model, and Piper needs the punctuation.
-    ("Tessor, what is the weather?", "what is the weather?"),
+    ("Tessor, what's the temperature in Abuja right now?", "what's the temperature in Abuja right now?"),
 ]:
     got = repair(raw)[0]
     check(f"repair {raw!r} -> {want!r}", got == want, f"got {got!r}")
@@ -163,12 +163,12 @@ check("'the dot product' is not a domain",
       recover_domains("the dot product") == "the dot product")
 
 # ── 7. THE TWEET REACHES THE GATE ───────────────────────────────────────────
-out = Router().route("Tessa, Tweets, Data Mbudinon AI Assist")
+out = Router().route("Tessa, tweets, the new build is green")
 check("his tweet transcript routes to x.post",
       bool(out.calls) and out.calls[0].name == "x.post",
       str([c.name for c in out.calls]))
 check("...carrying the text he dictated",
-      bool(out.calls) and "Mbudinon" in str(out.calls[0].args.get("text", "")))
+      bool(out.calls) and "green" in str(out.calls[0].args.get("text", "")))
 check("'post office opening times' does NOT become a tweet",
       not any(c.name == "x.post" for c in Router().route("post office opening times").calls))
 

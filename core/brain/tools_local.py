@@ -111,8 +111,8 @@ _KNOWN_FOLDERS = {
 #: SPOKEN NAMES FOR THE SAME FOLDER. He does not say "pictures" — he says
 #: photos, or pics, or images, and they are one place on disk.
 #:
-#: This is the same class of failure as the dropped plural that made "open my
-#: download" fail after Whisper transcribed it without the s: the folder was
+#: This is the same class of failure as the dropped plural that made his request
+#: for the downloads folder fail after Whisper transcribed it without the s: the folder was
 #: right there and the matcher was too literal to see it. Coverage of exact
 #: words loses; resolving the word he used to the place he meant wins.
 _FOLDER_ALIASES = {
@@ -185,7 +185,7 @@ def index_start_menu() -> dict[str, Path]:
 #   2. substring      "code" -> Visual Studio Code        (containment both ways)
 #   3. ratio          "vscode" -> Visual Studio Code      (SequenceMatcher)
 #
-# The point is that "open my downloads", "open downloads folder" and "downloads"
+# The point is that "show me my pictures", "my pictures folder" and "pictures"
 # are ONE intent. Coverage is easy; collapsing phrasings is the hard part and it
 # is what makes her feel like she understands rather than like she has a manual.
 

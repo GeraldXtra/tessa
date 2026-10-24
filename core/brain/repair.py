@@ -4,8 +4,8 @@ core/brain/repair.py — repair what Whisper hands back, before anything matches
 FROM HIS REAL TRANSCRIPTS, NOT FROM IMAGINATION:
 
     "documents"                            -> "Taluts"
-    "open google dot com"                  -> "OpenGoogle.com"
-    "tweet that I'm building an AI assistant" -> "Tweets, Data Mbudinon AI Assist"
+    "open google dot com"                  -> one glued word, not quoted here
+    "tweet that I'm building an AI assistant" -> a plural noun and a comma, not quoted here
     "Tessa"                                 -> "Zoi"
 
 Priming (core/voice/stt.py) attacks these at the source and is the better fix
@@ -16,7 +16,7 @@ the fourth.
 WHY THIS RUNS BEFORE THE ROUTER AND NOT INSIDE IT
 
 Every matcher downstream — the phrasing table, the folder resolver, the app
-index — assumes word boundaries. `OpenGoogle.com` has none. Repairing once, at
+index — assumes word boundaries. A glued domain request has none. Repairing once, at
 the front, means none of them need to know that speech arrives concatenated.
 """
 
@@ -51,7 +51,7 @@ import re
 # against a name whose vowel the old comment called "stable". The priming in
 # stt.py is doing more work now, and this list is the safety net under it.
 #
-# Matched ONLY as a leading address — "Tessa, open my downloads" — never mid
+# Matched ONLY as a leading address — "Tessa, open my pictures" — never mid
 # sentence, so "tell me about Chester" mid-utterance keeps its word.
 _NAME_FORMS = r"tessa|tesser|tessor|tessir|tessah|tester|chester|pessar"
 _LEAD_NAME = re.compile(rf"^\s*(?:hey\s+|hi\s+|ok(?:ay)?\s+|hello\s+)?(?:{_NAME_FORMS})\b[\s,.!:;-]*",
@@ -59,7 +59,7 @@ _LEAD_NAME = re.compile(rf"^\s*(?:hey\s+|hi\s+|ok(?:ay)?\s+|hello\s+)?(?:{_NAME_
 
 
 def strip_wake_name(text: str) -> tuple[str, bool]:
-    """('open my downloads', True) — and True means she was addressed by name."""
+    """('open my pictures', True) — and True means she was addressed by name."""
     t = (text or "").strip()
     out = _LEAD_NAME.sub("", t, count=1)
     return out.strip(" ,.!:;-"), out != t
@@ -67,7 +67,7 @@ def strip_wake_name(text: str) -> tuple[str, bool]:
 
 # ── CONCATENATION ────────────────────────────────────────────────────────────
 #
-# "OpenGoogle.com" is one token where he said three words. The rule is a VERB
+# A glued domain request is one token where he said three words. The rule is a VERB
 # PREFIX split: if a token begins with a command verb and continues with more
 # capitalised or alphanumeric content, insert the boundary the microphone lost.
 #
@@ -87,13 +87,13 @@ _CONCAT_RE = re.compile(rf"\b((?i:{'|'.join(_VERBS)}))(?=[A-Z0-9])")
 
 
 def split_concatenated(text: str) -> str:
-    """"OpenGoogle.com" -> "Open Google.com". Idempotent."""
+    """"OpenWikipedia.org" -> "Open Wikipedia.org". Idempotent."""
     return _CONCAT_RE.sub(lambda m: m.group(1) + " ", text or "")
 
 
 # ── DOMAINS AS A CLASS ───────────────────────────────────────────────────────
 #
-# "google.com", "web.whatsapp.com", "x.com" all come back mangled, and a list of
+# Spoken domains of every kind come back mangled, and a list of
 # three sites is a list that fails on the fourth. Two general rules instead:
 #
 #   1. SPOKEN PUNCTUATION. He says "google dot com"; Whisper writes it out in
@@ -130,9 +130,9 @@ def repair(text: str) -> tuple[str, bool]:
     """
     Returns (repaired_text, was_addressed_by_name).
 
-    ORDER MATTERS. The name comes off first so "Zoi, OpenGoogle.com" does not
+    ORDER MATTERS. The name comes off first so a glued domain request does not
     have its verb split while the name is still attached; concatenation is split
-    before domains so "OpenGoogle dot com" reaches the domain rule as
+    before domains, so the glued request reaches the domain rule as
     "Open Google dot com".
     """
     t, addressed = strip_wake_name(text or "")

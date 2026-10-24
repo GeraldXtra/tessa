@@ -24,8 +24,9 @@ from pathlib import Path
 from typing import Any, Callable, get_args
 
 from core.security.audit import Actor as _AuditActor
+from core.security.guard import whole_folder_target
 from core.tools import REGISTRY
-from core.tools.base import ToolError, ToolHold
+from core.tools.base import ToolError, ToolHold, ToolRedirect
 
 from . import memory
 from .approvals import ApprovalError, ApprovalGate, red_refusal, resolve_edit
@@ -932,6 +933,16 @@ class Executor:
                                           or tuple(getattr(spec, "private_args", ()) or ())))
 
     @staticmethod
+    def _whole_folder_detail(name: str, args: dict[str, Any], whole: str) -> str:
+        verb = {"fs.move": "moves", "fs.copy": "copies", "fs.rename": "renames"}.get(name, "acts on")
+        out = f"That {verb} {whole}"
+        to = args.get("to")
+        if isinstance(to, str) and to.strip():
+            dest = Path(to.strip())
+            out += f" to {to.strip()}" if name == "fs.rename" else f" into {dest.name or str(dest)}"
+        return out
+
+    @staticmethod
     def _red_detail(spec: Any, args: dict[str, Any]) -> str:
         """
         What she names back to him. The SPECIFIC target, never the category —
@@ -1312,9 +1323,10 @@ class Executor:
                 return spec.failure.format(reason=reason, alternative=err.alternative)
             # `origin`, NOT `args.get("provenance", "human")`. That read was the
             # spoofable half of P6: the card must report who BUILT the call.
+            card_origin = self._actor_of(getattr(spec, "card_provenance", "") or origin)
             req = self.approvals.request(
                 tool=spec.name, args=args, tier="red",
-                provenance=origin, detail=detail,
+                provenance=card_origin, detail=detail,
                 # WHICH ARGUMENTS THE CARD MAY NOT EDIT, from the tool itself.
                 # `x.reply` freezes its target so an edited approval cannot
                 # land approved words under a different post. `getattr` with a
@@ -1327,7 +1339,7 @@ class Executor:
                 getattr(self.session, "external_content_in_context", 0))
             self._log("PENDING-APPROVAL", spec.name,
                       f"requestId={req.request_id} {self._audit_line(spec, args)}",
-                      "red", actor=origin)
+                      "red", actor=card_origin)
             # DROP ANY PENDING AMBER HOLD. Without this: he says "kill 4242"
             # (hold armed), then "tweet that we shipped" (red, refused, and she
             # says "I have it ready... it is logged and waiting"), then "yes" —
@@ -1349,7 +1361,18 @@ class Executor:
                           "a red refusal made a pending 'yes' ambiguous", "amber",
                           actor=self._actor_of(getattr(dropped, "origin", None)))
                 self.ledger.clear()
-            return red_refusal(spec.name, detail)
+            return red_refusal(spec.name, detail, editable=spec.name not in ("code.run_mine", "git.push")
+                               or bool(set(req.args) - set(req.frozen)))
+
+        _target, whole = whole_folder_target(args)
+        if (whole and spec.tier == "amber" and not spec.holds
+                and not bool(getattr(call, "confirmed", False))
+                and self.ledger.resolve_repeat(spec.name, args, origin=origin) is None):
+            detail = self._whole_folder_detail(spec.name, args, whole)
+            self.ledger.arm(spec.name, args, detail, origin=origin)
+            self._log("HELD", spec.name, f"{self._audit_line(spec, args)} (whole folder: {whole})",
+                      spec.tier, actor=origin)
+            return hold_line(spec.name, detail)
 
         # 3a. AN AMBER ACTION THE MODEL BUILT ASKS FIRST (intent round,
         #     2026-09-22). core/security/guard.py has said so since it was
@@ -1396,6 +1419,13 @@ class Executor:
             # `_with_provenance`: a handler that declares `provenance` gets the
             # RESOLVED origin — the value the card and the chain carry.
             result = spec.handler(**self._with_provenance(spec, args, origin))
+        except ToolRedirect as redirect:
+            self._log("REDIRECTED", spec.name,
+                      f"{self._audit_line(spec, args)} -> {redirect.tool}: {redirect.why}", spec.tier, actor=origin)
+            if redirect.tool == spec.name or redirect.tool not in REGISTRY:
+                return spec.failure.format(reason="That has nowhere to go.", alternative="Nothing was done.")
+            return self._dispatch_registry(ToolCall(name=redirect.tool, args=dict(redirect.call_args),
+                                                    origin=call.origin))
         except ToolHold as hold:
             # 3c. A HOLD FROM A TOOL THAT CAN NEVER RECEIVE A YES FAILS CLOSED
             #     (the sentences round, item 5a, 2026-10-06). The executor puts
@@ -1483,7 +1513,7 @@ class Executor:
         self._log("ran", spec.name, self._audit_line(spec, args), spec.tier,
                   actor=origin)
         try:
-            return spec.success.format(**result)
+            line = spec.success.format(**result)
         except (KeyError, IndexError, ValueError) as bad:
             # A success template referencing a field the handler did not return
             # is a bug in the SPEC, not a reason to go silent on him — so she
@@ -1501,6 +1531,22 @@ class Executor:
             print(f"  !! tool spec bug: {spec.name} success template wants {bad}",
                   file=__import__("sys").stderr)
             return action_done()
+        follow = result.get("then_call") if isinstance(result, dict) else None
+        if isinstance(follow, dict) and follow.get("tool") in REGISTRY and follow.get("tool") != spec.name:
+            line = f"{line} {self._follow_up(follow, call, origin)}".strip()
+        return line
+
+    def _follow_up(self, follow: dict[str, Any], call: ToolCall, origin: str) -> str:
+        tool = str(follow["tool"])
+        try:
+            return self._dispatch_registry(ToolCall(name=tool, args=dict(follow.get("args") or {}),
+                                                    origin=call.origin)) or ""
+        except InjectionRefusal as refusal:
+            self._log("REFUSED", tool, f"the follow-up was held back by the fence: {refusal}", self._tier_of(tool),
+                      actor=origin)
+            sources = ", ".join(getattr(self.session, "sources", []) or []) or "content from outside"
+            return (f"I have not put it on the card, Emperor: I have {sources} in front of me, and the fence wins. "
+                    f"Say forget the page, then say run the program you wrote.")
 
     #: The tool names that predate `core/tools/REGISTRY` and are still served by
     #: the hand-written branches below.

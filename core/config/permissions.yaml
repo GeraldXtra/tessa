@@ -122,6 +122,8 @@ tiers:
                            # and remotely-influenced strings, so this is the
                            # one the owner is most likely to want to withdraw.
                            # Security is NOT readable — it needs elevation.
+    - code.inspect
+    - code.write
 
   # ── AMBER — unattended ONLY inside a job the owner explicitly authorised ──
   amber:
@@ -208,6 +210,8 @@ tiers:
                            # but the only REASON to look is to click the answer, so it
                            # inherits the click's caution rather than handing him
                            # coordinates he has no way to check.
+    - code.run
+    - git.local
 
   # ── RED — ALWAYS requires explicit approval, no exceptions ────────────────
   red:
@@ -287,6 +291,7 @@ tiers:
                            # Windows-critical set, every security service, and any
                            # name not in the service table. No sc create/delete, no
                            # binPath=.
+    - code.run_own
 
 # ── Protected paths ──────────────────────────────────────────────────────────
 # Writes, deletes, and renames under these confirm REGARDLESS of tier or actor.

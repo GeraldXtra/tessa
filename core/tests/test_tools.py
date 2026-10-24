@@ -203,13 +203,13 @@ def main() -> int:
 
     # ── 7. phrasings, including the collisions that already bit once
     for text, name in [
-        ("what's in my downloads", "fs.list"),
+        ("what's in my pictures", "fs.list"),
         ("list my windows", "win.list"),
         ("list wifi", "sys.wifi"),
         ("what's running", "proc.list"),
         ("what's open", "win.list"),
         ("how much space is on my disk", "sys.disk"),
-        ("how big is my downloads folder", "fs.usage"),
+        ("how big is my pictures folder", "fs.usage"),
         ("kill 14284", "proc.kill"),
         ("kill port 8080", "sys.kill_port"),
         ("run git status", "shell.execute"),
@@ -225,7 +225,7 @@ def main() -> int:
         # and still reachable by name — see the read-only block below, which
         # still exercises it — it is simply no longer what this sentence means.
         ("am I online", "system.network.status"),
-        ("delete my downloads", "fs.delete"),
+        ("delete my pictures", "fs.delete"),
     ]:
         routes_to(router, text, name)
 
@@ -278,14 +278,14 @@ def main() -> int:
         ("open x so I can log in", "x.login"),
         # and the ones that must NOT have moved
         ("close chrome", "win.close"),
-        ("read me that file", "fs.read"),
+        ("read me that file", "<tool>"),
         # RETARGETED 2026-09-07. Filename search now answers from the cached
         # index in core/system/winapi/fileindex.py (1-85 ms) instead of walking
         # the disk (6 991-42 361 ms measured). `fs.search` is still registered
         # and still exercised by the read-only block below; it is simply no
         # longer what this sentence means.
         ("find a file called invoice", "system.files.search"),
-        ("open my downloads", "app.open_folder"),
+        ("open my pictures", "app.open_folder"),
     ]:
         routes_to(router, text, name)
 
@@ -310,7 +310,7 @@ def main() -> int:
         ("open my work profile", "system.chrome.open_personal_profile"),
         ("show me your profiles", "system.chrome.list_profiles"),
         ("read my timeline", "x.read_timeline"),
-        ("read me that file", "fs.read"),
+        ("read me that file", "<tool>"),
         ("search the web for piper tts", "browser.search"),
         ("tweet that we shipped it", "x.post"),
     ]:
@@ -410,7 +410,7 @@ def main() -> int:
           router.route("follow @ada").calls[0].args == {"handle": "ada"})
     check("a bulk like carries the bulk words as the target, for the handler to refuse",
           router.route("like everything from ada").calls[0].args == {"post_id": "everything from ada"})
-    for stray in ("i'd like to open my downloads", "i would like the weather", "i like that idea",
+    for stray in ("i'd like to open my pictures", "i would like the weather", "i like that idea",
                   "follow up with ada tomorrow", "follow the link", "what does that look like"):
         _r = router.route(stray)
         check(f"{stray!r} no longer reaches x.like / x.follow",

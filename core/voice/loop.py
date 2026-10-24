@@ -21,6 +21,7 @@ where the owner most needs to see that something is happening.
 from __future__ import annotations
 
 import random
+import threading
 import time
 from dataclasses import dataclass, field
 from typing import Callable
@@ -38,9 +39,11 @@ from core.brain.repair import repair
 from core.brain.unrouted import (Disposition, action_refusal, classify,
                                  unresolved_refusal)
 from core.brain.router import (Intent, Routed, Router, action_failed,
-                               _SILENCE, _TOO_QUIET, _pick)
+                               _SILENCE, _TOO_QUIET, _pick, forget_targets, history_kwargs)
 from core.brain.tools_local import ToolCall
+from core.brain.humanness import _FENCED
 from core.bus import AgentState, AudioBus
+from core.tools import runner as _runner
 
 
 #: How many consecutive no-speech segments before she mentions the microphone.
@@ -192,6 +195,8 @@ class VoiceLoop:
         self._on_state = on_state
         self._on_message = on_message
         self._armed = False
+        self._arm_lock = threading.Lock()
+        self._closing = False
         # The fence and the audit log are INJECTED, not constructed here. The
         # daemon owns one of each; a voice loop that made its own would give the
         # microphone path a second, empty injection flag and a second, unchained
@@ -279,10 +284,10 @@ class VoiceLoop:
         #
         # The router already strips it via `normalise`'s filler list, and the
         # search path strips it via `repair()`. This path did not: the model was
-        # handed "Hey Tessa, what is a closure in JavaScript?" verbatim. It copes,
+        # handed his question with "Hey Tessa" still on the front, verbatim. It copes,
         # but it pays for the tokens and it invites her to answer as though a
         # third party had been named — the same failure that made a web search
-        # for "Tessa, what is the weather?" return a Tessa-branded weather tweet.
+        # for a weather question with her name on the front return a Tessa-branded weather tweet.
         #
         # `strip_wake_name` is used rather than the router's `_FILLERS` because
         # the filler list only knows the literal spelling, while this regex knows
@@ -393,7 +398,9 @@ class VoiceLoop:
         """
         self.bus.stop("barge-in: owner pressed push-to-talk")
         self.mic.arm()
-        self._armed = True
+        with self._arm_lock:
+            self._armed = True
+            self._closing = False
         self._state(AgentState.LISTENING)
 
         if on_auto_stop is not None and hasattr(self.mic, "watch_for_silence"):
@@ -402,8 +409,10 @@ class VoiceLoop:
             def closed(reason: str) -> None:
                 # The watcher fires on its own thread. Guard against racing a
                 # manual second press, which must remain his escape hatch.
-                if not self._armed:
-                    return
+                with self._arm_lock:
+                    if not self._armed or self._closing:
+                        return
+                    self._closing = True
                 self._stage_note(f"vad.closed reason={reason}")
                 on_auto_stop(reason)
 
@@ -420,10 +429,11 @@ class VoiceLoop:
 
     def stop(self) -> Turn | None:
         """Key UP. Everything from here to first audio is the §4 budget."""
-        if not self._armed:
+        with self._arm_lock:
+            armed, self._armed, self._closing = self._armed, False, False
+        if not armed:
             self._state(AgentState.IDLE)
             return None
-        self._armed = False
         # A second press must end the segment INSTANTLY — his only escape hatch,
         # and he used it tonight. Cancelling first means the watcher cannot fire
         # a second turn behind this one.
@@ -612,6 +622,7 @@ class VoiceLoop:
         # had forgotten while forgetting nothing.
         if is_clear_request(heard):
             n = self.conversation.clear()
+            forget_targets(self.router)
             said = random.choice(CLEARED_LINES)
             self._stage(f"memory.cleared {n} turns", t0)
             if self._on_message is not None:
@@ -649,10 +660,10 @@ class VoiceLoop:
 
         # ── THE FENCE IS PER-TURN ────────────────────────────────────────────
         #
-        # Measured in the eight-transcript run: an early "what is the weather"
+        # Measured in the eight-transcript run: a weather question
         # loaded a search result into the fence, and six turns later a tweet was
-        # refused with "I have content from duckduckgo search for 'what is the
-        # weather' in front of me". Correct by the letter of the rule, wrong in
+        # refused with "I have content from duckduckgo search for his weather question
+        # in front of me". Correct by the letter of the rule, wrong in
         # effect — one web search silently disarmed her hands for the rest of
         # the session, and the only way back was a phrase he does not know.
         #
@@ -675,7 +686,7 @@ class VoiceLoop:
             self.executor.last_injection = None
 
         self._stage("route.entered", t0)
-        routed = self.router.route(heard)
+        routed = self.router.route(heard, **history_kwargs(self.router, self.conversation))
         t_route = self._stage(f"route.returned intent={routed.intent.value} calls={len(routed.calls)}"
                               + (f" doubt={routed.doubt!r}" if routed.doubt else ""), t0)
 
@@ -694,7 +705,7 @@ class VoiceLoop:
 
         # ── UNROUTED IS NOT AN ANSWER. IT IS A HANDOFF. ──────────────────────
         #
-        # This is the fix for the turn where "what is a closure in JavaScript?"
+        # This is the fix for the turn where a plain question
         # transcribed perfectly and came back "That is not mine yet." The engine
         # existed, answered in 5 s, and NOTHING IN THIS FILE HAD EVER REFERENCED
         # IT. The router is first because it is free and instant; the model is
@@ -770,7 +781,7 @@ class VoiceLoop:
                 # costs one HTTP request and no browser.
                 #
                 # THE REPAIRED TEXT, NOT THE RAW TRANSCRIPT. Searching for
-                # "Tessa, what is the weather?" returned a Tessa-branded tweet
+                # a weather question with her name on the front returned a Tessa-branded tweet
                 # about being a weather girl — her own name poisoned the query.
                 query = repair(heard)[0] or heard
                 routed = Routed(Intent.TOOL, "", score=1.0,
@@ -792,7 +803,7 @@ class VoiceLoop:
         # This was missing entirely. `route()` returns tool work in `.calls`
         # with an EMPTY `.speech`, and this method went straight to
         # `synthesise(routed.speech)` — synthesising "" for every tool turn.
-        # executor.py was imported by nothing at all. So "open my downloads"
+        # executor.py was imported by nothing at all. So "open my pictures"
         # routed correctly in 0.3 ms, executed nothing, said nothing, and looked
         # identical in the log to a turn that worked.
         #
@@ -863,6 +874,7 @@ class VoiceLoop:
 
         # STOP is not an answer, it is an instruction: comply and stay silent.
         if routed.halts_speech:
+            _runner.stop_all("he said stop")
             self.bus.stop("owner said stop")
             self._state(AgentState.IDLE)
             timing = TurnTiming(
@@ -872,7 +884,7 @@ class VoiceLoop:
             return Turn(heard=heard, said="", intent=routed.intent, timing=timing)
 
         self._stage(f"synthesise.entered {len(routed.speech)}ch", t0)
-        syn = self.tts.synthesise(routed.speech)
+        syn = self.tts.synthesise(" ".join(_FENCED.sub(" ", routed.speech).split()) or "Done, Emperor.")
         t_tts = self._stage(f"synthesise.returned {syn.duration_s:.2f}s", t0)
 
         self._state(AgentState.SPEAKING)
@@ -913,6 +925,20 @@ class VoiceLoop:
 
     def idle(self) -> None:
         self._state(AgentState.IDLE)
+
+    @property
+    def armed(self) -> bool:
+        return self._armed
+
+    def release(self) -> bool:
+        with self._arm_lock:
+            if not self._armed or self._closing:
+                return False
+            self._armed = False
+        if hasattr(self.mic, "cancel_watch"):
+            self.mic.cancel_watch()
+        self.mic.disarm()
+        return True
 
 
 def _dump_segment(cap) -> str:

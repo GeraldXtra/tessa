@@ -6,8 +6,8 @@ WHY THIS FILE IS THE MOST SECURITY-SENSITIVE TEST IN THE REPO
 
 An editable approval payload is a route from a SURFACE into a RED-TIER
 EXECUTION. It exists because Whisper mangles dictation — "tweet that I'm
-building an AI assistant" came back as "Tweet, that's I am, Beauty and AI
-assis" — and the card is where he fixes it. That makes the card the mechanism,
+building an AI assistant" came back as a plural noun and a cut-off word
+— and the card is where he fixes it. That makes the card the mechanism,
 not a safety net, and it makes this validation the thing standing between a
 corrected tweet and an arbitrary red action.
 

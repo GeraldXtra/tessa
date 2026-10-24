@@ -8,7 +8,7 @@ first time he says the two hundred and first, and he does not get told which
 two hundred were the right ones — he just learns the thing is unreliable and
 stops using it. So every rule here matches a VERB PLUS A SHAPE, not a sentence,
 and the noun it operates on goes through the same alias-and-plural resolution
-that made "open my download" work after Whisper dropped the s.
+that made his request for the downloads folder work after Whisper dropped the s.
 
 ORDER IS SEMANTIC, NOT COSMETIC. The table is scanned top to bottom and the
 first match wins, so the specific rules sit above the general ones:
@@ -33,11 +33,13 @@ RED, it holds, and it refuses anything whose provenance is not `human`
 
 from __future__ import annotations
 
+import os
 import re
 from pathlib import Path
 from typing import Any, Callable
 
-from .tools_local import ToolCall, folder_for
+from . import reading
+from .tools_local import ToolCall
 
 #: He says all three and Whisper returns all three. One fragment,
 #: reused, rather than three rules that drift.
@@ -48,29 +50,138 @@ Builder = Callable[[re.Match[str]], dict[str, Any]]
 
 # ── shared extraction ────────────────────────────────────────────────────────
 
-def _target(text: str) -> str | None:
-    """
-    Resolve a spoken noun to a path: a known folder (with aliases and plurals),
-    or a literal drive path he read out.
-    """
-    if not text:
-        return None
-    t = text.strip(" .,?!\"'")
-    m = re.search(r"([a-z]:\\[^\s\"']+)", t, re.I)
-    if m:
-        return m.group(1)
-    hit = folder_for(t)
-    return str(hit) if hit else None
-
-
 def _need_target(text: str) -> str:
-    got = _target(text)
-    if got is None:
-        # Hand back the raw words. `files._resolve` will fail with a real reason
-        # and she will say which name did not resolve — better than a silent
-        # UNROUTED that tells him nothing about why.
-        return text.strip(" .,?!\"'")
-    return got
+    return reading.path_target(text)
+
+
+def _usage_target(text: str) -> str:
+    t = re.sub(r"\s+(?:folder\s+)?(?:taking|take|takes|using|uses|use|eating|occupying)(?:\s+up)?\s*$", "",
+               reading.unaddressed(text), flags=re.I)
+    t = re.sub(r"^(?:is|are|of|does|do|has|have)\s+", "", t, flags=re.I)
+    if re.match(r"^(?:i|we)\b", t, re.I):
+        raise ValueError("a question about free space, not a folder")
+    return reading.path_target(t)
+
+
+def _reply_args(m: "re.Match[str]") -> dict[str, Any]:
+    text = _clean(re.sub(r"^(?:one|post|tweet)\b\s*", "", str(m["text"] or ""), flags=re.I))
+    if not text or reading.is_referent(text):
+        raise reading.Ask("What should the reply say, Emperor?")
+    return {"index": _ordinal(m["idx"]), "text": text}
+
+
+def _move_args(m: "re.Match[str]") -> dict[str, Any]:
+    src = reading.path_target(m["what"])
+    return {"path": src, "to": reading.dest_target(m["to"], src)}
+
+
+def _shell_args(m: "re.Match[str]") -> dict[str, Any]:
+    cmd, cwd = reading.command_and_cwd(m["cmd"])
+    if not cmd:
+        raise ValueError("no command")
+    return {"command": cmd, "cwd": cwd} if cwd else {"command": cmd}
+
+
+def _email_cannot(m: "re.Match[str]") -> dict[str, Any]:
+    if reading.is_email_request(m.string):
+        raise reading.Ask(reading.EMAIL_LINE)
+    raise ValueError("not a mail question")
+
+
+_WHAT_TO_POST = "What should I post, Emperor? Say post, then the words."
+
+
+def _post_text(raw: str | None) -> dict[str, Any]:
+    text = _clean(re.sub(r"^\s*(?:(?:on|to)\s+(?:x|twitter)\b\s*[:,]?\s*)", "", str(raw or ""), flags=re.I))
+    if not text or reading.is_referent(text):
+        raise reading.Ask(_WHAT_TO_POST)
+    return {"text": text}
+
+
+def _bare_publish(m: "re.Match[str]") -> dict[str, Any]:
+    raise reading.Ask(_WHAT_TO_POST)
+
+
+def _schedule_args(m: "re.Match[str]") -> dict[str, Any]:
+    rest = str(m["rest"] or "")
+    cut = re.search(r"\s*,?\s*\b(?:saying|that\s+says|which\s+says|with\s+the\s+words)\b\s*:?\s*|\s*:\s*", rest, re.I)
+    if cut:
+        moment, text = rest[:cut.start()], rest[cut.end():]
+    else:
+        moment, text = "", rest
+    if not reading.clean(moment):
+        tail = re.search(r"\s+((?:for|at|by|in|tomorrow|tonight|this)\b.*)$", text, re.I)
+        if tail:
+            try:
+                at = reading.when(tail.group(1))
+                text = text[:tail.start()]
+            except ValueError:
+                at = ""
+        else:
+            at = ""
+    else:
+        at = reading.when(moment)
+    text = _clean(text)
+    if not at:
+        raise reading.Ask("When should it go out, Emperor? Give me a time.")
+    if not text or reading.is_referent(text):
+        raise reading.Ask("What should it say, Emperor?")
+    return {"text": text, "at": at}
+
+
+def _draft_args(m: "re.Match[str]") -> dict[str, Any]:
+    refs = reading.referents()
+    if refs and refs[0].kind == "email":
+        raise reading.Ask(reading.EMAIL_REPLY_LINE)
+    ref = str(m["ref"] or "").strip().lower()
+    out: dict[str, Any] = {}
+    if ref.isdigit() and len(ref) >= 5:
+        out["post_id"] = ref
+    else:
+        from core.tools import x_tools
+        from core.tools.base import ToolError
+        try:
+            picked = x_tools._from_last_read(_ordinal(ref or "1"))
+        except ToolError:
+            raise reading.Ask("I have not read any posts yet, Emperor. Which one do you mean?") from None
+        out["post_id"] = str(picked.get("id"))
+    guidance = _clean(m["g"] or "")
+    if guidance:
+        out["guidance"] = guidance
+    return out
+
+
+def _own_posts(m: "re.Match[str]") -> dict[str, Any]:
+    from . import style
+    handle = str(getattr(getattr(style, "_ACTIVE", None), "owner_handle", "") or "").lstrip("@")
+    if not handle:
+        raise reading.Ask("Which account is yours on X, Emperor? Say read, then your @name's posts.")
+    return {"handle": handle}
+
+
+def _profile_name(m: "re.Match[str]") -> dict[str, Any]:
+    named = re.search(r"\b(?:called|named)\s+(?P<n>[\w][\w -]{0,29}?)\s*[.!?]*$", m.string or "", re.I)
+    return {"name": _clean(named["n"])} if named else {}
+
+
+def _screen_image(m: "re.Match[str]") -> dict[str, Any]:
+    return {"path": reading.path_target(m["what"])}
+
+
+def _find_args(raw: str | None) -> dict[str, Any]:
+    name = _clean(raw or "")
+    if not name or not _is_nameable(name):
+        raise ValueError("not a process")
+    return {"name": name}
+
+
+def _top_args(m: "re.Match[str]") -> dict[str, Any]:
+    return {"by": "cpu" if re.search(r"\b(?:cpu|processor)\b", m.string or "", re.I) else "memory"}
+
+
+def _search_name(raw: str | None) -> str:
+    rest, where, _prep = reading.split_place(raw or "", ui=False)
+    return _clean(rest if where is not None and rest else raw)
 
 
 def _clean(s: str) -> str:
@@ -156,6 +267,9 @@ _ACCOUNT_NAME = (r"(?!(?:the|a|an|it|that|this|these|those|he|she|they|them|you|
 _ASK_LEAD = (r"^\s*(?:tessa[,\s]+)?(?:(?:abeg|pls|please)[,\s]+)?"
              r"(?:(?:can|could|would|will)\s+you\s+(?:please\s+)?|help\s+me\s+|make\s+you\s+|go\s+(?:and\s+)?)?")
 _ASK_TAIL = r"(?:\s+(?:please|pls|abeg|for\s+me))*\s*[.!?]*\s*$"
+_PUB_LEAD = (r"^\s*(?:[A-Za-z'’]{2,12}\s*,\s*)?(?:tessa[,\s]+)?(?:(?:abeg|pls|please)[,\s]+)?"
+             r"(?:(?:can|could|would|will)\s+you\s+(?:please\s+)?|help\s+me\s+|make\s+you\s+|"
+             r"go\s+(?:ahead\s+)?(?:and\s+)?)?")
 
 
 def _like_by_author(m: "re.Match[str]") -> dict[str, Any]:
@@ -402,51 +516,8 @@ def _kill_name(raw: str | None) -> dict[str, Any]:
     return {"name": name}
 
 
-def _split_where(phrase: str) -> tuple[str, str]:
-    """
-    "notes in documents" -> ("notes", "documents"). The LAST " in " wins, so a
-    name containing the word survives ("build in progress in documents").
-    Returns ("", "") for the name when there is nothing left.
-    """
-    text = _clean(phrase)
-    lowered = text.lower()
-    cut = lowered.rfind(" in ")
-    if cut == -1:
-        return text, ""
-    return _clean(text[:cut]), _clean(text[cut + 4:])
-
-
 def _create_path(phrase: str) -> str:
-    """
-    A spoken "<name> [in <folder>]" to a full path.
-
-    Resolution is Python's, never the model's: `folder_for` is the same alias
-    resolver "open my downloads" uses, so "documents", "downloads" and "my
-    desktop" all land where he means. An unrecognised destination falls back to
-    Documents rather than guessing at the filesystem root.
-
-    Raises ValueError when there is no usable name, which `match()` treats as
-    "this rule did not fire" — so a garbled create falls through to UNROUTED
-    instead of making a folder called nothing.
-    """
-    name, where = _split_where(phrase)
-    if not name:
-        raise ValueError("no name to create")
-    # A name carrying a separator is a PATH he read out, not a name.
-    if any(sep in name for sep in ("\\", "/", ":")):
-        return name
-    if any(ch in name for ch in '<>:"|?*'):
-        raise ValueError(f"not a usable name: {name!r}")
-    base = None
-    if where:
-        hit = folder_for(where)
-        if hit is not None:
-            base = Path(str(hit))
-        elif any(sep in where for sep in ("\\", "/", ":")):
-            base = Path(where)
-    if base is None:
-        base = Path.home() / "Documents"
-    return str(base / name)
+    return reading.new_path(phrase)
 
 
 def _code_path(phrase: str) -> str:
@@ -460,9 +531,13 @@ def _code_path(phrase: str) -> str:
     ever ADD precision; it cannot take a phrase away from what handled it
     before.
     """
-    text = _clean(phrase)
+    text = reading.unaddressed(phrase)
     if not text:
         raise ValueError("no target")
+    rest, where, _prep = reading.split_place(text, ui=False)
+    if where is not None:
+        name = reading.bare_name(rest)
+        return str(where / name) if name and not reading.is_referent(name) else str(where)
     # Strip the filler he actually says: "the tessa project", "my notes file".
     stripped = re.sub(r"^(?:the|my|this|that)\s+", "", text, flags=re.I)
     stripped = re.sub(r"\s+(?:project|folder|repo|repository|file)$", "", stripped, flags=re.I)
@@ -474,7 +549,7 @@ def _code_path(phrase: str) -> str:
     # VS Code branch, which opens the editor itself — the existing behaviour.
     if not _is_nameable(stripped):
         raise ValueError(f"{stripped!r} is a pronoun, not a target")
-    hit = folder_for(stripped)
+    hit = reading.folder_of(text) or reading.folder_of(stripped)
     if hit is not None:
         return str(hit)
     # Something the index knows. Names only — the index never opens a file.
@@ -800,12 +875,306 @@ def _delay_args(m: re.Match[str]) -> dict[str, Any]:
     return {"delay_s": int(round(n * mult))}
 
 
+_CODE_EXT = r"(?:py|js|mjs|cjs|ts|mts|java|c|cpp|cc|cxx|cs|go|rs|php|rb|ps1|bat|cmd|sh|f90|f95|f|pl|lua|r|jl)"
+_CODE_LEAD = r"^\s*(?:please\s+)?(?:(?:can|could|would|will)\s+you\s+(?:please\s+)?)?"
+_FOREVER = re.compile(r"\b(?:forever|indefinitely|non-?stop|for\s+ever|without\s+(?:a\s+)?(?:limit|stopping|end)|"
+                      r"until\s+i\s+(?:say|tell\s+you)|all\s+(?:day|night))\b", re.I)
+_CODE_LIMIT = re.compile(r"\s*,?\s*\b(?:for|give\s+it|with\s+a\s+(?:time\s+)?limit\s+of|up\s+to)\s+(?P<n>\d+|an?|one|two|"
+                         r"three|four|five|six|seven|eight|nine|ten|eleven|twelve|fifteen|twenty|thirty|forty|"
+                         r"forty[- ]five|fifty|sixty|ninety|half\s+an?)\s*(?P<u>seconds?|secs?|minutes?|mins?|"
+                         r"hours?|hrs?)\b", re.I)
+TOO_LONG = "The longest I let a program run in this step is ten minutes, Emperor. Shall I give it ten?"
+GIT_REFUSED = ("I cannot do that in this step, Emperor. Force pushes, hard resets, cleans and anything that rewrites "
+               "history or throws work away are off: my rule is the Recycle Bin, never a hard delete.")
+
+
+def _code_limit(text: str) -> tuple[int | None, str]:
+    t = str(text or "")
+    if _FOREVER.search(t):
+        raise reading.Ask(TOO_LONG)
+    m = _CODE_LIMIT.search(t)
+    if not m:
+        return None, t
+    raw = m.group("n").lower()
+    n: float
+    if raw.startswith("half"):
+        n = 0.5
+    elif raw in ("a", "an"):
+        n = 1
+    else:
+        v = _spoken_number(raw)
+        if v is None:
+            raise ValueError("not a time")
+        n = v
+    unit = m.group("u").lower()
+    secs = int(round(n * (3600 if unit.startswith("h") else 60 if unit.startswith("m") else 1)))
+    if secs > 600:
+        raise reading.Ask(TOO_LONG)
+    return max(1, secs), (t[:m.start()] + t[m.end():]).strip()
+
+
+def _code_argv(text: str) -> list[str]:
+    out = []
+    for q2, q1, bare in re.findall(r'"([^"]*)"|\'([^\']*)\'|(\S+)', str(text or "")):
+        word = q2 or q1 or bare
+        if bare and bare.lower() in ("and", ","):
+            continue
+        out.append(word.rstrip(",") if bare else word)
+    return out
+
+
+def _code_language(raw: str | None) -> str | None:
+    from core.tools import langs
+
+    return langs.canonical(raw) if raw else None
+
+
+def _languages_args(m: "re.Match[str]") -> dict[str, Any]:
+    gd = m.groupdict()
+    out: dict[str, Any] = {}
+    if gd.get("lang"):
+        if _code_language(gd["lang"]) is None:
+            raise ValueError("not a language")
+        out["language"] = gd["lang"].strip().lower()
+    if re.search(r"\bagain\b|\bre-?check\b|\bnew\b", m.string, re.I):
+        out["look_again"] = True
+    return out
+
+
+def _write_args(m: "re.Match[str]") -> dict[str, Any]:
+    lang_raw = re.sub(r"\s+script$", "", (m["lang"] or "").strip().lower())
+    rest = str(m["rest"] or "")
+    language = None
+    if lang_raw:
+        if _code_language(lang_raw) is None:
+            raise ValueError("not a language")
+        language = lang_raw
+    m_in = re.match(r"^\s*(?:in|using)\s+(?P<l>[\w#+.]+)(?:\s+script)?(?P<r>(?:\s.*)?)$", rest, re.I)
+    if m_in and _code_language(m_in.group("l")):
+        language = language or m_in.group("l").lower()
+        rest = m_in.group("r")
+    if m["kind"].lower() in ("code", "function") and not language and not re.match(
+            r"^\s*,?\s*(?:that|which|to|for)\b", rest, re.I):
+        raise ValueError("not a program request")
+    run = False
+    tail = re.search(r"\s*,?\s*\b(?:and|then)\s+(?:then\s+)?(?:run|execute|try|start)\s+it\b(?P<after>.*)$", rest, re.I)
+    if tail:
+        run = True
+        rest = rest[:tail.start()]
+    task = re.sub(r"^\s*,?\s*(?:that\s+will|that|which|to|for|in\s+order\s+to)\s+", "", rest, flags=re.I)
+    task = _clean(re.sub(r"\s*,?\s*\b(?:please|for\s+me|thanks)\s*$", "", task, flags=re.I))
+    if not task and not language:
+        raise reading.Ask("What should it do, and in which language, Emperor?")
+    if not language:
+        raise reading.Ask("Which language should I write it in, Emperor?")
+    if not task:
+        raise reading.Ask("What should the program do, Emperor?")
+    out: dict[str, Any] = {"language": language, "task": task}
+    if run:
+        out["run"] = True
+    return out
+
+
+def _fix_args(m: "re.Match[str]") -> dict[str, Any]:
+    return {"fix": "last"}
+
+
+def _run_mine_args(m: "re.Match[str]") -> dict[str, Any]:
+    limit, _rest = _code_limit(str(m.groupdict().get("rest") or ""))
+    gd = m.groupdict()
+    out: dict[str, Any] = {"name": gd["name"]} if gd.get("name") else {"which": "last"}
+    if limit:
+        out["timeout_s"] = limit
+    return out
+
+
+def _keep_running(m: "re.Match[str]") -> dict[str, Any]:
+    raise reading.Ask(TOO_LONG)
+
+
+def _run_file_args(m: "re.Match[str]") -> dict[str, Any]:
+    limit, rest = _code_limit(str(m["rest"] or ""))
+    what = str(m["what"]).strip().strip('"')
+    argv: list[str] = []
+    mw = re.search(r"\s*,?\s*\b(?:with|passing|using)\s+(?:the\s+)?(?:arguments?|args?|inputs?|numbers?|values?|"
+                   r"words?)?\s*(?P<a>.+)$", rest, re.I)
+    if mw:
+        argv = _code_argv(mw.group("a"))
+        rest = rest[:mw.start()]
+    phrase = f"{what} {rest}".strip()
+    if re.match(r"^[a-z]:[\\/]", what, re.I):
+        path, how = what, "named"
+    else:
+        _r, where, _p = reading.split_place(phrase, ui=False)
+        how = "named" if (where is not None or reading.literal_path(phrase)) else "search"
+        path = reading.path_target(phrase)
+    if not re.search(rf"\.{_CODE_EXT}$", path, re.I):
+        raise ValueError("not a source file")
+    out: dict[str, Any] = {"path": path, "how": how}
+    if argv:
+        out["argv"] = argv
+    if limit:
+        out["timeout_s"] = limit
+    return out
+
+
+def _run_it_args(m: "re.Match[str]") -> dict[str, Any]:
+    limit, _rest = _code_limit(str(m["rest"] or ""))
+    from core.tools import coding
+
+    mine = {os.path.normcase(p) for _t, p in coding.recent_written()}
+    for r in reading.referents():
+        if r.kind == "file" and re.search(rf"\.{_CODE_EXT}$", r.value, re.I):
+            if os.path.normcase(r.value) in mine:
+                out: dict[str, Any] = {"path": r.value}
+                if limit:
+                    out["timeout_s"] = limit
+                return {"_tool": "code.run_mine", **out}
+            out = {"path": r.value, "how": "it"}
+            if limit:
+                out["timeout_s"] = limit
+            return out
+    raise reading.Ask("Which file, Emperor? Name it and the folder it is in.")
+
+
+def _git_folder(where: str | None, ask: bool = True) -> str:
+    w = reading.unaddressed(where or "")
+    if not w:
+        if ask:
+            raise reading.Ask("Which folder, Emperor?")
+        raise ValueError("no folder")
+    hit = reading.place_of(w) or reading.folder_of(w)
+    if hit is None:
+        rest, place, _p = reading.split_place(w, ui=False)
+        hit = place / reading.bare_name(rest) if place is not None and reading.bare_name(rest) else place
+    if hit is None and reading.is_referent(w):
+        hit = Path(reading.referent_value(w, ("folder",)))
+    if hit is None:
+        if ask:
+            raise reading.Ask(f"Which folder is {w}, Emperor? Name it or give me its path.")
+        raise ValueError("not a folder")
+    return str(hit)
+
+
+def _git_args(action: str) -> Builder:
+    def build(m: "re.Match[str]") -> dict[str, Any]:
+        gd = m.groupdict()
+        out: dict[str, Any] = {"action": action, "folder": _git_folder(gd.get("where"))}
+        n = gd.get("n") or gd.get("n2")
+        if n:
+            v = _spoken_number(n)
+            if v is None:
+                raise ValueError("not a count")
+            out["n"] = v
+        if gd.get("name"):
+            out["name"] = gd["name"]
+        if gd.get("what"):
+            w = _clean(gd["what"])
+            out["files"] = (["all"] if re.match(r"^(?:all|everything|the\s+changes|all\s+(?:the\s+)?changes|"
+                                                 r"my\s+changes|the\s+files|all\s+(?:the\s+)?files)$", w, re.I)
+                            else _code_argv(w))
+        if gd.get("msg"):
+            out["message"] = _clean(gd["msg"])
+        return out
+    return build
+
+
+def _git_push_args(m: "re.Match[str]") -> dict[str, Any]:
+    return {"folder": _git_folder(m["where"], ask=False)}
+
+
+def _git_refused(m: "re.Match[str]") -> dict[str, Any]:
+    raise reading.Ask(GIT_REFUSED)
+
+
+_GIT_WHERE = r"(?:\s+(?:of|in|for|on|inside)\s+(?P<where>.+?))?\s*[?.!]*$"
+_CODE_RULES: list[tuple[re.Pattern[str], str, Builder, str]] = [
+    (re.compile(_CODE_LEAD + r"(?:run\s+)?(?:git\s+(?:clean|reset|rebase)\b|(?:git\s+)?(?:do\s+a\s+)?(?:force[\s-]*push|"
+                r"push\s+(?:--force|-f)\b|push\b.*\s(?:--force|-f|with\s+force|forcefully)\b|reset\s+--hard|"
+                r"hard[\s-]+reset|clean\s+(?:out\s+)?(?:the\s+|my\s+)?(?:repo|repository|working\s+tree|untracked)|"
+                r"rebase|rewrite\s+(?:the\s+|its\s+)?(?:git\s+)?history|squash\s+(?:the\s+|my\s+)?commits|"
+                r"amend\s+(?:the\s+|my\s+)?(?:last\s+)?commit)\b)", re.I),
+     "git.repo", _git_refused, "Not in this step."),
+    (re.compile(_CODE_LEAD + r"(?:check|look|see|find\s+out)\s+(?:again\s+)?(?:which|what)\s+(?:programming\s+|coding\s+)?"
+                r"(?:languages|compilers|interpreters)\b.*$", re.I),
+     "code.languages", _languages_args, "Looking."),
+    (re.compile(_CODE_LEAD + r"(?:look|check)\s+again\s+(?:for|at)\s+(?:the\s+)?(?:programming\s+)?(?:languages|compilers)"
+                r"\b.*$", re.I),
+     "code.languages", _languages_args, "Looking again."),
+    (re.compile(r"^\s*(?:what|which)\s+(?:programming\s+|coding\s+|computer\s+)?(?:languages|compilers|interpreters)\s+"
+                r"(?:can|do|could|are|have|has|is)\b.*$", re.I),
+     "code.languages", _languages_args, "Looking."),
+    (re.compile(_CODE_LEAD + r"(?:run|execute|compile)\s+(?P<lang>[a-z#+.]+)(?:\s+(?:code|programs?|scripts?|files?))?"
+                r"(?:\s+(?:here|on\s+this\s+(?:laptop|machine|computer|pc)))?\s*[?.!]*$", re.I),
+     "code.languages", _languages_args, "Looking."),
+    (re.compile(r"^\s*(?:do|have)\s+(?:i|you|we)\s+(?:have|got)\s+(?:a|an|any)\s+(?P<lang>[a-z#+.]+)\s+"
+                r"(?:compiler|interpreter|runtime|installed)\b.*$", re.I),
+     "code.languages", _languages_args, "Looking."),
+    (re.compile(r"^\s*is\s+(?P<lang>[a-z#+.]+)\s+installed\b.*$", re.I),
+     "code.languages", _languages_args, "Looking."),
+    (re.compile(_CODE_LEAD + r"(?:fix|repair|correct|debug)\s+(?:the\s+|that\s+|your\s+|my\s+)?(?:program|script|code|bug|"
+                r"error)(?:\s+(?:that\s+)?you\s+(?:just\s+)?(?:wrote|made))?\s*[.!?]*$", re.I),
+     "code.write", _fix_args, "Writing a fix."),
+    (re.compile(_CODE_LEAD + r"(?:write|code|make|create|build)\s+(?:me\s+|us\s+)?(?:an?\s+|the\s+|one\s+|some\s+)?"
+                r"(?:(?:small|simple|tiny|short|quick|little|basic|new)\s+)?(?:(?P<lang>[a-z#+.]+(?:\s+script)?)\s+)?"
+                r"(?P<kind>program|script|function|code)\b(?P<rest>.*)$", re.I),
+     "code.write", _write_args, "Writing it."),
+    (re.compile(_CODE_LEAD + r"keep\s+(?:the\s+|that\s+|your\s+|my\s+)?(?:program|script|code)\b.*\b(?:running|going)\b.*$",
+                re.I),
+     "code.run_mine", _keep_running, "Not forever."),
+    (re.compile(_CODE_LEAD + r"(?:run|execute|start|try)\s+(?:the\s+|that\s+|your\s+)?(?:new\s+)?(?:program|script|code|one)\s+"
+                r"(?:that\s+)?you\s+(?:just\s+)?(?:wrote|made|created)(?:\s+(?:me|for\s+me))?(?P<rest>.*)$", re.I),
+     "code.run_mine", _run_mine_args, "Putting it on the card."),
+    (re.compile(_CODE_LEAD + r"(?:run|execute|start|try)\s+(?P<name>[\w-]+\." + _CODE_EXT + r")\s+(?:from|in)\s+(?:your|the|my)\s+"
+                r"(?:own\s+)?(?:tessa\s+)?code\s+folder(?P<rest>.*)$", re.I),
+     "code.run_mine", _run_mine_args, "Putting it on the card."),
+    (re.compile(_CODE_LEAD + r"(?:run|execute|start)\s+your\s+(?P<name>[\w-]+)\s+(?:program|script)(?P<rest>.*)$", re.I),
+     "code.run_mine", _run_mine_args, "Putting it on the card."),
+    (re.compile(_CODE_LEAD + r"(?:run|execute|start|launch|try(?:\s+out)?)\s+(?:the\s+(?:file|script|program)\s+|my\s+)?"
+                r"(?P<what>\"[^\"]+\." + _CODE_EXT + r"\"|[a-z]:[\\/][^\"]*?\." + _CODE_EXT + r"|[^\s\"']+?\." + _CODE_EXT
+                + r")(?=\s|$|[,.!?])(?P<rest>.*)$", re.I),
+     "code.run_file", _run_file_args, "Running it."),
+    (re.compile(_CODE_LEAD + r"(?:run|execute|try)\s+(?:it|that|this|that\s+one|this\s+one|the\s+(?:file|script|program|code)|"
+                r"that\s+(?:file|script|program)|this\s+(?:file|script|program))(?P<rest>(?:\s.*)?)$", re.I),
+     "code.run_file", _run_it_args, "Running it."),
+    (re.compile(r"^\s*(?:please\s+)?(?:(?:show|tell)\s+(?:me\s+)?)?(?:what(?:'s|\s+is)\s+)?(?:the\s+)?git\s+status" + _GIT_WHERE,
+                re.I),
+     "git.repo", _git_args("status"), "Checking."),
+    (re.compile(r"^\s*(?:please\s+)?(?:show|list|give|tell)\s+(?:me\s+)?(?:the\s+)?(?:last\s+(?P<n>\w+)\s+|latest\s+"
+                r"(?P<n2>\w+)\s+|recent\s+)?commits?\s+(?:in|of|for|on)\s+(?P<where>.+?)\s*[?.!]*$", re.I),
+     "git.repo", _git_args("log"), "Checking."),
+    (re.compile(r"^\s*(?:please\s+)?(?:show\s+(?:me\s+)?)?(?:the\s+)?git\s+(?:log|history)" + _GIT_WHERE, re.I),
+     "git.repo", _git_args("log"), "Checking."),
+    (re.compile(r"^\s*(?:please\s+)?(?:show\s+(?:me\s+)?)?(?:the\s+)?git\s+diff" + _GIT_WHERE, re.I),
+     "git.repo", _git_args("diff"), "Checking."),
+    (re.compile(r"^\s*(?:please\s+)?(?:show|list|what\s+are)\s+(?:me\s+)?(?:the\s+)?(?:git\s+)?branches\s+(?:in|of|for|on)\s+"
+                r"(?P<where>.+?)\s*[?.!]*$", re.I),
+     "git.repo", _git_args("branches"), "Checking."),
+    (re.compile(r"^\s*(?:please\s+)?(?:create|make|start)\s+(?:a\s+)?(?:new\s+)?(?:git\s+)?branch\s+(?:called\s+|named\s+)?"
+                r"(?P<name>[\w./-]+)\s+(?:in|for|on)\s+(?P<where>.+?)\s*[?.!]*$", re.I),
+     "git.repo", _git_args("branch"), "Making it."),
+    (re.compile(r"^\s*(?:please\s+)?(?:switch|change|check\s*out)\s+(?:to\s+)?(?:the\s+)?(?:git\s+)?branch\s+"
+                r"(?P<name>[\w./-]+)\s+(?:in|for|on)\s+(?P<where>.+?)\s*[?.!]*$", re.I),
+     "git.repo", _git_args("switch"), "Switching."),
+    (re.compile(r"^\s*(?:please\s+)?(?:stage|git\s+add)\s+(?P<what>.+?)\s+(?:in|for|on)\s+(?P<where>.+?)\s*[?.!]*$", re.I),
+     "git.repo", _git_args("add"), "Staging."),
+    (re.compile(r"^\s*(?:please\s+)?commit\s+(?:the\s+|my\s+|all\s+(?:the\s+|my\s+)?)?(?:changes?|work|files?|everything)?\s*"
+                r"(?:in|for|on|to)\s+(?P<where>.+?)(?:\s*,?\s*(?:with\s+(?:the\s+)?(?:message|note|comment)|saying|:)\s*"
+                r"(?P<msg>.+))?\s*$", re.I),
+     "git.repo", _git_args("commit"), "Checking what it includes."),
+    (re.compile(r"^\s*(?:please\s+)?(?:git\s+)?push\s+(?:the\s+|my\s+)?(?P<where>.+?)(?:\s+(?:up\s+)?to\s+(?:github|gitlab|"
+                r"bitbucket|origin|the\s+remote|online|the\s+internet))?\s*[?.!]*$", re.I),
+     "git.push", _git_push_args, "Putting it on the card."),
+]
+
+
 _RULES: list[tuple[re.Pattern[str], str, Builder, str]] = [
+    *_CODE_RULES,
 
     # ── SHELL. Anchored, so only a sentence that STARTS with the verb is a
     #    command. "what's running" and "run of the mill" cannot reach it.
     (re.compile(r"^(?:run|execute)\s+(?P<cmd>\S.*)$", re.I),
-     "shell.execute", lambda m: {"command": _clean(m["cmd"])},
+     "shell.execute", _shell_args,
      "Reading that back."),
 
     # ── DIRECT MESSAGES (X features round 4, the LAST, 2026-09-12): read
@@ -888,6 +1257,9 @@ _RULES: list[tuple[re.Pattern[str], str, Builder, str]] = [
                 r"(?:dms?|d\.m\.s?|direct\s+messages?|messages?)(?:\s+on\s+(?:x|twitter))?\s*[.!?]*\s*$)", re.I),
      "x.read_dm", lambda m: {"handle": (m["h"] or m["h2"] or m["h3"] or "").lstrip("@")},
      "Reading your messages."),
+    (re.compile(r"\b(?:e-?mails?|inbox|mail\s*box|gmail|outlook|mail)\b", re.I),
+     "mail.read", _email_cannot,
+     "Checking."),
 
     # ── THE PROFILE HEADER (the sentences round, 2026-10-06). AN @HANDLE IS AN
     #    X SIGNAL ON ITS OWN: his "read @mcityXtra_ bio and tell me what's in
@@ -991,7 +1363,7 @@ _RULES: list[tuple[re.Pattern[str], str, Builder, str]] = [
     #    the capabilities are split.
     (re.compile(r"\b(?:create|make|set\s+up)\b[^.]*\b(?:your|a|her)\b[^.]*"
                 r"\b(?:chrome\s+)?profile\b", re.I),
-     "system.chrome.create_profile", lambda m: {},
+     "system.chrome.create_profile", _profile_name,
      "Making it."),
     (re.compile(r"\b(?:list|what|which|show)\b[^.]*\b(?:chrome\s+)?profiles?\b", re.I),
      "system.chrome.list_profiles", lambda m: {},
@@ -1298,6 +1670,30 @@ _RULES: list[tuple[re.Pattern[str], str, Builder, str]] = [
                 rf"{_WHATS}\s+(?:on|happening\s+on)\s+(?:x|twitter))\b", re.I),
      "x.read_timeline", lambda m: {},
      "Reading it."),
+    (re.compile(_PUB_LEAD + r"schedule\s+(?:a\s+|the\s+|this\s+|my\s+)?(?:tweet|post)(?:\s+(?:on|to)\s+(?:x|twitter))?"
+                r"\s+(?P<rest>\S.*)$", re.I),
+     "system.x.post_tweet", _schedule_args,
+     "Reading it back."),
+    (re.compile(r"\b(?:what|which|any|how\s+many|have\s+i\s+got|do\s+i\s+have|show\s+me|list|check)\b[^.]*"
+                r"\b(?:tweets?|posts?)\b[^.]*\b(?:scheduled|queued|lined\s+up|waiting|pending|planned|coming\s+up|"
+                r"for\s+later)\b|\b(?:scheduled|queued)\s+(?:tweets?|posts?)\b|\bschedule\s+status\b|"
+                rf"{_WHATS}\s+(?:queued|scheduled)\b", re.I),
+     "system.x.schedule_status", lambda m: {},
+     "Checking."),
+    (re.compile(r"\b(?:what|how\s+many|which|show\s+me|read\s+me|list)\b[^.]*\b(?:tweets?|posts?)\b[^.]*"
+                r"\b(?:have|did|had)\s+i\s+(?:posted|tweeted|put\s+out|sent|made|post|tweet)\b|"
+                r"\b(?:what|how\s+many)\b[^.]*\b(?:did|have)\s+i\s+(?:post|tweet)(?:ed)?\b|"
+                r"\bmy\s+(?:latest|last|recent|own)\s+(?:tweets?|posts?)\b", re.I),
+     "x.read_user", _own_posts,
+     "Reading your posts."),
+    (re.compile(r"\b(?:draft|write|compose|prepare)\s+(?:me\s+)?(?:a\s+|the\s+)?(?:draft\s+)?(?:reply|response)"
+                r"(?:\s+(?:to|for)\s+(?:the\s+|that\s+|this\s+)?(?:post\s+|tweet\s+)?"
+                r"(?P<ref>\d{5,25}|\d{1,2}|first|second|third|fourth|fifth|one|two|three|four|five|that|this|it)?"
+                r"(?:\s+(?:one|post|tweet))?)?(?:\s+in\s+my\s+(?:own\s+)?(?:voice|style|words))?"
+                r"(?:\s+(?:saying|with|about|that\s+says)\s+(?P<g>.+?))?"
+                + _ASK_TAIL, re.I),
+     "system.x.draft_reply", _draft_args,
+     "Drafting it."),
     (re.compile(_ASK_LEAD + r"(?:reply|respond)\s+(?:with\s+|saying\s+)?"
                 r"(?:'(?P<t1>[^']{1,280})'|\"(?P<t2>[^\"]{1,280})\"|“(?P<t3>[^”]{1,280})”|‘(?P<t4>[^’]{1,280})’)"
                 r"\s+to\s+" + _REPLY_TARGET + _ON_X + _ASK_TAIL, re.I),
@@ -1312,13 +1708,13 @@ _RULES: list[tuple[re.Pattern[str], str, Builder, str]] = [
     # "two with thanks" — which would have queued a public tweet reading "two
     # with thanks" for approval. Both halves of the fix are needed: ordering
     # alone leaves the collision live for any phrasing reply misses.
-    (re.compile(r"\breply\b\s+(?:to\s+)?(?:the\s+|that\s+|post\s+)?"
+    (re.compile(_ASK_LEAD + r"reply\b\s+(?:to\s+)?(?:the\s+|that\s+|post\s+)?"
                 r"(?P<idx>\d+|first|second|third|one|two|three)?\s*(?:with|saying)?\s*"
                 r"(?P<text>.*)$", re.I),
-     "x.reply", lambda m: {"index": _ordinal(m["idx"]), "text": _clean(m["text"] or "")},
+     "x.reply", _reply_args,
      "Reading it back."),
     # PLURAL AND COMMA TOLERANT. His real transcript was
-    # "Tessa, Tweets, Data Mbudinon AI Assist" — Whisper wrote the verb as a
+    # a tweet request, not quoted here — Whisper wrote the verb as a
     # plural noun and put a comma where he paused. The old rule required
     # `tweet` followed by whitespace, matched none of it, and the utterance
     # fell through to UNROUTED: he got "I caught that. Not yet." instead of
@@ -1337,23 +1733,27 @@ _RULES: list[tuple[re.Pattern[str], str, Builder, str]] = [
     # where the words start and stop — so it is x.post (red, the card), never
     # a profile read because an @name sits inside the words. Needs the quote
     # marks: "post office opening times" stays where it was.
+    (re.compile(_PUB_LEAD + r"(?:post|tweet|publish)\s+(?:that|this|it)(?:\s+(?:on|to)\s+(?:x|twitter))?" + _ASK_TAIL,
+                re.I),
+     "x.post", _bare_publish,
+     "Reading it back."),
     (re.compile(r"^\s*(?:tessa[,\s]+)?(?:please\s+)?(?:post|put\s+up|publish)\s*(?:this\s*)?(?:on\s+(?:x|twitter)\s*)?"
                 r"[:,]?\s*[\"'“‘](?P<text>[^\"“”]{1,300}?)[\"'”’]\s*(?:(?:on|to)\s+(?:x|twitter))?\s*[.!?]*\s*$", re.I),
      "x.post", lambda m: {"text": _clean(m["text"] or "")},
      "Reading it back."),
-    (re.compile(r"(?!.*\breply\b)\btweets?\b\s*(?:this|that|the following)?\s*"
-                r"(?:to\s+(?:x|twitter))?\s*[:,]?\s*(?P<text>.+)$", re.I),
-     "x.post", lambda m: {"text": _clean(m["text"] or "")},
+    (re.compile(_PUB_LEAD + r"(?!.*\breply\b)(?:send\s+(?:out\s+)?(?:a\s+)?|put\s+out\s+(?:a\s+)?)?tweets?\b\s*"
+                r"(?:this|that|the following)?\s*(?:(?:on|to)\s+(?:x|twitter))?\s*[:,]?\s*(?P<text>.+)$", re.I),
+     "x.post", lambda m: _post_text(m["text"]),
      "Reading it back."),
-    (re.compile(r"(?!.*\breply\b)\bposts?\b\s*"
-                r"(?:(?:this|that|the following)\s*(?:to\s+(?:x|twitter))?|to\s+(?:x|twitter))"
+    (re.compile(_PUB_LEAD + r"(?!.*\breply\b)(?:post|publish|put\s+up)\s+"
+                r"(?:(?:this|that|the\s+following)(?:\s+(?:on|to)\s+(?:x|twitter))?|(?:on|to)\s+(?:x|twitter))"
                 r"\s*[:,]?\s*(?P<text>.+)$", re.I),
-     "x.post", lambda m: {"text": _clean(m["text"] or "")},
+     "x.post", lambda m: _post_text(m["text"]),
      "Reading it back."),
 
     # THE DOMAIN-OPEN RULE SITS ABOVE THE SEARCH RULES, and that ordering is a
-    # bug fix rather than a preference. His "Zoi, OpenGoogle.com" repaired to
-    # "Open Google.com" and then matched the SEARCH rule on the bare word
+    # bug fix rather than a preference. His spoken domain request repaired to
+    # a three-word phrase and then matched the SEARCH rule on the bare word
     # "google", so she searched the web for ".com" instead of opening the site
     # he named. "Open a named host" is more specific than "search for words" and
     # must be tried first.
@@ -1474,6 +1874,14 @@ _RULES: list[tuple[re.Pattern[str], str, Builder, str]] = [
      "system.screen.find",
      lambda m: {"path": (m["p1"] or m["p2"] or m["p3"])},
      "Looking for it."),
+    (re.compile(r"\b(?:find|look\s+for|search\s+for|where\s+is|locate|spot)\s+(?P<what>\S+\.(?:png|bmp|jpe?g)\b.*?)"
+                r"\s+on\s+(?:my\s+|the\s+)?screen\b", re.I),
+     "system.screen.find", _screen_image,
+     "Looking for it."),
+    (re.compile(r"\b(?:find|look\s+for|search\s+for|where\s+is|locate|spot)\s+(?P<what>.+?)\s+on\s+(?:my\s+|the\s+)?"
+                r"screen\b", re.I),
+     "system.screen.read", lambda m: {},
+     "Looking."),
 
     (re.compile(r"\b(?:read|what\s+does)\b.*\b(?:this|that|the)\s+(?:page|site|article|website)\b", re.I),
      "browser.read_page", lambda m: {},
@@ -1674,7 +2082,7 @@ _RULES: list[tuple[re.Pattern[str], str, Builder, str]] = [
     #    and "stop listening" match nothing here and reach STOP / SLEEP after
     #    the tool layer exactly as before.
     #
-    #    ⚠ "go to sleep" IS NOT HERE AND MUST NOT BE. It is how he tells HER to
+    #    ⚠ Her own sleep phrase IS NOT HERE AND MUST NOT BE. It is how he tells HER to
     #    stop listening; routing it to the machine once suspended his laptop
     #    mid-job. Suspending the machine names the machine (`sys.sleep`, below).
     #
@@ -1771,8 +2179,13 @@ _RULES: list[tuple[re.Pattern[str], str, Builder, str]] = [
     (re.compile(r"\b(?:top|heaviest|biggest|worst)\b.*?\b(?:process|processes|by)\b\s*(?P<what>cpu|memory|ram)?", re.I),
      "proc.top", lambda m: {"by": "cpu" if (m["what"] or "").lower() == "cpu" else "memory"},
      "Looking."),
+    (re.compile(r"\b(?:process(?:es)?|apps?|applications?|programs?|tasks?)\b[^.]*\b(?:heaviest|biggest|hungriest|"
+                r"most\s+(?:memory|ram|cpu|processor)|(?:using|eating|taking|hogging)\s+(?:up\s+)?the\s+most)\b|"
+                r"\b(?:heaviest|biggest|hungriest)\s+(?:process(?:es)?|apps?|applications?|programs?|tasks?)\b", re.I),
+     "proc.top", _top_args,
+     "Looking."),
     (re.compile(r"\b(?:is|are)\s+(?P<name>[\w.\- ]{2,30}?)\s+running\b", re.I),
-     "proc.find", lambda m: {"name": _clean(m["name"])},
+     "proc.find", lambda m: _find_args(m["name"]),
      "Checking."),
     (re.compile(r"\bany\s+(?P<name>[\w.\-]{2,30})\s+process(?:es)?\b", re.I),
      "proc.find", lambda m: {"name": _clean(m["name"])},
@@ -1909,14 +2322,14 @@ _RULES: list[tuple[re.Pattern[str], str, Builder, str]] = [
      "Scanning."),
     # SUSPENDING THE MACHINE REQUIRES NAMING THE MACHINE.
     #
-    # This pattern used to include a bare `go to sleep`, and that was a real
-    # collision rather than a stylistic one: "go to sleep" is the most natural
+    # This pattern used to include her own bare sleep phrase, and that was a real
+    # collision rather than a stylistic one: that phrase is the most natural
     # way to tell HER to stop listening, and it resolved to sys.sleep — a GREEN
     # tool, so it executed with no confirmation and suspended his laptop.
     # He would have said four ordinary words and watched the machine go dark
     # mid-job.
     #
-    # Addressed to Tessa, "go to sleep" means Tessa. Suspending the computer is a
+    # Addressed to Tessa, her sleep phrase means her. Suspending the computer is a
     # different and more consequential act, so it now has to say so.
     (re.compile(rf"\b(?:(?:sleep|suspend)\s+{_DET}{_MACHINE}|"
                 rf"(?:put|send)\s+{_DET}{_MACHINE}\s+(?:to|into)\s+sleep|"
@@ -1950,7 +2363,7 @@ _RULES: list[tuple[re.Pattern[str], str, Builder, str]] = [
     # VS CODE BEFORE EVERY OTHER `open`. "open C:\dev\tessa in vscode" used to
     # reach app.open_folder — it saw the path, opened EXPLORER, and dropped the
     # "in vscode" entirely. The rule requires the editor to be named, so a bare
-    # "open vs code" (launch the editor) and "open my downloads" are untouched.
+    # "open vs code" (launch the editor) and "open my pictures" are untouched.
     (re.compile(r"\b(?:open|edit|load|launch)\s+(?P<what>.+?)\s+in\s+"
                 r"(?:vs\s?code|visual\s+studio\s+code|code)\b", re.I),
      "system.code.open", lambda m: {"path": _code_path(m["what"])},
@@ -1961,7 +2374,7 @@ _RULES: list[tuple[re.Pattern[str], str, Builder, str]] = [
     # one step would make a regression impossible to attribute.
     (re.compile(r"\b(?:find|search for|look for|where is)\b\s+(?:a\s+|the\s+|my\s+|any\s+)?"
                 r"(?:file|folder)?\s*(?:called|named)?\s*(?P<name>.+)$", re.I),
-     "system.files.search", lambda m: {"name": _clean(m["name"])},
+     "system.files.search", lambda m: {"name": _search_name(m["name"])},
      "Searching."),
 
     # FILE BEFORE FOLDER, distinguished by the noun he says. Both refuse to
@@ -2043,10 +2456,10 @@ _RULES: list[tuple[re.Pattern[str], str, Builder, str]] = [
      "fs.rename", lambda m: {"path": _need_target(m["what"]), "to": _clean(m["to"])},
      "Renaming it."),
     (re.compile(r"\b(?:move)\s+(?:the\s+|that\s+|my\s+)?(?P<what>.+?)\s+(?:to|into)\s+(?P<to>.+)$", re.I),
-     "fs.move", lambda m: {"path": _need_target(m["what"]), "to": _need_target(m["to"])},
+     "fs.move", _move_args,
      "Moving it."),
     (re.compile(r"\b(?:copy|duplicate)\s+(?:the\s+|that\s+|my\s+)?(?P<what>.+?)\s+(?:to|into)\s+(?P<to>.+)$", re.I),
-     "fs.copy", lambda m: {"path": _need_target(m["what"]), "to": _need_target(m["to"])},
+     "fs.copy", _move_args,
      "Copying it."),
     # `fs.create`'s rule MOVED to the dev/files block above and retargeted to
     # `system.files.create_folder`, which parses "<name> in <folder>" instead
@@ -2059,7 +2472,7 @@ _RULES: list[tuple[re.Pattern[str], str, Builder, str]] = [
     (re.compile(r"\b(?:how\s+big|how\s+much\s+space|size)\b(?!.*\b(?:disk|drive|c\s+drive)\b)"
                 r".*?\b(?:is|of|does)?\s*(?:my\s+|the\s+)?"
                 r"(?P<what>[\w:\\ .\-]+?)(?:\s+folder)?(?:\s+us(?:e|ing))?\s*$", re.I),
-     "fs.usage", lambda m: {"path": _need_target(m["what"])},
+     "fs.usage", lambda m: {"path": _usage_target(m["what"])},
      "Adding it up."),
 
     # `fs.search`'s rule MOVED to the dev/files block above, retargeted to
@@ -2090,7 +2503,7 @@ _RULES: list[tuple[re.Pattern[str], str, Builder, str]] = [
      "Showing you."),
 
     # ── WINDOWS. `close` and `minimise` name a WINDOW, never a process.
-    #    `go to` is deliberately NOT a focus verb: "go to my downloads" is a
+    #    `go to` is deliberately NOT a focus verb: "go to pictures" is a
     #    folder in his vocabulary and always has been, and stealing it here
     #    would have broken a phrase that already worked.
     # ── RESTORE AND SNAP — the two window acts that did not exist.
@@ -2101,29 +2514,30 @@ _RULES: list[tuple[re.Pattern[str], str, Builder, str]] = [
     #    decides) and `proc.kill` (amber, PID only) stay exactly where they are.
     (re.compile(r"\bun-?minimi[sz]e\s+(?P<name>.+?)(?:\s+window)?$"
                 r"|\brestore\s+(?P<n2>.+?)(?:\s+window)?$"
-                r"|\bput\s+(?P<n3>.+?)\s+back(?:\s+up)?$", re.I),
+                r"|\bput\s+(?P<n3>.+?)\s+back(?:\s+up)?$"
+                r"|\bbring\s+(?P<n4>.+?)\s+back(?:\s+up)?(?:\s+(?:from|off|out\s+of)\s+.+)?$", re.I),
      "system.window.restore",
-     lambda m: {"name": _clean(m["name"] or m["n2"] or m["n3"])},
+     lambda m: {"name": reading.window_name(m["name"] or m["n2"] or m["n3"] or m["n4"])},
      "Bringing it back."),
     (re.compile(r"\bsnap\s+(?P<name>.+?)\s+(?:to\s+the\s+|to\s+)?(?P<side>left|right)"
-                r"(?:\s+half|\s+hand\s+side)?$", re.I),
+                r"(?:\s+half|\s+hand\s+side|\s+side)?(?:\s+(?:of|on)\s+(?:the\s+|my\s+)?(?:screen|monitor|display))?"
+                r"(?:\s+(?:please|for\s+me))?\s*[.!?]*$", re.I),
      "system.window.snap",
-     lambda m: {"name": _clean(re.sub(r"\s+window$", "", m["name"], flags=re.I)),
-                "side": m["side"].lower()},
+     lambda m: {"name": reading.window_name(m["name"]), "side": m["side"].lower()},
      "Snapping it."),
 
     (re.compile(r"\bminimi[sz]e\s+(?P<name>.+)$|\bhide\s+(?P<name2>.+)$", re.I),
-     "win.minimise", lambda m: {"name": _clean(m["name"] or m["name2"])},
+     "win.minimise", lambda m: {"name": reading.window_name(m["name"] or m["name2"])},
      "Out of the way."),
     (re.compile(r"\bmaximi[sz]e\s+(?P<name>.+)$|\b(?:full\s?screen)\s+(?P<name2>.+)$", re.I),
-     "win.maximise", lambda m: {"name": _clean(m["name"] or m["name2"])},
+     "win.maximise", lambda m: {"name": reading.window_name(m["name"] or m["name2"])},
      "Full screen."),
     (re.compile(r"\bclose\s+(?:the\s+|my\s+)?(?P<name>.+?)(?:\s+window)?$", re.I),
-     "win.close", lambda m: {"name": _clean(m["name"])},
+     "win.close", lambda m: {"name": reading.window_name(m["name"])},
      "Closing it."),
     (re.compile(r"\b(?:bring|switch to|focus(?:\s+on)?)\s+(?:the\s+|my\s+)?"
                 r"(?P<name>.+?)(?:\s+forward|\s+window)?$", re.I),
-     "win.focus", lambda m: {"name": _clean(m["name"])},
+     "win.focus", lambda m: {"name": reading.window_name(m["name"])},
      "Bringing it up."),
 
 ]
@@ -2163,7 +2577,7 @@ def _is_nameable(value: str) -> bool:
     """
     Could this string plausibly name something on his machine?
 
-    THE BUG THIS EXISTS FOR: Whisper returned "Stop List Me." for "stop
+    THE BUG THIS EXISTS FOR: Whisper returned a three-word garble ending in "me" for "stop
     listening", the `list <thing>` rule matched, and `fs.list` fired with
     `path="Me"`. She answered "That failed, sir. Me is not there." — a garbled
     phrase turned into an action against a nonsense argument, and the error
@@ -2234,6 +2648,7 @@ def match(clause: str) -> ToolCall | None:
 
         from core.tools import REGISTRY
 
+        name = str(args.pop("_tool", name))
         spec = REGISTRY.get(name)
         tier = spec.tier if spec else "green"
         return ToolCall(name=name, args=args, tier=tier, speech=opener)

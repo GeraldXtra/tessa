@@ -37,9 +37,10 @@ from typing import Any, Callable
 
 from core.brain import intent_model
 from core.brain.conversation import CLEARED_LINES, is_clear_request
+from core.brain.humanness import _FENCED
 from core.brain.intents import PRIVATE_UNROUTED, is_private_utterance
 from core.brain.repair import repair, strip_wake_name
-from core.brain.router import Intent, Routed, action_failed, _pick
+from core.brain.router import Intent, Routed, action_failed, _pick, forget_targets, history_kwargs
 from core.brain.tools_local import ToolCall
 from core.brain.unrouted import (Disposition, action_refusal, classify,
                                  unresolved_refusal)
@@ -65,6 +66,8 @@ class TypedTurn:
     #: True when a red-tier action was refused and is waiting on the Orb.
     awaiting_approval: bool = False
     ms: float = 0.0
+    spoken: str | None = None
+    cancelled: bool = False
 
 
 def run_typed_turn(
@@ -76,6 +79,7 @@ def run_typed_turn(
     conversation: Any,
     on_state: Callable[[str], None] | None = None,
     log: Callable[[str], None] | None = None,
+    cancelled: Callable[[], bool] | None = None,
 ) -> TypedTurn:
     """
     Text in, text out. Never raises: a failure is an answer in her register.
@@ -85,9 +89,16 @@ def run_typed_turn(
     """
     t0 = time.monotonic()
     said_log = log or (lambda _m: None)
+    gone = cancelled if cancelled is not None else (lambda: False)
+    voiced: list[tuple[str, str]] = []
     typed = (text or "").strip()
     if not typed:
         return TypedTurn(heard="", said="", intent="empty", ms=0.0)
+
+    def ask(question: str) -> str:
+        shown, spoken = _ask_brain(question, brain, conversation, said_log, gone)
+        voiced.append((shown, spoken))
+        return shown
 
     def state(s: str) -> None:
         if on_state is not None:
@@ -121,6 +132,7 @@ def run_typed_turn(
     # ── 2. "forget that" CLEARS THE THREAD ───────────────────────────────────
     if is_clear_request(typed):
         n = conversation.clear()
+        forget_targets(router)
         line = _pick(CLEARED_LINES)
         return TypedTurn(heard=typed, said=line, intent="memory",
                          ms=(time.monotonic() - t0) * 1000)
@@ -137,7 +149,7 @@ def run_typed_turn(
         executor.last_injection = None
 
     # ── 4. THE ROUTER FIRST. Free, instant, and handles most of what he types.
-    routed: Routed = router.route(typed)
+    routed: Routed = router.route(typed, **history_kwargs(router, conversation))
 
     # ── 4b. A DOUBTED FAST-PATH RESULT GETS A SECOND OPINION ─────────────────
     # The mirror of loop.py's block, same module, same rule: the router says
@@ -157,7 +169,7 @@ def run_typed_turn(
             # silent there would look broken, so it goes to the brain like any
             # other short question.
             if brain is not None:
-                routed.speech = _ask_brain(typed, brain, conversation, said_log)
+                routed.speech = ask(typed)
             else:
                 routed.speech = action_refusal()
         elif is_private_utterance(typed):
@@ -178,7 +190,7 @@ def run_typed_turn(
             elif res.kind == intent_model.KIND_CLARIFY and res.question:
                 routed = Routed(Intent.TOOL, res.question, score=1.0)
             elif res.kind == intent_model.KIND_CHAT or disposition is Disposition.QUESTION:
-                routed.speech = _ask_brain(typed, brain, conversation, said_log)
+                routed.speech = ask(typed)
             else:
                 routed.speech = res.spoken or unresolved_refusal(typed)
         elif disposition is Disposition.UNRESOLVED:
@@ -191,11 +203,14 @@ def run_typed_turn(
                                             # He typed it; see loop.py's twin.
                                             origin="human")])
         elif brain is not None:
-            routed.speech = _ask_brain(typed, brain, conversation, said_log)
+            routed.speech = ask(typed)
 
     # ── 6. THE TOOL PATH. Every tool speaks, success or failure. ─────────────
     tools: list[str] = []
     awaiting = False
+    if gone():
+        return TypedTurn(heard=typed, said="", intent=getattr(routed.intent, "value", str(routed.intent)),
+                         ms=(time.monotonic() - t0) * 1000, cancelled=True)
     if routed.calls or routed.plan:
         state("working")
         results: list[str] = []
@@ -234,6 +249,10 @@ def run_typed_turn(
             flagged = [str(p) for p in pats]
 
     said = (routed.speech or "").strip()
+    spoken = said
+    for shown, voice in voiced:
+        if shown and shown != voice and shown in spoken:
+            spoken = spoken.replace(shown, voice, 1)
     return TypedTurn(
         heard=typed,
         said=said,
@@ -242,11 +261,14 @@ def run_typed_turn(
         flagged=flagged,
         awaiting_approval=awaiting,
         ms=(time.monotonic() - t0) * 1000,
+        spoken=" ".join(_FENCED.sub(" ", spoken).split()),
+        cancelled=gone(),
     )
 
 
 def _ask_brain(question: str, brain: Any, conversation: Any,
-               log: Callable[[str], None]) -> str:
+               log: Callable[[str], None],
+               gone: Callable[[], bool] | None = None) -> tuple[str, str]:
     """
     The model, with tessa.md as the system prompt and the thread in front.
 
@@ -287,11 +309,12 @@ def _ask_brain(question: str, brain: Any, conversation: Any,
         ))
     except LLMUnavailable as exc:
         log(f"typed: brain unavailable — {exc}")
-        return exc.spoken
+        return exc.spoken, exc.spoken
     except Exception as exc:  # noqa: BLE001
         log(f"typed: brain failed {type(exc).__name__}: {exc}")
-        return action_failed(f"my thinking brain errored: {type(exc).__name__}",
-                             "Ask me again, or check the connection.")
+        failed = action_failed(f"my thinking brain errored: {type(exc).__name__}",
+                               "Ask me again, or check the connection.")
+        return failed, failed
     # THE ANTI-AI-TELLS FILTER. tessa.md steers the model away from machine
     # register; this removes what still gets through. It strips only filler
     # that asserts nothing — a "Certainly!" opener, an "I hope this helps"
@@ -300,7 +323,8 @@ def _ask_brain(question: str, brain: Any, conversation: Any,
     # answer into a friendlier wrong one. See core/brain/humanness.py.
     from core.brain import humanness
 
-    result = humanness.humanise("".join(parts))
+    raw = "".join(parts)
+    result = humanness.humanise(raw)
     # WHICH BRAIN ANSWERED, on every typed turn. The voice loop already logs it
     # at the top of the turn; this path did not, and under a quota fallback
     # "why is she suddenly worse" needs to be answerable from the log.
@@ -308,10 +332,12 @@ def _ask_brain(question: str, brain: Any, conversation: Any,
     if not result.clean:
         log(f"typed: humanness {humanness.describe(result)}")
     text = result.text
+    if gone is not None and gone():
+        return "", ""
     if text:
         conversation.add("user", question)
         # A reply written with claims in front of it is claim-DERIVED, like a
         # page summary: re-fenced on replay so it cannot become her own prior
         # word to herself. See conversation.py.
         conversation.add("assistant", text, external=bool(block))
-    return text
+    return text, humanness.spoken_form(raw)

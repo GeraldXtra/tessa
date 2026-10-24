@@ -5,7 +5,7 @@ WHY THIS EXISTS WHEN `browser.search` ALREADY DOES
 
 `browser.search` is correct and it costs 1.5 s of cold launch and ~560 MB of
 resident Chrome. That is the right price for "click the third result and read
-it". It is an absurd price for "what is the weather", which is the exact
+it". It is an absurd price for a plain weather question, which is the exact
 question Gerald asked and got "not yet" for.
 
 DuckDuckGo's `html` endpoint is server-rendered: no JavaScript, no consent
@@ -104,7 +104,7 @@ def search(query: str, limit: int = 4) -> dict[str, Any]:
         raise ToolError("the results page had nothing I could read",
                         "Try different words, or ask me to open the site directly.")
 
-    # SPOKEN ANSWER: the top snippet, because for "what is the weather" the
+    # SPOKEN ANSWER: the top snippet, because for a weather question the
     # answer is usually IN the snippet and reading four link titles aloud is
     # not an answer to a spoken question.
     lead = results[0]["snippet"] or results[0]["title"]

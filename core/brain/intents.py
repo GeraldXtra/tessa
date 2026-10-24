@@ -20,17 +20,17 @@ already happened by the time he notices.
 from __future__ import annotations
 
 import re
+import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from . import phrasings
+from . import phrasings, reading
 from .tools_local import (
     _BROWSERS,
     _KNOWN_FOLDERS,
     ToolCall,
-    folder_for,
     folder_stem,
     fuzzy_match,
     index_start_menu,
@@ -158,6 +158,16 @@ def is_private_utterance(text: str) -> bool:
     return bool(_ONE_JOB.match(t)) and not bool(_TO_SELF.match(t))
 
 
+_CODE_JOB = re.compile(
+    r"^\s*(?:please\s+)?(?:(?:can|could|would|will)\s+you\s+(?:please\s+)?)?(?:"
+    r"(?:write|code|make|create|build)\s+(?:me\s+|us\s+)?(?:an?\s+|the\s+|one\s+|some\s+)?(?:[\w#+.]+\s+){0,3}"
+    r"(?:program|script|function|code)\b|"
+    r"(?:run|execute|start|launch|try)\s+.+?\." + phrasings._CODE_EXT + r"\"?(?:\s+(?:(?!and\b|then\b)\S+\s+)*?)"
+    r"(?:with|passing)\b|"
+    r"commit\b.*\b(?:message|saying)\b|"
+    r"(?:fix|repair)\s+(?:the\s+|that\s+|your\s+|my\s+)?(?:program|script|code)\b)", re.I)
+
+
 def split_clauses(text: str) -> list[str]:
     """
     "open my Tessa console and check my node version" -> two clauses.
@@ -169,7 +179,7 @@ def split_clauses(text: str) -> list[str]:
     A self-correction wins outright — everything before it is discarded, because
     that is what he meant by saying it.
     """
-    if _ONE_JOB.match(text):
+    if _ONE_JOB.match(text) or _CODE_JOB.match(text):
         # A self-correction inside a private message stays inside it ("dm
         # ada saying sorry I'm late" is the message) unless the correction
         # itself starts a new one ("... actually dm bob saying hi").
@@ -295,7 +305,7 @@ def _is_bare_folder(c: str) -> bool:
 
     if c in _FOLDER_ALIASES:
         return True
-    return any(c == name or c == folder_stem(name) for name in _KNOWN_FOLDERS)
+    return any(c == name or c == folder_stem(name) for name in _KNOWN_FOLDERS if name not in ("tessa",))
 
 
 #: A path he SAID, or a drive letter. Item 1g.
@@ -334,13 +344,40 @@ class IntentParser:
         self._index = get_index()
         #: Set per clause by `_parse_one`, read by `parse` — see `Parse.doubt`.
         self.doubt = ""
+        self.recent: list[reading.Referent] = []
+
+    def forget(self) -> None:
+        self.recent = []
+
+    def _referents(self, history: list[str] | None) -> list[reading.Referent]:
+        now = time.time()
+        fresh = [r for r in self.recent if now - r.at < reading.REFERENT_TTL_S]
+        try:
+            from core.tools import coding
+
+            mine = [reading.Referent("file", p, t) for t, p in coding.recent_written()]
+        except Exception:
+            mine = []
+        return sorted(fresh + mine, key=lambda r: -r.at) + reading.history_referents(history)
+
+    def _note(self, calls: list[ToolCall]) -> None:
+        now = time.time()
+        for call in calls:
+            self.recent[:0] = reading.referents_of(call.name, dict(call.args or {}), now)
+        del self.recent[12:]
 
     @property
     def apps(self) -> dict[str, Path]:
         """Back-compat view for anything still expecting the old dict."""
         return {e.key: Path(e.launch) for e in self._index.entries}
 
-    def parse(self, utterance: str) -> Parse:
+    def parse(self, utterance: str, history: list[str] | None = None) -> Parse:
+        with reading.context(self._referents(history)):
+            out = self._parse(utterance)
+        self._note(out.calls + [s.call for s in out.plan])
+        return out
+
+    def _parse(self, utterance: str) -> Parse:
         out = Parse()
         # A TRAILING "and tell me what's in it" REPORTS the action before it;
         # it is not a second command (see `_REPORT_TAIL`). Never the first.
@@ -399,7 +436,10 @@ class IntentParser:
         # below is broad keyword matching that WOULD shadow the new surface —
         # `\b(disk|storage|space|drive)\b` alone would swallow "how much space
         # is my downloads folder using" and answer about the C: volume.
-        call = phrasings.match(clause)
+        try:
+            call = phrasings.match(clause)
+        except reading.Ask as ask:
+            return None, ask.line
         if call is not None:
             return call, None
 
@@ -471,7 +511,8 @@ class IntentParser:
         # previously fell through to a fuzzy app match that scored 0.56 against
         # "Visual Studio Code" and lost, so she said she could not do it.
         if re.search(r"\b(vs ?code|visual studio code|vscode|in code)\b", c):
-            target = self._folder_from(c)
+            target = self._folder_from(re.sub(r"\b(?:open|launch|start|show)?\s*(?:(?:in|with)\s+)?(?:vs ?code|"
+                                              r"visual studio code|vscode|code)\b", " ", c))
             if target is not None:
                 return ToolCall("app.open_vscode", {"path": str(target)},
                                 speech="Opening in VS Code."), None
@@ -480,7 +521,10 @@ class IntentParser:
 
         # ── folders ─────────────────────────────────────────────────────────
         if re.search(r"\b(open|show|go to|take me to)\b", c) or _is_bare_folder(c):
-            target = self._folder_from(c)
+            try:
+                target = self._open_target(clause)
+            except reading.Ask as ask:
+                return None, ask.line
             if target is not None:
                 return ToolCall("app.open_folder", {"path": str(target)},
                                 speech="Opening it."), None
@@ -508,7 +552,8 @@ class IntentParser:
             # `appindex.resolve` does its own query normalisation — including
             # dropping category nouns like "browser", which is the whole of the
             # Chrome fix — so nothing is stripped here first.
-            entries, how = self._index.resolve(clause)
+            rest, _where, prep = reading.split_place(reading.unaddressed(clause))
+            entries, how = self._index.resolve(rest if prep and rest else reading.unaddressed(clause))
             if len(entries) == 1:
                 e = entries[0]
                 if how.startswith("fuzzy"):
@@ -532,17 +577,42 @@ class IntentParser:
 
     @staticmethod
     def _folder_from(c: str) -> Path | None:
-        # OPTIONAL TRAILING 's' AND SPOKEN ALIASES, both from `folder_for` so
-        # there is ONE resolver rather than two that drift. Whisper dropped the
-        # plural on a real turn — "Open my download." for "open my downloads" —
-        # and the folder then failed to match, so a command that had worked a
-        # minute earlier became UNROUTED. Aliases are the same failure one step
-        # out: he says photos, the folder is called Pictures.
-        hit = folder_for(c)
+        t = reading.unaddressed(c)
+        hit = reading.folder_of(t)
         if hit is not None:
             return hit
+        rest, where, _prep = reading.split_place(t, ui=False)
+        if where is not None and not reading.bare_name(rest):
+            return where
         m = re.search(r"([a-z]:\\[^\s\"']+)", c, re.I)
         if m:
             p = Path(m.group(1))
             return p if p.exists() else None
+        return None
+
+    @staticmethod
+    def _open_target(clause: str) -> Path | None:
+        m = re.search(r"\b(?:open|show(?:\s+me)?|go\s+to|take\s+me\s+to)\s+(?P<o>.+)$", clause, re.I)
+        obj = reading.unaddressed(m.group("o") if m else clause)
+        rest, _where, prep = reading.split_place(obj)
+        if prep == "ui" and rest:
+            obj = rest
+        if not obj:
+            return None
+        if reading.is_referent(obj):
+            return Path(reading.referent_value(obj, ("folder", "file") if obj.lower() in ("it", "that", "this")
+                                               else None))
+        hit = reading.folder_of(obj)
+        if hit is not None:
+            return hit
+        rest, where, _prep = reading.split_place(obj, ui=False)
+        if where is None:
+            return None
+        name = reading.bare_name(rest)
+        if not name or reading._BULK.match(name):
+            return where
+        if reading.is_referent(name):
+            return Path(reading.referent_value(name))
+        if reading._FILEISH.search(name) or (where / name).exists():
+            return where / name
         return None

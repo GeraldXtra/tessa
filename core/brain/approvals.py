@@ -14,7 +14,7 @@ arguments, and the provenance in front of him.
 
 A spoken "yes" is none of that. It has no requestId, no visible arguments, no
 provenance display, and — the part that matters most on this machine — it comes
-through a microphone that has produced "Alicoy" and "The game is over" from
+through a microphone that has produced "Alicoy" and a sentence he never said from
 ordinary sentences. Voice confirmation is a convenience, not a control.
 
 SO: RED TOOLS DO NOT EXECUTE HERE. They raise a request, audit it, and stop.
@@ -304,7 +304,7 @@ def iso_in(seconds: float) -> str:
 #: It has to do three things at once: refuse, explain that the refusal is
 #: deliberate rather than a failure, and say what would change it. A refusal he
 #: reads as a bug gets worked around; a refusal he understands gets respected.
-def red_refusal(tool: str, detail: str) -> str:
+def red_refusal(tool: str, detail: str, editable: bool = True) -> str:
     """
     THE OLD VERSION SAID "the approval card does not exist yet", AND THAT
     BECAME FALSE.
@@ -321,6 +321,9 @@ def red_refusal(tool: str, detail: str) -> str:
     exactly the kind of drift a single session cannot see.
     """
     what = detail.strip().rstrip(".") if detail else tool
+    if not editable:
+        return (f"I have it ready, Emperor — {what}. I am not doing it on your voice alone. "
+                f"Check it on the card and approve it there. Nothing on that card can be changed.")
     return (f"I have it ready, Emperor — {what}. I am not doing it on your voice alone. "
             f"Check it on the card and approve it there. You can correct the wording "
             f"before it goes.")

@@ -26,7 +26,7 @@ from typing import Any
 
 import psutil
 
-from .base import ToolError
+from .base import ToolError, ToolHold
 
 user32 = ctypes.windll.user32
 
@@ -184,7 +184,7 @@ def lock() -> dict[str, Any]:
     return {}
 
 
-def sleep() -> dict[str, Any]:
+def sleep(confirmed: bool = False) -> dict[str, Any]:
     """
     Suspend to RAM.
 
@@ -199,5 +199,7 @@ def sleep() -> dict[str, Any]:
     mistranscription is about thirty seconds of annoyance, against the cost of
     a confirmation on every single use. Not worth the friction.
     """
+    if not confirmed:
+        raise ToolHold("That puts the laptop to sleep")
     ctypes.windll.powrprof.SetSuspendState(0, 0, 0)
     return {}

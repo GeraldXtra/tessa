@@ -3,7 +3,7 @@ core/brain/unrouted.py — what to do when the local router has no match.
 
 THE BUG THIS FILE EXISTS TO FIX
 
-Gerald asked "Tessa, what is a closure in JavaScript?" It transcribed perfectly.
+Gerald asked a plain general-knowledge question. It transcribed perfectly.
 She said "Heard. That is not mine yet." He asked eight things; one worked.
 
 The engine was there the whole time. `make_engine()` was built, wired into
@@ -33,7 +33,7 @@ them apart from a question:
                paragraph about pizza ordering reads as though something
                happened. She says she cannot.
   LIVE_DATA  — a question whose answer is not in any model's weights and changes
-               hourly. "What is the weather." Asking the model produces a
+               hourly, like today's weather in a city. Asking the model produces a
                confident non-answer; searching produces the actual number.
 
 Everything else is a QUESTION and belongs to the brain.

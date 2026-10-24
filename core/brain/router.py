@@ -26,6 +26,7 @@ becomes a verbal tic, which is the same failure as a single fixed string.
 
 from __future__ import annotations
 
+import inspect
 import platform
 import random
 from functools import lru_cache
@@ -33,9 +34,10 @@ import re
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from enum import Enum
-from typing import Callable
+from typing import Any, Callable
 
 from .intents import IntentParser, greeting
+from .reading import her_sleep
 from .repair import repair
 
 
@@ -176,7 +178,7 @@ class IntentSpec:
 _SPECS = (
     IntentSpec(Intent.TIME, ("what time", "the time", "time is it", "clock"),
                boost=("now",), veto=("date", "day", "long")),
-    IntentSpec(Intent.DATE, ("date", "what day", "day is it", "today"),
+    IntentSpec(Intent.DATE, ("date", "what day", "day is it", "what is today", "today's date"),
                veto=("time is it",)),
     IntentSpec(Intent.STATUS, ("how are you", "status", "how are things",
                                "running", "how is it going", "doing"),
@@ -198,7 +200,7 @@ _SPECS = (
                veto=("listening", "sleep", "wake word")),
     # CLOSING A CONVERSATION. Matched on INTENT, never on an exact string,
     # because Whisper mangles short phrases — his own transcripts turned "stop
-    # listening" into "Stop, listen" and "Stop List Me". Several phrasings for
+    # listening" into two different three-word garbles. Several phrasings for
     # each idea, all meaning the same thing.
     #
     # "THANK YOU" IS THE TRAP AND IT IS HANDLED BY REQUIRING HER NAME.
@@ -254,7 +256,7 @@ _GREETING_ONLY = re.compile(
     r"\s*[.,!?]*\s*$", re.I)
 
 #: Thanks with NO name attached — polite, mid-conversation, not a goodbye.
-#: Anchored to the whole utterance: "thanks, now open my downloads" has a
+#: Anchored to the whole utterance: "thanks, now open my pictures" has a
 #: command in it and must not land here.
 _THANKS_ONLY = re.compile(
     r"^\s*(?:thanks|thank\s+you|thank\s+you\s+very\s+much|thanks\s+a\s+lot|"
@@ -497,19 +499,22 @@ class Router:
 
         return Routed(Intent.PRESENCE, _pick(_ACKNOWLEDGE), score=1.0)
 
-    def route(self, text: str) -> Routed:
+    def forget(self) -> None:
+        self._tools.forget()
+
+    def route(self, text: str, history: list[str] | None = None) -> Routed:
         """
         TOOLS FIRST, CONVERSATION SECOND, and the order is deliberate.
 
         Tool patterns are NARROW — an explicit verb, a port number, a version
         word. Conversational matching is broad keyword scoring, which is what
-        made "How's it going" work, and broad scoring asked first would swallow
-        "open my downloads" on the word "open" appearing near something else.
+        made "how are things" work, and broad scoring asked first would swallow
+        "open my pictures" on the word "open" appearing near something else.
         Narrow-then-broad cannot mis-fire in that direction.
 
         This is the reconnection: `route()` previously never reached the tool
         layer at all, so every tool in tools_local.py was unreachable and she
-        told Gerald she could not open his downloads — which she could, and had
+        told Gerald she could not open the folder he asked for — which she could, and had
         been able to for two days.
         """
         self.turns += 1
@@ -564,7 +569,10 @@ class Router:
         self._was_return = self.is_return()
         self._note_activity()
 
-        parsed = self._tools.parse(raw)
+        if her_sleep(raw):
+            return self._answer(Intent.SLEEP, 1.0, norm)
+
+        parsed = self._tools.parse(raw, history=history)
         if parsed.question:
             return Routed(Intent.TOOL, parsed.question, score=1.0, doubt=parsed.doubt)
         if parsed.calls or parsed.plan:
@@ -745,3 +753,20 @@ def ambiguous(names: list[str]) -> str:
 
 def platform_note() -> str:
     return f"{platform.system()} {platform.release()}"
+
+
+def history_kwargs(router: Any, conversation: Any = None) -> dict[str, Any]:
+    lines = [str(t.text) for t in list(getattr(conversation, "turns", None) or [])[-12:]
+             if getattr(t, "role", "") == "user" and getattr(t, "text", "")]
+    try:
+        params = inspect.signature(router.route).parameters
+        takes = "history" in params or any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values())
+    except (TypeError, ValueError):
+        takes = False
+    return {"history": lines} if takes else {}
+
+
+def forget_targets(router: Any) -> None:
+    forget = getattr(router, "forget", None)
+    if callable(forget):
+        forget()

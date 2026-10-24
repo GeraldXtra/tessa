@@ -47,7 +47,7 @@ CPU_THREADS = 4
 #: UPDATED FROM HIS ACTUAL TRANSCRIPTS. The old list was proper nouns from an
 #: earlier sprint and had gone stale — meanwhile the words he says every day
 #: were mangled: "documents" -> "Taluts", "tweet that I'm building an AI
-#: assistant" -> "Tweets, Data Mbudinon AI Assist". Priming is measured as a 2x
+#: assistant" -> a plural noun and a comma. Priming is measured as a 2x
 #: SPEED SAVING as well as an accuracy fix, so a longer, RELEVANT list costs
 #: nothing and is exactly its job.
 #:
@@ -63,7 +63,7 @@ CPU_THREADS = 4
 #: concatenated.
 #: FULL PHRASES, NOT JUST NOUNS. The noun list fixed folder names and did
 #: nothing for connected speech: "tweet that I'm building an AI assistant" came
-#: back as "Tweet, that's I am, Beauty and AI assis…". An `initial_prompt` is
+#: back as a plural noun and a cut-off word. `initial_prompt` is
 #: decoder CONDITIONING — it biases the language model toward the shapes it
 #: contains, so a list of isolated nouns primes isolated nouns. Sentences prime
 #: sentences.
@@ -76,8 +76,8 @@ VOCABULARY_PRIME = (
     "Forget that, start fresh. Yes, please. Go on. "
     # ── THE CONTROL PHRASES ──────────────────────────────────────────────────
     #
-    # His transcripts show "stop listening" coming back as "Stop, listen." and
-    # "Stop List Me." for the same three syllables, on clips whose own enrolment
+    # His transcripts show "stop listening" coming back as two different garbles
+    # for the same three syllables, on clips whose own enrolment
     # RMS was 328-944 — so this is the decoder, not his microphone.
     #
     # They are the hardest shape for Whisper in this whole vocabulary: two or
@@ -151,8 +151,8 @@ class Transcript:
 #: `_is_prime_echo` asks "is this transcript just my own prompt coming back",
 #: and it used to derive its word set from VOCABULARY_PRIME directly. That was
 #: safe while the prime was six proper nouns. The moment the prime grew to
-#: include the words he actually says — open, my, downloads, post, x — the test
-#: inverted: "open my downloads" scored 3 of 3 prime words, 100%, and was
+#: include the words he actually says — open, my, a folder name, post, x — the test
+#: inverted: his three-word folder request scored 3 of 3 prime words, 100%, and was
 #: DISCARDED as an echo. That is the one command that worked for him.
 #:
 #: So the echo test now uses only DISTINCTIVE tokens: proper nouns and coined
@@ -187,7 +187,7 @@ def _is_prime_echo(text: str) -> bool:
 #:
 #: MEASURED, and this is the mechanism behind the fiction. A captured segment at
 #: RMS 90.5 (peak 822, -32.0 dBFS) produced the confident transcript
-#: "I can't even talk to you." from audio that said "Tessa, open my downloads."
+#: "I can't even talk to you." from audio that held a three-word folder request.
 #: Gerald's own fixture measures RMS 2966 and transcribes correctly. Whisper does
 #: not return silence for silence — it HALLUCINATES, fluently, and the router
 #: then acts on the hallucination.
@@ -381,7 +381,7 @@ class WhisperSTT:
         #
         # On near-silent audio the decoder has nothing to condition on and
         # echoes its own `initial_prompt` back as the transcript. Observed live
-        # at 03:01:37: "aptech, naira, Titan Wave, TESSA." — the prime, returned
+        # at 03:01:37: a run of the prime's own words, returned
         # verbatim as though he had said it, then routed as a real utterance.
         #
         # The prime STAYS: it fixed Tessa, LedgerWatch and Aptech and it is a 2x

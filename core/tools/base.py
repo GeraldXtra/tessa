@@ -79,6 +79,14 @@ class ToolHold(Exception):
         self.resolved: dict[str, Any] | None = dict(resolved) if resolved else None
 
 
+class ToolRedirect(Exception):
+    def __init__(self, tool: str, args: dict[str, Any], why: str = "") -> None:
+        super().__init__(why or tool)
+        self.tool = tool
+        self.call_args = dict(args)
+        self.why = why
+
+
 @dataclass(frozen=True)
 class ToolSpec:
     """
@@ -98,7 +106,7 @@ class ToolSpec:
     handler: Callable[..., dict[str, Any]]
     #: What he might actually say. Used by the report and by the phrasing tests,
     #: not by the matcher — the matcher is regex in `core/brain/intents.py`,
-    #: because "open my downloads" and "downloads" are one intent and a literal
+    #: because "open my pictures" and "pictures" are one intent and a literal
     #: phrase list can never cover that.
     phrasings: tuple[str, ...] = ()
     #: Formatted with the handler's returned dict.
@@ -159,6 +167,7 @@ class ToolSpec:
     #: approved it, and a digest he can check a text against. `x.send_dm`
     #: withholds `text`. Empty for every tool that existed before this field.
     private_args: tuple[str, ...] = ()
+    card_provenance: str = ""
     #: One line for the audit entry, formatted with the ARGS (not the result) so
     #: the log records what was ASKED even when the tool then failed.
     audit: str = "{name}"

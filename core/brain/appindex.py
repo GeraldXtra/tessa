@@ -15,7 +15,7 @@ all along, and `Google Chrome.lnk` was in the index the whole time. Measured:
 
 And `fuzzy_match("chrome", ...)` returns `['google chrome']` correctly.
 
-THE ACTUAL FAULT is one word. His sentence was "Open my Chrome BROWSER", and
+THE ACTUAL FAULT is one word. His sentence asked for Chrome and ended in "browser", and
 `intents.py` stripped `open|launch|start|run|show|my|the|app|application|please`
 — but not "browser". So the query reaching the matcher was `"chrome browser"`,
 no key contained it, and `SequenceMatcher` fell back to ratio scoring where
@@ -109,7 +109,7 @@ _APP_PATHS_KEY = r"Software\Microsoft\Windows\CurrentVersion\App Paths"
 
 #: Words that describe a CATEGORY rather than name an application.
 #:
-#: THIS LIST IS THE CHROME FIX. "Open my Chrome browser" is not a request for
+#: THIS LIST IS THE CHROME FIX. A request for Chrome that ends in "browser" is not a request for
 #: something called "chrome browser"; it is a request for Chrome, and the noun
 #: is how he tells her what KIND of thing Chrome is. Left in the query it
 #: matched every application whose name ends in the category word.
@@ -193,10 +193,10 @@ def _norm_query(text: str) -> str:
     """
     Strip command words and category nouns, keep the name.
 
-    "open my chrome browser" -> "chrome"
+    "open the browser chrome" -> "chrome"
     "open vs code"           -> "vs code"
 
-    A token is only dropped if something survives. "open my browser" keeps
+    A token is only dropped if something survives. "open the browser" keeps
     "browser", because there the category word IS the whole request and she
     should try to match it rather than search for an empty string.
     """
@@ -569,7 +569,7 @@ class AppIndex:
                 return 0.0
             # DELIBERATELY CAPPED BELOW EVERY STRUCTURAL MATCH. A ratio is a
             # guess; a whole-word hit is evidence. Letting a 0.9 ratio outrank
-            # an 800 word match is exactly how "chrome browser" returned Opera.
+            # an 800 word match is exactly how his request for Chrome returned Opera.
             score = 200.0 + ratio * 100.0
 
         # A shortcut whose binary is gone must never be offered (item 1d).

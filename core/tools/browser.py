@@ -417,6 +417,7 @@ class BrowserSession:
         self.launched_at = 0.0
         self.cold_launch_s = 0.0
         self.chrome_pid: int | None = None
+        self.wrote_pid_file: Path | None = None
         self._reaper: threading.Thread | None = None
         #: WHICH profile is currently open. Added when profiles became named
         #: rather than hardcoded: with one profile "is it open" was the whole
@@ -641,7 +642,23 @@ class BrowserSession:
                 PID_FILE.write_text(json.dumps({"pid": self.chrome_pid,
                                                 "profile": str(DEFAULT_PROFILE)}),
                                     encoding="utf-8")
+                self.wrote_pid_file = PID_FILE
         except Exception:  # noqa: BLE001
+            pass
+
+    def _forget_pid_file(self) -> None:
+        mine, self.wrote_pid_file = self.wrote_pid_file, None
+        if mine is None:
+            return
+        try:
+            rec = json.loads(mine.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return
+        if self.chrome_pid is not None and int(rec.get("pid") or 0) != self.chrome_pid:
+            return
+        try:
+            mine.unlink(missing_ok=True)
+        except OSError:
             pass
 
     def _start_reaper(self) -> None:
@@ -713,10 +730,7 @@ class BrowserSession:
                 # Playwright's close is asked first; this only acts on a Chrome
                 # that ignored it. Same pid, same ownership test as at launch.
                 _reap_profile_chrome(self.profile)
-            try:
-                PID_FILE.unlink(missing_ok=True)
-            except OSError:
-                pass
+            self._forget_pid_file()
             self.chrome_pid = None
             self._ctx_gone = False
             return {"was_open": was_open, "reason": reason, "up_s": round(up, 1)}
@@ -767,10 +781,7 @@ class BrowserSession:
                 alive = _wait_gone(alive, 1.0)
             self._ctx = None
             self._pw = None
-            try:
-                PID_FILE.unlink(missing_ok=True)
-            except OSError:
-                pass
+            self._forget_pid_file()
             self.chrome_pid = None
             self._ctx_gone = False
         finally:

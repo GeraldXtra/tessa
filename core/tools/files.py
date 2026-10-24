@@ -504,6 +504,12 @@ def _refuse_root(p: Path) -> None:
                         "Name a file or folder inside it and I will bin that instead.")
 
 
+def check_target(args: dict[str, Any]) -> dict[str, Any]:
+    p = _resolve((args or {}).get("path"))
+    _refuse_root(p)
+    return dict(args)
+
+
 def delete(path: str, confirmed: bool = False) -> dict[str, Any]:
     """
     Recycle Bin, and it HOLDS on the first ask.

@@ -335,3 +335,6 @@ claims:
     # noise kept); 3 keeps only what he clearly keeps talking about. With no
     # topics known at all nothing is kept, and the audit chain says so.
     min_score: 2
+
+code:
+  folder: ""

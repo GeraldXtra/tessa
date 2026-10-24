@@ -165,7 +165,7 @@ for utt in ("thank you Tessa", "thanks Tessa", "thank you Zoi"):
     check(f"{utt!r} DOES close", Router().route(utt).ends_session)
 
 # ── "go to sleep" must not touch the machine ─────────────────────────────────
-print("\n   'go to sleep' — the phrase that used to suspend his laptop")
+print("\n   the sleep phrase that used to suspend his laptop")
 out = Router().route("go to sleep")
 check("fires NO tool at all", not out.calls, str([c.name for c in out.calls]))
 check("...specifically not sys.sleep",
@@ -185,7 +185,7 @@ check("'stop listening completely' turns the phrase off too",
 
 # ── 4. THINGS THAT MUST NOT CLOSE IT ─────────────────────────────────────────
 print("\n4. a session is not closed by anything else")
-for utt in ("open my downloads", "what is the time", "how is it going",
+for utt in ("open my pictures", "what is the time", "how are things holding up",
             "stop", "be quiet", "open chrome", "hey tessa"):
     out = Router().route(utt)
     check(f"{utt!r} keeps the session open", not out.ends_session,

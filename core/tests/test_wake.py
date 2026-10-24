@@ -47,7 +47,7 @@ print("wake phrase, voiceprint and the off switch")
 # ── "go to sleep" must not suspend his laptop ────────────────────────────────
 #
 # THIS IS THE ONE THAT MATTERS MOST. `sys.sleep` is GREEN, so it executes with
-# no confirmation. Before the fix, "go to sleep" — the most natural way to tell
+# no confirmation. Before the fix, her own sleep phrase — the most natural way to tell
 # her to stop listening — resolved to it and suspended the machine.
 print("\nthe off switch, and the collision it used to have")
 r = Router()

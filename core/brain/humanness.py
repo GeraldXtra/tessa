@@ -247,6 +247,16 @@ def humanise(text: str) -> Result:
     return Result(text=out, stripped=stripped, flagged=flags(out))
 
 
+_FENCED = re.compile(r"```[^\n`]*\n.*?(?:```|\Z)", re.S)
+
+
+def spoken_form(text: str) -> str:
+    bare = _FENCED.sub(" ", str(text or ""))
+    if not bare.strip():
+        return ""
+    return humanise(bare).text
+
+
 def describe(result: Result) -> str:
     """One line for the log, so a persistent tell is visible rather than guessed at."""
     if result.clean:

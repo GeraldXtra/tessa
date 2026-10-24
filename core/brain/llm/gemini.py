@@ -256,6 +256,7 @@ class GeminiLLM(LLMAdapter):
         self.calls += 1
         t0 = time.perf_counter()
         in_tok = out_tok = 0
+        self.last_finish = ""
 
         try:
             with httpx.Client(timeout=httpx.Timeout(READ_TIMEOUT_S, connect=CONNECT_TIMEOUT_S)) as c:
@@ -326,6 +327,7 @@ class GeminiLLM(LLMAdapter):
                         in_tok = usage.get("promptTokenCount", in_tok)
                         out_tok = usage.get("candidatesTokenCount", out_tok)
                         for cand in obj.get("candidates", []) or []:
+                            self.last_finish = str(cand.get("finishReason") or self.last_finish)
                             for part in (cand.get("content", {}) or {}).get("parts", []) or []:
                                 text = part.get("text")
                                 if text:

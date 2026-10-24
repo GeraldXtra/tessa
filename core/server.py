@@ -42,6 +42,7 @@ import signal  # noqa: E402
 import socket  # noqa: E402
 import sys  # noqa: E402
 import time  # noqa: E402
+from collections import deque
 from datetime import datetime, timedelta, timezone  # noqa: E402
 from pathlib import Path  # noqa: E402
 from typing import Any, Iterable  # noqa: E402
@@ -63,6 +64,10 @@ sys.path.insert(0, str(ROOT_DIR))
 # Generated from packages/protocol/schema/enums.json — the single source of
 # truth shared with TypeScript. Never hand-maintain a second copy here.
 sys.path.insert(0, str(ROOT_DIR / "packages" / "protocol" / "gen" / "python"))
+
+from core import codelock
+
+_CODE_AT_START = codelock.snapshot()
 
 from tessa_protocol import (  # noqa: E402
     PROTOCOL_VERSION,
@@ -104,6 +109,17 @@ from core.telemetry.health import HealthCollector, HealthConfig  # noqa: E402
 from core.capabilities.vault import Vault as _Vault, VaultWs as _VaultWs  # noqa: E402
 from core.capabilities.vault.tools import specs as _vault_specs  # noqa: E402
 from core.tools import REGISTRY as _REGISTRY  # noqa: E402
+from core.tools import coding as _coding
+from core.tools import runner as _runner
+from core.brain.humanness import _FENCED as _CODE_BLOCK
+
+_NEVER_REMEMBERED = frozenset({"code.run_mine", "git.push"})
+_STOP_WORDS = re.compile(r"^\s*(?:tessa[\s,]+)?(?:stop|stop it|stop that|stop the program|stop running|cancel|"
+                         r"cancel it|halt|kill it|abort)\s*[.!]*\s*$", re.I)
+
+
+def _speakable(text: str) -> str:
+    return " ".join(_CODE_BLOCK.sub(" ", str(text or "")).split())
 
 # ── constants from CONTRACT ───────────────────────────────────────────────────
 
@@ -355,21 +371,79 @@ class AuditFeed:
 CALENDAR_TZ = "Africa/Lagos"
 
 
-async def _plan_after_card(daemon: Any, executor: Any, request_id: str, outcome: str, spoken: str = "") -> None:
+async def _plan_after_card(daemon: Any, executor: Any, request_id: str, outcome: str, spoken: str = "") -> bool:
     hook = getattr(executor, "plan_card_answered", None)
     if not callable(hook):
-        return
+        return False
     try:
         line = await asyncio.to_thread(hook, request_id, outcome, spoken)
     except Exception as exc:
         log(f"!! plan after card failed: {type(exc).__name__}: {exc}")
-        return
-    if line:
-        log(f"plan after card {outcome} ({request_id[:8]})")
+        return False
+    if not line:
+        return False
+    log(f"plan after card {outcome} ({request_id[:8]})")
+    message = {"messageId": ulid(), "role": "assistant", "text": line, "ts": now_iso()}
+    say = getattr(daemon, "say_line", None)
+    if callable(say):
+        say(message)
+    else:
         await daemon.broadcast("evt.transcript.message", {
             "companionId": DEFAULT_COMPANION_ID,
-            "message": {"messageId": ulid(), "role": "assistant", "text": line, "ts": now_iso()},
+            "message": message,
         })
+    return True
+
+
+def _cards_waiting(daemon: Any) -> bool:
+    gates = [getattr(getattr(getattr(daemon, "voice", None), "executor", None), "approvals", None)]
+    pair = getattr(daemon, "_typed_pair", None)
+    if isinstance(pair, tuple) and len(pair) == 2:
+        gates.append(getattr(pair[1], "approvals", None))
+    for gate in gates:
+        pending = getattr(gate, "pending", None)
+        if isinstance(pending, dict) and any(not getattr(r, "expired", False) for r in list(pending.values())):
+            return True
+    return False
+
+
+def _agent_state_out(daemon: Any, payload: dict[str, Any]) -> dict[str, Any]:
+    if payload.get("state") == "idle" and _cards_waiting(daemon):
+        payload = {**payload, "state": "blocked"}
+    states = getattr(daemon, "agent_states", None)
+    if isinstance(states, dict):
+        states[str(payload.get("companionId") or DEFAULT_COMPANION_ID)] = payload
+        daemon._state_version = getattr(daemon, "_state_version", 0) + 1
+    return payload
+
+
+async def _card_working(daemon: Any, tool: str) -> None:
+    hook = getattr(daemon, "working_on_card", None)
+    if callable(hook):
+        try:
+            await hook(tool)
+        except Exception as exc:
+            log(f"!! card working state failed: {type(exc).__name__}: {exc}")
+
+
+async def _card_settled(daemon: Any) -> None:
+    hook = getattr(daemon, "rest_after_card", None)
+    if callable(hook):
+        try:
+            await hook()
+        except Exception as exc:
+            log(f"!! card rest state failed: {type(exc).__name__}: {exc}")
+
+
+class _TypedJob:
+    def __init__(self, message_id: str, text: str, arrived: float) -> None:
+        self.message_id = message_id
+        self.text = text
+        self.arrived = arrived
+        self.cancelled = False
+        self.rested = False
+        self.phase = "queued"
+        self.play: Any = None
 
 
 class TessaDaemon:
@@ -407,6 +481,20 @@ class TessaDaemon:
         # one shared executor; the set keeps a running task referenced.
         self._typed_lock = asyncio.Lock()
         self._typed_tasks: set[asyncio.Task[None]] = set()
+        self._typed_jobs: dict[str, _TypedJob] = {}
+        self._typed_current: _TypedJob | None = None
+        self.agent_states: dict[str, dict[str, Any]] = {}
+        self._state_version = 0
+        self._floor = asyncio.Lock()
+        self._floor_waiting = 0
+        self._voice_turns = 0
+        self._segment_by = ""
+        self._cannot_speak_said: set[str] = set()
+        self._loop: asyncio.AbstractEventLoop | None = None
+        self._levels: deque[tuple[float, dict[str, Any]]] = deque()
+        self._level_timer: asyncio.TimerHandle | None = None
+        self._level_last_due = 0.0
+        self._speech_tasks: set[asyncio.Task[Any]] = set()
         # THE THREAD, loaded from disk at boot. A corrupt file starts empty
         # and is reported — it must never stop the daemon coming up.
         self.conversation = Conversation()
@@ -430,6 +518,7 @@ class TessaDaemon:
         except ValueError as exc:
             log(f"!! brain: {exc}")
             self.brain = None
+        _coding.bind_brain(self.brain)
 
         # HOW PEOPLE WRITE, kept as numbers — the third store, apart from the
         # thread and the claims. Needs settings for `style.owner_handle`, so
@@ -603,7 +692,10 @@ class TessaDaemon:
                 return
 
             async for raw in ws:
-                await self._dispatch(ws, state, raw)
+                try:
+                    await self._dispatch(ws, state, raw)
+                except websockets.exceptions.ConnectionClosed:
+                    pass
 
         except websockets.exceptions.ConnectionClosed:
             pass
@@ -669,13 +761,16 @@ class TessaDaemon:
         state.update(authed=True, surface=surface, sessionId=ulid())
         self._failures.clear()
 
-        await ws.send(envelope("res.hello", {
-            "ok": True,
-            "daemonVersion": DAEMON_VERSION,
-            "protocolVersion": PROTOCOL_VERSION,
-            "capabilities": ["pty.grant", "fs.list", "audit.query", "permissions.tiers", "vault"],
-            "sessionId": state["sessionId"],
-        }, corr=msg["id"]))
+        try:
+            await ws.send(envelope("res.hello", {
+                "ok": True,
+                "daemonVersion": DAEMON_VERSION,
+                "protocolVersion": PROTOCOL_VERSION,
+                "capabilities": ["pty.grant", "fs.list", "audit.query", "permissions.tiers", "vault"],
+                "sessionId": state["sessionId"],
+            }, corr=msg["id"]))
+        except websockets.exceptions.ConnectionClosed:
+            pass
 
         # `system`, NOT "human". A surface presenting the launch token is the
         # daemon's own admission control succeeding — a process authenticated,
@@ -740,6 +835,7 @@ class TessaDaemon:
             "cmd.permission.respond": self._h_permission_respond,
             "cmd.voice.pushToTalk": self._h_voice_push_to_talk,
             "cmd.agent.message": self._h_agent_message,
+            "cmd.agent.cancel": self._h_agent_cancel,
             "cmd.calendar.today": self._h_calendar_today,
             # cmd.vault.* — pure delegation to core/capabilities/vault/ws.py.
             # The secret-bearing fields are popped out of `payload` by the vault
@@ -849,7 +945,21 @@ class TessaDaemon:
                     "args": req.args,
                     "provenance": req.provenance,
                     "expiresAt": _iso_in(APPROVAL_WINDOW_S - (time.monotonic() - req.at)),
+                    "frozen": list(req.frozen),
                 }))
+        if topic_matches(state["subs"], "evt.agent.state"):
+            await self._send_state_snapshot(ws)
+
+    async def _send_state_snapshot(self, ws: Any) -> None:
+        for _ in range(3):
+            seen = self._state_version
+            current = self.agent_states.get(DEFAULT_COMPANION_ID)
+            if current is None:
+                current = {"companionId": DEFAULT_COMPANION_ID,
+                           "state": "blocked" if _cards_waiting(self) else "idle"}
+            await ws.send(envelope("evt.agent.state", current))
+            if self._state_version == seen:
+                return
 
     async def _h_unsubscribe(self, ws, state, payload, corr) -> None:
         for t in payload.get("topics") or []:
@@ -1098,6 +1208,7 @@ class TessaDaemon:
         frozen through THINKING — which is the slowest part and exactly when the
         owner most needs to see that something is happening.
         """
+        self._voice_turns += 1
         try:
             turn = await asyncio.wait_for(
                 asyncio.to_thread(self.voice.stop), timeout=VOICE_TURN_STALL_S)
@@ -1125,6 +1236,8 @@ class TessaDaemon:
                 summary=f"voice turn failed: {exc}", detail={},
             )
             return
+        finally:
+            self._voice_turns -= 1
         if turn is None:
             await self.broadcast("evt.agent.state", {"companionId": DEFAULT_COMPANION_ID, "state": "idle"})
             return
@@ -1168,7 +1281,7 @@ class TessaDaemon:
                 "companionId": DEFAULT_COMPANION_ID,
                 "message": {
                     "messageId": ulid(), "role": "user",
-                    "text": turn.heard, "ts": now_iso(),
+                    "text": turn.heard, "ts": now_iso(), "via": "voice",
                 },
             })
         if turn.said:
@@ -1214,6 +1327,95 @@ class TessaDaemon:
         # actually drains. Re-emitting here duplicated the first and pre-empted
         # the second with a state that was not yet true.
 
+    def attach_voice(self, *, mic: Any, stt: Any, tts: Any, speaker: Any = None,
+                     dump_segments: bool = False) -> Any:
+        from core.brain.router import Router
+        from core.bus import AudioBus
+        from core.voice.loop import VoiceLoop
+
+        daemon = self
+        loop_ref = asyncio.get_running_loop()
+        self._loop = loop_ref
+
+        def _emit_state(state: str, detail: dict | None = None) -> None:
+            # Called from the worker thread; hop back to the loop to broadcast.
+            #
+            # CONTRACT §4.1 already declares `detail?`, so including it is
+            # additive and does not move PROTOCOL_VERSION. It is OMITTED rather
+            # than sent as null when there is nothing to say — §3.2 makes an
+            # absent optional field the normal case, and a surface switching on
+            # its presence should not have to distinguish "absent" from "null".
+            payload: dict[str, Any] = {
+                "companionId": DEFAULT_COMPANION_ID, "state": state,
+            }
+
+            # ── "IN A CONVERSATION" IS NOT AN AgentState ─────────────────────
+            #
+            # ITEM 6's answer. `AgentState` is a CLOSED enum (CONTRACT §7.4), so
+            # adding `conversing` would be a BREAKING change: a version bump and
+            # both surfaces shipping together, for something that is not a state
+            # at all. She is `listening`, `thinking`, `speaking` or `working`
+            # DURING a conversation — the session is orthogonal to all four and
+            # persists across every one of them.
+            #
+            # So it rides in `detail`, which §4.1 already declares, which makes
+            # it additive with no version bump. It is attached to EVERY state
+            # event rather than only to transitions that happen to carry a tool,
+            # because an indicator that only updates sometimes will drift — and
+            # this one has to stay accurate for hours.
+            det = dict(detail or {})
+            det["session"] = {
+                "open": daemon.convo.open,
+                "turns": daemon.convo.turns,
+                "openedBy": daemon.convo.opened_by,
+            }
+            payload["detail"] = det
+            asyncio.run_coroutine_threadsafe(
+                daemon.broadcast("evt.agent.state", payload), loop_ref
+            )
+
+            # ── THE RE-ARM, AND `idle` IS THE ONLY SAFE MOMENT ──────────────
+            #
+            # `idle` is emitted by AudioBus from the output stream's
+            # `finished_callback` — the instant her audio actually DRAINS. Any
+            # earlier and the segment is open while she is still talking: Piper
+            # leaves the speaker, the microphone picks it up, Whisper
+            # transcribes it, and she answers herself in a loop. There is no
+            # acoustic echo cancellation here, which is exactly why this waits.
+            if (state == "idle" and daemon.convo.open
+                    and not daemon.ptt_active and daemon.voice is not None):
+                asyncio.run_coroutine_threadsafe(daemon.rearm_for_session(), loop_ref)
+
+        bus = AudioBus(on_state=lambda s, d=None: _emit_state(s.value, d),
+                       on_level=daemon.level_from_audio, on_done=daemon.playback_done)
+        daemon.voice = VoiceLoop(
+            mic=mic, stt=stt, tts=tts,
+            router=Router(health_sample=lambda: daemon.health.sample(
+                budget_spent=daemon.ledger.spent_today(),
+                budget_cap=daemon.budget_cap)),
+            bus=bus, on_state=_emit_state,
+            on_stage=lambda name, ms: log(f"  [turn] {ms:8.1f} ms  {name}"),
+            on_turn_timing=lambda payload: asyncio.run_coroutine_threadsafe(
+                daemon.broadcast("evt.turn.timing",
+                                 {"companionId": DEFAULT_COMPANION_ID, **payload}),
+                loop_ref),
+            dump_segments=dump_segments,
+            session=daemon.session, audit=daemon.audit, brain=daemon.brain,
+            conversation=daemon.conversation, speaker=speaker, claims=daemon.claims,
+            style=daemon.style, relevance=daemon.relevance,
+        )
+        # CONTRACT §4.1 `evt.permission.request`. The red gate raises these and
+        # nothing can answer them yet — the approval card is P5 and Session 2's.
+        # Emitting them anyway is deliberate: the moment that card exists, red
+        # tools work with no daemon change, and until then the requests are
+        # visible on the wire and in the audit log rather than invisible.
+        daemon.voice.executor.approvals._on_request = (
+            lambda payload: asyncio.run_coroutine_threadsafe(
+                daemon.card_raised(payload), loop_ref)
+        )
+        daemon.voice.vad_config = daemon.settings.get("voice", {}) or {}
+        return bus
+
     async def rearm_for_session(self) -> None:
         """
         Open the next segment without a keypress. The whole point of a session.
@@ -1225,6 +1427,8 @@ class TessaDaemon:
         the event loop where they cannot race.
         """
         if not self.convo.open or self.ptt_active or self.voice is None:
+            return
+        if self._floor.locked() or self._floor_waiting or self._typed_jobs:
             return
         loop_now = asyncio.get_running_loop()
 
@@ -1241,6 +1445,7 @@ class TessaDaemon:
         dropped = await asyncio.to_thread(self.voice.mic.flush_ring)
 
         self.ptt_active = True
+        self._segment_by = "session"
         await asyncio.to_thread(lambda: self.voice.start(on_auto_stop=_auto_stop))
         log(f"  [session] listening again — {self.convo.describe()} "
             f"(flushed {dropped / 16000:.2f}s of her own audio from the ring)")
@@ -1450,7 +1655,7 @@ class TessaDaemon:
                 session=self.session, audit=self.audit, claims=self.claims,
                 style=self.style, relevance=self.relevance,
                 on_permission_request=lambda pl: asyncio.run_coroutine_threadsafe(
-                    self.broadcast("evt.permission.request", pl), loop_ref),
+                    self.card_raised(pl), loop_ref),
             )
             self._typed_pair = (
                 Router(health_sample=lambda: self.health.sample(
@@ -1488,6 +1693,7 @@ class TessaDaemon:
         reaches every subscribed surface as `evt.transcript.message`, exactly
         as it always did. The reply carries nothing the pane read.
         """
+        arrived = time.perf_counter()
         text = str(payload.get("text") or "").strip()
         if not text:
             await ws.send(envelope("err.validation", {
@@ -1495,37 +1701,64 @@ class TessaDaemon:
             }, corr=corr))
             return
 
+        if _runner.running() and _STOP_WORDS.match(text):
+            stopped = _runner.stop_all("he typed stop")
+            log(f"typed stop: told {stopped} running program(s) to stop")
         message_id = ulid()
+        job = _TypedJob(message_id, text, arrived)
+        self._typed_jobs[message_id] = job
+        self._cut_speech("a new typed message", arrived)
         # HIS LINE GOES OUT FIRST, so the pane can render it before she thinks.
         # Broadcast rather than replied, so a spoken turn and a typed turn land
         # on the SAME event and every subscribed surface sees one thread.
-        await self.broadcast("evt.transcript.message", {
-            "companionId": DEFAULT_COMPANION_ID,
-            "message": {"messageId": message_id, "role": "user",
-                        "text": text, "ts": now_iso(), "via": "typed"},
-        })
-        # THE ACK, BEFORE ANY THINKING. The same id as his line, so a surface
-        # can tie the acceptance to the message it rendered.
-        await ws.send(envelope("res.agent.accepted",
-                               {"accepted": True, "messageId": message_id}, corr=corr))
-        task = asyncio.create_task(self._typed_turn_task(text, message_id))
+        try:
+            await self.broadcast("evt.transcript.message", {
+                "companionId": DEFAULT_COMPANION_ID,
+                "message": {"messageId": message_id, "role": "user",
+                            "text": text, "ts": now_iso(), "via": "typed"},
+            })
+        except BaseException:
+            self._typed_jobs.pop(message_id, None)
+            raise
+        task = asyncio.create_task(self._typed_turn_task(job))
         self._typed_tasks.add(task)
         task.add_done_callback(self._typed_tasks.discard)
+        # THE ACK, BEFORE ANY THINKING. The same id as his line, so a surface
+        # can tie the acceptance to the message it rendered.
+        try:
+            await ws.send(envelope("res.agent.accepted",
+                                   {"accepted": True, "messageId": message_id}, corr=corr))
+        except websockets.exceptions.ConnectionClosed:
+            log(f"typed: {message_id[:8]} arrived, then the link dropped before the ack - answering it anyway")
 
-    async def _typed_turn_task(self, text: str, message_id: str) -> None:
+    async def _typed_turn_task(self, job: _TypedJob) -> None:
         """One typed turn, serialised behind any turn already running."""
-        async with self._typed_lock:
-            try:
-                await self._typed_turn(text, message_id)
-            except Exception as exc:  # noqa: BLE001 — a task's exception is otherwise a log line at exit
-                log(f"!! typed turn task failed: {type(exc).__name__}: {exc}")
+        try:
+            async with self._typed_lock:
+                if job.cancelled:
+                    log(f"typed: {job.message_id[:8]} cancelled before it started - nothing ran")
+                    return
+                self._typed_current = job
+                try:
+                    await self._typed_turn(job)
+                except Exception as exc:  # noqa: BLE001 — a task's exception is otherwise a log line at exit
+                    log(f"!! typed turn task failed: {type(exc).__name__}: {exc}")
+                finally:
+                    self._typed_current = None
+        finally:
+            self._typed_jobs.pop(job.message_id, None)
+            await self._resume_session()
 
-    async def _typed_turn(self, text: str, message_id: str) -> None:
+    async def _typed_turn(self, job: _TypedJob) -> None:
         """The turn itself — everything `_h_agent_message` did after the ack."""
+        text, message_id = job.text, job.message_id
         router, executor = self._text_agent()
         loop_ref = asyncio.get_running_loop()
+        job.phase = "thinking"
 
         def _state(s: str) -> None:
+            if job.cancelled:
+                return
             asyncio.run_coroutine_threadsafe(
                 self.broadcast("evt.agent.state",
                                {"companionId": DEFAULT_COMPANION_ID, "state": s}),
@@ -1538,6 +1771,7 @@ class TessaDaemon:
                 run_typed_turn, text,
                 router=router, executor=executor, brain=self.brain,
                 conversation=self.conversation, on_state=_state, log=log,
+                cancelled=lambda: job.cancelled,
             )
         except Exception as exc:  # noqa: BLE001 — a pane must never see a traceback
             log(f"!! typed turn failed: {type(exc).__name__}: {exc}")
@@ -1547,17 +1781,27 @@ class TessaDaemon:
                 detail={"via": "typed", "error": str(exc)[:200], "messageId": message_id},
                 provenance="human",
             )
-            await self.broadcast("evt.agent.state",
-                                 {"companionId": DEFAULT_COMPANION_ID, "state": "idle"})
+            failed = {"messageId": ulid(), "role": "assistant",
+                      "text": ("Something went wrong while I was on that, Emperor. "
+                               "It is in the audit log; say it again and I will retry."),
+                      "ts": now_iso(), "via": "typed"}
+            played = None if job.cancelled else await self._say(failed, failed["text"], job)
+            if played is None:
+                await self._rest(job)
+                return
+            if played:
+                return
+            await self._rest(job)
             # THE ACK HAS ALREADY GONE, so the pane hears about a failure the
             # way it hears an answer: a line in her register, on the thread.
             await self.broadcast("evt.transcript.message", {
                 "companionId": DEFAULT_COMPANION_ID,
-                "message": {"messageId": ulid(), "role": "assistant",
-                            "text": ("Something went wrong while I was on that, Emperor. "
-                                     "It is in the audit log; say it again and I will retry."),
-                            "ts": now_iso(), "via": "typed"},
+                "message": failed,
             })
+            return
+
+        if job.cancelled or turn.cancelled:
+            await self._typed_cancelled(job, turn)
             return
 
         # A TYPED TURN COUNTS AS A TURN. The session's turn counter is shared
@@ -1591,12 +1835,20 @@ class TessaDaemon:
                         f"is not open. Start it and ask me again, and the card will "
                         f"be waiting for you.")
 
+        played: bool | None = False
         if said:
-            await self.broadcast("evt.transcript.message", {
-                "companionId": DEFAULT_COMPANION_ID,
-                "message": {"messageId": ulid(), "role": "assistant",
-                            "text": said, "ts": now_iso(), "via": "typed"},
-            })
+            line = {"messageId": ulid(), "role": "assistant",
+                    "text": said, "ts": now_iso(), "via": "typed"}
+            spoken = _speakable(said) if turn.awaiting_approval or turn.spoken is None else turn.spoken
+            played = await self._say(line, spoken, job)
+            if played is None:
+                await self._typed_cancelled(job, turn)
+                return
+            if played is False:
+                await self.broadcast("evt.transcript.message", {
+                    "companionId": DEFAULT_COMPANION_ID,
+                    "message": line,
+                })
 
         # THE AUDIT ENTRY NAMES THE KEYBOARD. `via` distinguishes it from voice
         # without a contract change: `detail` is a free-form object, the same
@@ -1611,11 +1863,273 @@ class TessaDaemon:
                     "injectionPatterns": turn.flagged},
             provenance="human",
         )
+        first = getattr(job.play, "t_first", None)
         log(f"TYPED {turn.intent} in {turn.ms:.0f} ms"
-            + (f" tools={','.join(turn.tools)}" if turn.tools else ""))
+            + (f" tools={','.join(turn.tools)}" if turn.tools else "")
+            + (f" | spoken, first audio buffer {(first - job.arrived) * 1000:.0f} ms after his message"
+               if played and first is not None else " | text only" if not played else " | spoken"))
 
+        if not played:
+            await self._rest(job)
+
+    async def _typed_cancelled(self, job: _TypedJob, turn: Any) -> None:
+        self.audit.append(
+            actor="human", tool="agent.message", tier="green",
+            summary=(f"typed turn: {turn.intent}, cancelled before her answer"
+                     + (f", tools {', '.join(turn.tools)}" if turn.tools else "")),
+            detail={"via": "typed", "intent": turn.intent, "tools": turn.tools,
+                    "chars": len(turn.heard), "ms": round(turn.ms), "cancelled": True,
+                    "injectionPatterns": turn.flagged},
+            provenance="human",
+        )
+        log(f"TYPED {turn.intent} cancelled after {turn.ms:.0f} ms - nothing shown or spoken"
+            + (f" tools={','.join(turn.tools)}" if turn.tools else ""))
+        await self._rest(job)
+
+    async def _rest(self, job: _TypedJob | None = None) -> None:
+        if job is not None:
+            if job.rested:
+                return
+            job.rested = True
+        armed = bool(getattr(self.voice, "armed", False)) if self.voice is not None else False
         await self.broadcast("evt.agent.state",
-                             {"companionId": DEFAULT_COMPANION_ID, "state": "idle"})
+                             {"companionId": DEFAULT_COMPANION_ID, "state": "listening" if armed else "idle"})
+
+    def _cut_speech(self, why: str, arrived: float) -> float | None:
+        bus = getattr(self.voice, "bus", None) if self.voice is not None else None
+        if bus is None or not bus.is_speaking:
+            return None
+        cut = bus.stop(why)
+        if cut is None:
+            return None
+        ms = (cut.stopped_at - arrived) * 1000.0
+        log(f"speech: stopped her for {why} in {ms:.1f} ms "
+            f"(arrival -> device abort returned; the abort itself {cut.latency_ms:.1f} ms)")
+        return ms
+
+    def _cannot_speak(self, key: str, why: str) -> None:
+        if key in self._cannot_speak_said:
+            return
+        self._cannot_speak_said.add(key)
+        log(f"speech: {why} - her answers arrive as text only")
+
+    async def _say(self, line: dict[str, Any], spoken: str, job: _TypedJob | None = None) -> bool | None:
+        voice = self.voice
+        if voice is None:
+            self._cannot_speak("voice", "voice is off (this daemon runs without --voice)")
+            return False
+        words = " ".join(str(spoken or "").split())
+        if not words:
+            log("speech: nothing in that answer can be read aloud - shown, not spoken")
+            return False
+        shown = " ".join(str(line.get("text") or "").split())
+        log("speech: reads the shown text word for word" if words == shown else
+            f"speech: reads {len(words)} of the {len(shown)} characters shown - the rest (code) is shown, not spoken")
+        t0 = time.perf_counter()
+        try:
+            syn = await asyncio.to_thread(voice.tts.synthesise, words)
+        except Exception as exc:
+            self._cannot_speak("tts", f"speech synthesis failed ({type(exc).__name__}: {exc})")
+            return False
+        synth_ms = (time.perf_counter() - t0) * 1000.0
+        if len(getattr(syn, "samples", ())) == 0:
+            self._cannot_speak("tts-empty", "speech synthesis returned no audio")
+            return False
+        if job is not None and job.cancelled:
+            return None
+        self._floor_waiting += 1
+        waiting = True
+        try:
+            async with self._floor:
+                self._floor_waiting -= 1
+                waiting = False
+                if not await self._await_quiet(job):
+                    return None
+                try:
+                    play = await asyncio.to_thread(voice.bus.speak, syn.samples, syn.sample_rate)
+                except Exception as exc:
+                    self._cannot_speak("device", f"no audio output ({type(exc).__name__}: {exc})")
+                    return False
+                if job is not None:
+                    job.play = play
+                    job.phase = "speaking"
+                await self.broadcast("evt.transcript.message", {
+                    "companionId": DEFAULT_COMPANION_ID,
+                    "message": {**line, "ts": now_iso()},
+                })
+                log(f"speech: {len(syn.samples) / syn.sample_rate:.2f} s of audio, "
+                    f"synthesised in {synth_ms:.0f} ms")
+                await self._until_played(play, len(syn.samples) / syn.sample_rate)
+                return True
+        finally:
+            if waiting:
+                self._floor_waiting -= 1
+
+    async def _await_quiet(self, job: _TypedJob | None) -> bool:
+        voice = self.voice
+        while True:
+            if job is not None and job.cancelled:
+                return False
+            busy = voice.bus.is_speaking or self._voice_turns > 0
+            if not busy and getattr(voice, "armed", False):
+                busy = True
+                if (self._segment_by == "session" and not getattr(voice.mic, "heard_speech", True)
+                        and await asyncio.to_thread(voice.release)):
+                    self.ptt_active = False
+                    log("  [session] released an empty segment (no speech heard) so she can "
+                        "answer; it re-arms after she has spoken")
+                    busy = False
+            if not busy:
+                return True
+            await asyncio.sleep(0.02)
+
+    async def _until_played(self, play: Any, duration_s: float) -> None:
+        bus = self.voice.bus
+        deadline = time.perf_counter() + max(0.0, duration_s) + 3.0
+        while True:
+            done = play.done.is_set() if play is not None else not bus.is_speaking
+            if done:
+                return
+            if time.perf_counter() > deadline:
+                log(f"!! speech: playback did not finish within {duration_s + 3.0:.1f} s - "
+                    f"stopped, so her state does not say speaking without sound")
+                if play is None or bus.playing is play:
+                    bus.stop("playback watchdog")
+                await self._rest()
+                return
+            await asyncio.sleep(0.025)
+
+    async def _resume_session(self) -> None:
+        voice = self.voice
+        if voice is None or not self.convo.open or self.ptt_active or getattr(voice, "armed", False):
+            return
+        if (voice.bus.is_speaking or self._floor.locked() or self._floor_waiting
+                or self._typed_jobs or self._voice_turns):
+            return
+        await self.rearm_for_session()
+
+    def say_line(self, message: dict[str, Any], spoken: str | None = None) -> None:
+        task = asyncio.create_task(self._say_line(message, spoken))
+        self._speech_tasks.add(task)
+        task.add_done_callback(self._speech_tasks.discard)
+
+    async def _say_line(self, message: dict[str, Any], spoken: str | None = None) -> None:
+        try:
+            played = await self._say(message, str(message.get("text") or "") if spoken is None else spoken)
+            if not played:
+                await self.broadcast("evt.transcript.message", {
+                    "companionId": DEFAULT_COMPANION_ID,
+                    "message": message,
+                })
+                await self._rest()
+        except Exception as exc:
+            log(f"!! speaking her line failed: {type(exc).__name__}: {exc}")
+        finally:
+            await self._resume_session()
+
+    async def card_raised(self, payload: dict[str, Any]) -> None:
+        await self.broadcast("evt.permission.request", payload)
+        await self.broadcast("evt.agent.state", {"companionId": DEFAULT_COMPANION_ID, "state": "blocked"})
+
+    async def working_on_card(self, tool: str) -> None:
+        await self.broadcast("evt.agent.state", {"companionId": DEFAULT_COMPANION_ID,
+                                                 "state": "working", "detail": {"tool": tool}})
+
+    async def rest_after_card(self) -> None:
+        current = (self.agent_states.get(DEFAULT_COMPANION_ID) or {}).get("state")
+        if current in (None, "idle", "blocked", "working"):
+            await self._rest()
+
+    async def _h_agent_cancel(self, ws, state, payload, corr) -> None:
+        arrived = time.perf_counter()
+        wanted = payload.get("messageId")
+        wanted = wanted if isinstance(wanted, str) and wanted else None
+        job = self._typed_jobs.get(wanted) if wanted else self._typed_current
+        programs = _runner.stop_all("STOP") if _runner.running() else 0
+        cancelled = programs > 0
+        stopped_ms = None
+        if wanted is None or job is not None:
+            if job is not None and not job.cancelled:
+                job.cancelled = True
+                cancelled = True
+            bus = getattr(self.voice, "bus", None) if self.voice is not None else None
+            playing = bus.playing if bus is not None else None
+            if playing is not None and (wanted is None or (job is not None and job.play is playing)):
+                stopped_ms = self._cut_speech("cmd.agent.cancel", arrived)
+                cancelled = cancelled or stopped_ms is not None
+        await ws.send(envelope("res.ok", {"cancelled": cancelled}, corr=corr))
+        if stopped_ms is not None:
+            await self._rest(job)
+            if job is None:
+                await self._resume_session()
+        elif job is not None and job.phase == "thinking":
+            current = (self.agent_states.get(DEFAULT_COMPANION_ID) or {}).get("state")
+            if current != "working":
+                await self._rest(job)
+        log(f"cancel {wanted[:8] if wanted else '(no messageId)'}: "
+            + (f"told {programs} running program(s) to stop; " if programs else "")
+            + ("nothing in flight" if not cancelled else
+               f"stopped her speech in {stopped_ms:.1f} ms" if stopped_ms is not None else
+               "no turn in flight" if job is None else
+               f"answer dropped ({job.phase if job is not None else '?'})"))
+
+    def level_from_audio(self, level: float, seq: int, lead: float | None, final: bool, cut: bool) -> None:
+        loop = self._loop
+        if loop is None:
+            return
+        try:
+            loop.call_soon_threadsafe(self._level_due, level, seq, lead, final, cut, time.perf_counter())
+        except RuntimeError:
+            pass
+
+    def _level_due(self, level: float, seq: int, lead: float | None, final: bool, cut: bool, at: float) -> None:
+        payload = {"companionId": DEFAULT_COMPANION_ID, "level": level, "seq": seq}
+        if final:
+            if self._level_timer is not None:
+                self._level_timer.cancel()
+                self._level_timer = None
+            waiting, self._levels = self._levels, deque()
+            if not cut:
+                for _due, queued in waiting:
+                    self._level_send(queued)
+            self._level_last_due = 0.0
+            self._level_send(payload)
+            return
+        due = max(at + (lead or 0.0), self._level_last_due)
+        self._level_last_due = due
+        self._levels.append((due, payload))
+        self._level_pump()
+
+    def _level_pump(self) -> None:
+        now = time.perf_counter()
+        while self._levels and self._levels[0][0] <= now + 0.002:
+            self._level_send(self._levels.popleft()[1])
+        if self._level_timer is not None:
+            self._level_timer.cancel()
+            self._level_timer = None
+        if self._levels and self._loop is not None:
+            self._level_timer = self._loop.call_later(max(0.0, self._levels[0][0] - now), self._level_pump)
+
+    def _level_send(self, payload: dict[str, Any]) -> None:
+        task = asyncio.ensure_future(self.broadcast("evt.voice.amplitude", payload))
+        self._speech_tasks.add(task)
+        task.add_done_callback(self._speech_tasks.discard)
+
+    def playback_done(self, play: Any) -> None:
+        loop = self._loop
+        if loop is None:
+            return
+        try:
+            loop.call_soon_threadsafe(self._log_playback, play)
+        except RuntimeError:
+            pass
+
+    def _log_playback(self, play: Any) -> None:
+        s = play.summary()
+        log(f"speech: played {s['playedS']:.2f} of {s['audioS']:.2f} s{' (CUT)' if s['cut'] else ''} - "
+            f"{s['buffers']} buffers of {s['frames']} frames at {s['rate']} Hz, "
+            f"callback period p50 {s['periodP50Ms']} ms max {s['periodMaxMs']} ms, "
+            f"DAC lead p50 {s['leadP50Ms']} ms, {s['levels']} levels")
 
     async def _h_voice_push_to_talk(self, ws, state, payload, corr) -> None:
         """
@@ -1665,6 +2179,7 @@ class TessaDaemon:
         was = self.ptt_active
         if action == "start":
             self.ptt_active = True
+            self._segment_by = "chord"
             # ITEM 2f: A SESSION STARTED BY KEYPRESS IS THE SAME SESSION.
             # One object, one lifecycle, one set of audit events — the entry
             # path is recorded in `openedBy` and changes nothing else. The
@@ -1826,10 +2341,11 @@ class TessaDaemon:
             await self.broadcast("evt.permission.resolved", {
                 "requestId": request_id, "decision": "deny",
                 "decidedBy": state.get("surface", "unknown"),
-                "remembered": bool(payload.get("remember", False))})
+                "remembered": bool(payload.get("remember", False)) and pending.tool not in _NEVER_REMEMBERED})
             log(f"permission DENIED {pending.tool} ({request_id[:8]})")
             await ws.send(envelope("res.ok", {}, corr=corr))
-            await _plan_after_card(self, executor, request_id, "denied")
+            if not await _plan_after_card(self, executor, request_id, "denied"):
+                await _card_settled(self)
             return
 
         # ── APPROVE ──────────────────────────────────────────────────────────
@@ -1841,6 +2357,7 @@ class TessaDaemon:
         # sentence he meant.
         # The REQUESTED/APPROVED pair is written by `execute_approved` itself,
         # so the record is identical whichever caller reached it.
+        await _card_working(self, pending.tool)
         try:
             record = await asyncio.to_thread(
                 executor.execute_approved, request_id, edited)
@@ -1853,8 +2370,14 @@ class TessaDaemon:
                 "code": err.code, "message": err.message,
                 "retryable": False}, corr=corr))
             log(f"permission REFUSED {pending.tool} ({request_id[:8]}): {err.message}")
-            if request_id not in gate.pending:
-                await _plan_after_card(self, executor, request_id, "failed")
+            announce = getattr(self, "say_line", None)
+            if pending.tool in _NEVER_REMEMBERED and request_id not in gate.pending and callable(announce):
+                why = str(err.message or "").strip().rstrip(".")
+                announce({"messageId": ulid(), "role": "assistant", "ts": now_iso(),
+                          "text": f"That did not run, Emperor. {why[:1].upper()}{why[1:]}."})
+            if request_id not in gate.pending and await _plan_after_card(self, executor, request_id, "failed"):
+                return
+            await _card_settled(self)
             return
         except Exception as exc:  # noqa: BLE001
             self.audit.append(
@@ -1864,7 +2387,8 @@ class TessaDaemon:
             await ws.send(envelope("err.internal", {
                 "code": "internal", "message": f"{type(exc).__name__}",
                 "retryable": False}, corr=corr))
-            await _plan_after_card(self, executor, request_id, "failed")
+            if not await _plan_after_card(self, executor, request_id, "failed"):
+                await _card_settled(self)
             return
 
         # Broadcast first — see the deny branch. The action has ALREADY run by
@@ -1873,11 +2397,17 @@ class TessaDaemon:
         await self.broadcast("evt.permission.resolved", {
             "requestId": request_id, "decision": "approve",
             "decidedBy": state.get("surface", "unknown"),
-            "remembered": bool(payload.get("remember", False))})
+            "remembered": bool(payload.get("remember", False)) and pending.tool not in _NEVER_REMEMBERED})
         log(f"permission APPROVED{' (EDITED)' if record['edited'] else ''} "
             f"{record['tool']} ({request_id[:8]})")
-        await ws.send(envelope("res.ok", {"spoken": record["spoken"]}, corr=corr))
-        await _plan_after_card(self, executor, request_id, "approved", str(record.get("spoken") or ""))
+        await ws.send(envelope("res.ok", {"spoken": _speakable(record["spoken"])}, corr=corr))
+        said = record.get("result", {}).get("said") if isinstance(record.get("result"), dict) else None
+        announce = getattr(self, "say_line", None)
+        if isinstance(said, str) and said.strip() and callable(announce):
+            announce({"messageId": ulid(), "role": "assistant", "text": said, "ts": now_iso()},
+                     spoken=_speakable(said))
+        if not await _plan_after_card(self, executor, request_id, "approved", str(record.get("spoken") or "")):
+            await _card_settled(self)
 
     async def _h_audit_query(self, ws, state, payload, corr) -> None:
         limit = int(payload.get("limit", 100))
@@ -1898,6 +2428,8 @@ class TessaDaemon:
     # ── broadcast + heartbeat ────────────────────────────────────────────────
 
     async def broadcast(self, msg_type: str, payload: dict[str, Any]) -> None:
+        if msg_type == "evt.agent.state":
+            payload = _agent_state_out(self, payload)
         frame = envelope(msg_type, payload)
         dead = []
         for ws, state in list(self.clients.items()):
@@ -1930,7 +2462,8 @@ class TessaDaemon:
             gate = getattr(executor, "approvals", None)
             if gate is None:
                 continue
-            for req in gate.sweep():
+            lapsed = gate.sweep()
+            for req in lapsed:
                 # E2: the TRUE initiator of the lapsed request, resolved by the
                 # same `_actor_of` the card and the executor use — not a blanket
                 # `system`. The daemon noticed the lapse; it did not initiate
@@ -1954,6 +2487,8 @@ class TessaDaemon:
                     "requestId": req.request_id, "decision": "expired",
                     "decidedBy": "daemon", "remembered": False})
                 log(f"approval EXPIRED {req.tool} ({req.request_id[:8]})")
+            if lapsed:
+                await _card_settled(self)
 
     #: How often the schedule is checked. See `sweep_schedule`.
     SCHEDULE_TICK_S = 60.0
@@ -2286,10 +2821,7 @@ async def main() -> None:
         log(f"[dev] token digest: {digest} (value never logged)")
 
     if args.voice:
-        from core.brain.router import Router
-        from core.bus import AudioBus
         from core.voice.audio_io import ArmedMicrophone
-        from core.voice.loop import VoiceLoop
         from core.voice.stt import WhisperSTT
         from core.voice.tts.piper_tts import PiperTTS
 
@@ -2322,84 +2854,8 @@ async def main() -> None:
         mic = ArmedMicrophone(pre_roll_s=1.0)
         stt = WhisperSTT(size=args.stt_model, compute_type="int8")
         tts = PiperTTS()
-        loop_ref = asyncio.get_running_loop()
-
-        def _emit_state(state: str, detail: dict | None = None) -> None:
-            # Called from the worker thread; hop back to the loop to broadcast.
-            #
-            # CONTRACT §4.1 already declares `detail?`, so including it is
-            # additive and does not move PROTOCOL_VERSION. It is OMITTED rather
-            # than sent as null when there is nothing to say — §3.2 makes an
-            # absent optional field the normal case, and a surface switching on
-            # its presence should not have to distinguish "absent" from "null".
-            payload: dict[str, Any] = {
-                "companionId": DEFAULT_COMPANION_ID, "state": state,
-            }
-
-            # ── "IN A CONVERSATION" IS NOT AN AgentState ─────────────────────
-            #
-            # ITEM 6's answer. `AgentState` is a CLOSED enum (CONTRACT §7.4), so
-            # adding `conversing` would be a BREAKING change: a version bump and
-            # both surfaces shipping together, for something that is not a state
-            # at all. She is `listening`, `thinking`, `speaking` or `working`
-            # DURING a conversation — the session is orthogonal to all four and
-            # persists across every one of them.
-            #
-            # So it rides in `detail`, which §4.1 already declares, which makes
-            # it additive with no version bump. It is attached to EVERY state
-            # event rather than only to transitions that happen to carry a tool,
-            # because an indicator that only updates sometimes will drift — and
-            # this one has to stay accurate for hours.
-            det = dict(detail or {})
-            det["session"] = {
-                "open": daemon.convo.open,
-                "turns": daemon.convo.turns,
-                "openedBy": daemon.convo.opened_by,
-            }
-            payload["detail"] = det
-            asyncio.run_coroutine_threadsafe(
-                daemon.broadcast("evt.agent.state", payload), loop_ref
-            )
-
-            # ── THE RE-ARM, AND `idle` IS THE ONLY SAFE MOMENT ──────────────
-            #
-            # `idle` is emitted by AudioBus from the output stream's
-            # `finished_callback` — the instant her audio actually DRAINS. Any
-            # earlier and the segment is open while she is still talking: Piper
-            # leaves the speaker, the microphone picks it up, Whisper
-            # transcribes it, and she answers herself in a loop. There is no
-            # acoustic echo cancellation here, which is exactly why this waits.
-            if (state == "idle" and daemon.convo.open
-                    and not daemon.ptt_active and daemon.voice is not None):
-                asyncio.run_coroutine_threadsafe(daemon.rearm_for_session(), loop_ref)
-
-        bus = AudioBus(on_state=lambda s, d=None: _emit_state(s.value, d))
-        daemon.voice = VoiceLoop(
-            mic=mic, stt=stt, tts=tts,
-            router=Router(health_sample=lambda: daemon.health.sample(
-                budget_spent=daemon.ledger.spent_today(),
-                budget_cap=daemon.budget_cap)),
-            bus=bus, on_state=_emit_state,
-            on_stage=lambda name, ms: log(f"  [turn] {ms:8.1f} ms  {name}"),
-            on_turn_timing=lambda payload: asyncio.run_coroutine_threadsafe(
-                daemon.broadcast("evt.turn.timing",
-                                 {"companionId": DEFAULT_COMPANION_ID, **payload}),
-                loop_ref),
-            dump_segments=args.dump_segments,
-            session=daemon.session, audit=daemon.audit, brain=daemon.brain,
-            conversation=daemon.conversation, speaker=_speaker, claims=daemon.claims,
-            style=daemon.style, relevance=daemon.relevance,
-        )
-        # CONTRACT §4.1 `evt.permission.request`. The red gate raises these and
-        # nothing can answer them yet — the approval card is P5 and Session 2's.
-        # Emitting them anyway is deliberate: the moment that card exists, red
-        # tools work with no daemon change, and until then the requests are
-        # visible on the wire and in the audit log rather than invisible.
-        daemon.voice.executor.approvals._on_request = (
-            lambda payload: asyncio.run_coroutine_threadsafe(
-                daemon.broadcast("evt.permission.request", payload), loop_ref)
-        )
-        daemon.voice.vad_config = daemon.settings.get("voice", {}) or {}
+        bus = daemon.attach_voice(mic=mic, stt=stt, tts=tts, speaker=_speaker,
+                                  dump_segments=args.dump_segments)
         # PRE-WARM PIPER. Constructing PiperTTS loads the voice but does not run
         # an inference, so the first real synthesis pays the ONNX lazy init —
         # measured at 709 ms first call versus 338 ms warm on a quiet machine.
@@ -2470,6 +2926,7 @@ async def main() -> None:
                             daemon._run_voice_turn(), _loop_w)
 
                     daemon.ptt_active = True
+                    daemon._segment_by = "wake"
                     # The wake phrase opens a conversation, not one turn.
                     daemon.open_session("wake")
                     await asyncio.to_thread(
@@ -2606,6 +3063,7 @@ async def main() -> None:
 
                 daemon.voice.start(on_auto_stop=_auto)
                 daemon.ptt_active = True
+                daemon._segment_by = "inject"
                 # Real-time pacing in 50 ms blocks, so VAD sees the same
                 # arrival cadence a live speaker produces.
                 blk = 800
@@ -2741,6 +3199,11 @@ if __name__ == "__main__":
     lifecycle.after_guard(guard=_guard, data_dir=_data_dir, runtime_dir=rt.local_appdata_root(),
                           runtime_file=rt.runtime_path(), flags=sys.argv[1:],
                           for_disable_inherited=_FOR_DISABLE_INHERITED)
+    try:
+        codelock.lock(_CODE_AT_START, log=log)
+    except codelock.MixedCode as _mixed:
+        log(f"!! REFUSING TO START - {_mixed}")
+        lifecycle.finish(_guard, lifecycle.EXIT_CRASHED, f"mixed code - {_mixed}")
     _code, _why = 0, "main returned (see the lines above)"
     try:
         asyncio.run(main())

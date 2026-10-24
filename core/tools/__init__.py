@@ -31,8 +31,8 @@ from typing import Any
 
 import yaml
 
-from . import (browser, claims_tools, clip, files, procs, shell, sysctl,
-               websearch, winman, x_tools)
+from . import (browser, claims_tools, clip, coding, files, gittools, procs, shell,
+               sysctl, websearch, winman, x_tools)
 from .base import TIERS, ToolError, ToolHold, ToolResult, ToolSpec
 
 _CONFIG = Path(__file__).resolve().parents[1] / "config" / "permissions.yaml"
@@ -116,6 +116,7 @@ _FILES = [
     ),
     _spec(
         name="fs.delete", tier="red", capability="fs.delete", handler=files.delete, holds=True,
+        resolve=files.check_target,
         # ⚠⚠ THE TARGET IS FROZEN THROUGH APPROVAL — the hole shell.execute had.
         # With `frozen = ()`, `resolve_edit` MERGED an edited `path` (same key,
         # same type, no rule against it): he approves "delete scratchA" on the
@@ -315,7 +316,7 @@ _SYSTEM = [
         audit="lock",
     ),
     _spec(
-        name="sys.sleep", tier="green", capability="system.control", handler=sysctl.sleep,
+        name="sys.sleep", tier="red", capability="system.shutdown", handler=sysctl.sleep, holds=True,
         # NOT "go to sleep" — that is how he tells HER to stop listening, and
         # this tool is green, so the collision suspended his laptop with no
         # confirmation. Suspending the machine names the machine.
@@ -878,9 +879,77 @@ _CLAIMS = [
 ]
 
 
+_CODE = [
+    _spec(
+        name="code.languages", tier="green", capability="code.inspect", handler=coding.list_languages,
+        phrasings=("what programming languages can you run", "do you have a c compiler"),
+        success="{said}",
+        failure="I could not look, sir. {reason} {alternative}",
+        audit="which languages can run {language}",
+        note="Looks on her PATH, his PATH and the known install folders, reads versions from files, and makes at "
+             "most one quick version check per language the first time; kept until he asks her to look again.",
+    ),
+    _spec(
+        name="code.run_file", tier="amber", capability="code.run", handler=coding.run_file, holds=True,
+        frozen=("path", "argv", "timeout_s", "how"),
+        phrasings=("run hello.py from my documents", "run sum.js on my desktop with 3 and 4"),
+        success="{said}",
+        failure="I did not run it, sir. {reason} {alternative}",
+        audit="RUN {path} args {argv} limit {timeout_s} s",
+        note="A source file he named, with its own interpreter or compiler, in a job object with a time limit and "
+             "the keyboard closed. Asks first for a file from the conversation, a search, the internet or a "
+             "protected folder; a file she wrote goes to code.run_mine.",
+    ),
+    _spec(
+        name="code.write", tier="green", capability="code.write", handler=coding.write_program,
+        phrasings=("write a python program that prints the first ten primes", "write a c++ program that adds two numbers"),
+        success="{said}",
+        failure="I did not write it, sir. {reason} {alternative}",
+        audit="WRITE {language} program: {task}",
+        note="One new file in her own code folder, written by her chat model only, recorded with its sha256; "
+             "never over an existing file.",
+    ),
+    _spec(
+        name="code.run_mine", tier="red", capability="code.run_own", handler=coding.run_mine, holds=True,
+        resolve=coding.resolve_mine, describe=coding.describe_mine, card_provenance="agent",
+        frozen=("path", "language", "file", "code", "sha256", "runs_in", "time_limit", "timeout_s", "lines",
+                "runs_as", "name", "which"),
+        phrasings=("run the program you wrote", "run primes.py from your code folder"),
+        success="{said}",
+        failure="I did not run it, sir. {reason} {alternative}",
+        audit="RUN HER PROGRAM {path} sha256 {sha256} limit {timeout_s} s",
+        note="A program she wrote: the card every time, showing the exact code and its sha256; runs once, only if "
+             "the file still matches the card.",
+    ),
+]
+
+_GIT = [
+    _spec(
+        name="git.repo", tier="amber", capability="git.local", handler=gittools.git_repo, holds=True,
+        frozen=("action", "folder", "name", "files", "message", "n"),
+        phrasings=("what's the git status of the tessa folder", "show me the last 5 commits in the tessa folder"),
+        success="{said}",
+        failure="Git did not do that, sir. {reason} {alternative}",
+        audit="GIT {action} in {folder} {name} {message}",
+        note="A fixed list of git actions with checked arguments, never a command line: status, log, diff, "
+             "branches, branch, switch, add, commit. A commit always asks first.",
+    ),
+    _spec(
+        name="git.push", tier="red", capability="git.push", handler=gittools.git_push, holds=True,
+        resolve=gittools.resolve_push, describe=gittools.describe_push,
+        frozen=("folder", "remote", "url", "branch", "ahead", "goes_online"),
+        phrasings=("push the tessa folder to github",),
+        success="{said}",
+        failure="The push did not happen, sir. {reason} {alternative}",
+        audit="GIT PUSH {folder} {remote} {branch}",
+        note="Goes online: the card every time, never remembered, never forced.",
+    ),
+]
+
+
 REGISTRY: dict[str, ToolSpec] = {
     s.name: s for s in (_FILES + _WINDOWS + _PROCS + _CLIP + _SYSTEM + _SHELL
-                        + _BROWSER + _X + _CLAIMS)
+                        + _BROWSER + _X + _CLAIMS + _CODE + _GIT)
 }
 
 # ─────────────────────────────────────────────────────────────────────────────

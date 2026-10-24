@@ -15,6 +15,7 @@ a fade is 200 ms of her still talking over him.
 
 from __future__ import annotations
 
+import math
 import threading
 import time
 from dataclasses import dataclass
@@ -23,6 +24,63 @@ from typing import Callable
 
 import numpy as np
 import sounddevice as sd
+
+LEVEL_FLOOR_DB = -50.0
+LEVEL_CEIL_DB = -6.0
+
+
+def level_of(block: np.ndarray) -> float:
+    if block.size == 0:
+        return 0.0
+    x = block.astype(np.float64)
+    rms = float(np.sqrt(np.mean(x * x))) / 32768.0
+    if rms <= 0.0:
+        return 0.0
+    db = 20.0 * math.log10(rms)
+    level = (db - LEVEL_FLOOR_DB) / (LEVEL_CEIL_DB - LEVEL_FLOOR_DB)
+    return round(min(1.0, max(0.0, level)), 3)
+
+
+class Playback:
+    def __init__(self, samples: np.ndarray, sample_rate: int) -> None:
+        self.samples = samples
+        self.sample_rate = sample_rate
+        self.done = threading.Event()
+        self.lock = threading.Lock()
+        self.cut = False
+        self.announced = False
+        self.final_sent = False
+        self.reported = False
+        self.held: list[tuple[float, int, float | None]] = []
+        self.seq = 0
+        self.played = 0
+        self.t_first: float | None = None
+        self.t_end: float | None = None
+        self.calls: list[float] = []
+        self.frames: list[int] = []
+        self.leads: list[float] = []
+
+    @property
+    def duration_s(self) -> float:
+        return len(self.samples) / self.sample_rate if self.sample_rate else 0.0
+
+    def summary(self) -> dict:
+        gaps = sorted((b - a) * 1000.0 for a, b in zip(self.calls, self.calls[1:]))
+        leads = sorted(x * 1000.0 for x in self.leads)
+        frames = self.frames
+        mode = max(set(frames), key=frames.count) if frames else 0
+
+        def pct(values: list[float], q: float) -> float | None:
+            return round(values[min(len(values) - 1, int(q * len(values)))], 1) if values else None
+
+        return {
+            "buffers": len(frames), "frames": mode, "rate": self.sample_rate,
+            "periodP50Ms": pct(gaps, 0.5), "periodMaxMs": round(gaps[-1], 1) if gaps else None,
+            "leadP50Ms": pct(leads, 0.5), "levels": self.seq,
+            "audioS": round(self.duration_s, 3),
+            "playedS": round(self.played / self.sample_rate, 3) if self.sample_rate else 0.0,
+            "cut": self.cut,
+        }
 
 
 class AgentState(str, Enum):
@@ -58,7 +116,9 @@ class AudioBus:
     audio is finished, which is the one thing that must not be true.
     """
 
-    def __init__(self, on_state: Callable[[AgentState], None] | None = None) -> None:
+    def __init__(self, on_state: Callable[[AgentState], None] | None = None,
+                 on_level: Callable[[float, int, float | None, bool, bool], None] | None = None,
+                 on_done: Callable[[Playback], None] | None = None) -> None:
         self._lock = threading.Lock()
         self._stream: sd.OutputStream | None = None
         self._samples: np.ndarray | None = None
@@ -67,6 +127,9 @@ class AudioBus:
         self._stopping = False
         self._on_state = on_state
         self._state = AgentState.IDLE
+        self._on_level = on_level
+        self._on_done = on_done
+        self._play: Playback | None = None
 
     # ── state ────────────────────────────────────────────────────────────────
 
@@ -99,10 +162,15 @@ class AudioBus:
     def is_speaking(self) -> bool:
         return self._stream is not None and not self._done.is_set()
 
+    @property
+    def playing(self) -> Playback | None:
+        return self._play if self.is_speaking else None
+
     # ── playback ─────────────────────────────────────────────────────────────
 
     def _callback(self, outdata: np.ndarray, frames: int, _t: object, _s: object) -> None:
         buf = self._samples
+        play = self._play
         if buf is None or self._stopping:
             outdata[:] = 0
             raise sd.CallbackStop
@@ -112,9 +180,77 @@ class AudioBus:
             outdata[: len(chunk), 0] = chunk
             outdata[len(chunk):] = 0
             self._pos = len(buf)
+            self._meter(play, outdata, frames, _t)
             raise sd.CallbackStop
         outdata[:, 0] = chunk
         self._pos = end
+        self._meter(play, outdata, frames, _t)
+
+    def _meter(self, play: Playback | None, outdata: np.ndarray, frames: int, t: object) -> None:
+        if play is None:
+            return
+        try:
+            now = time.perf_counter()
+            level = level_of(outdata[:, 0])
+            dac = float(getattr(t, "outputBufferDacTime", 0.0) or 0.0) if t is not None else 0.0
+            cur = float(getattr(t, "currentTime", 0.0) or 0.0) if t is not None else 0.0
+            lead = dac - cur if dac > 0.0 and cur > 0.0 and 0.0 <= dac - cur < 1.0 else None
+            if play.t_first is None:
+                play.t_first = now
+            play.calls.append(now)
+            play.frames.append(frames)
+            play.played = min(len(play.samples), play.played + frames)
+            if lead is not None:
+                play.leads.append(lead)
+            with play.lock:
+                if play.final_sent:
+                    return
+                play.seq += 1
+                if play.announced:
+                    self._emit_level(play, level, play.seq, lead, False)
+                else:
+                    play.held.append((level, play.seq, lead))
+        except Exception:
+            pass
+
+    def _emit_level(self, play: Playback, level: float, seq: int, lead: float | None, final: bool) -> None:
+        if self._on_level is None:
+            return
+        try:
+            self._on_level(level, seq, lead, final, play.cut)
+        except Exception:
+            pass
+
+    def _announce(self, play: Playback) -> None:
+        with play.lock:
+            play.announced = True
+            held, play.held = play.held, []
+            if play.final_sent:
+                return
+            for level, seq, lead in held:
+                self._emit_level(play, level, seq, lead, False)
+
+    def _final(self, play: Playback) -> None:
+        with play.lock:
+            if play.final_sent:
+                return
+            play.final_sent = True
+            play.t_end = time.perf_counter()
+            if not play.announced:
+                play.held = []
+                return
+            self._emit_level(play, 0.0, play.seq + 1, None, True)
+
+    def _report(self, play: Playback) -> None:
+        with play.lock:
+            if play.reported:
+                return
+            play.reported = True
+        if self._on_done is not None:
+            try:
+                self._on_done(play)
+            except Exception:
+                pass
 
     def speak(self, samples: np.ndarray, sample_rate: int, blocking: bool = False) -> None:
         """
@@ -129,29 +265,56 @@ class AudioBus:
         transition is driven by playback ending, not by a timer guessing.
         """
         self.stop("superseded")
+        play = Playback(samples.astype(np.int16), sample_rate)
 
         def _finished() -> None:
-            self._done.set()
+            self._final(play)
+            play.done.set()
+            if self._play is play:
+                self._done.set()
             # `stop()` sets `_stopping` before aborting, so a barge-in does not
             # come through here and wrongly report idle — the interrupting turn
             # owns the state from that point.
-            if not self._stopping:
+            if not self._stopping and not play.cut:
                 self.set_state(AgentState.IDLE)
+            self._report(play)
 
         with self._lock:
-            self._samples = samples.astype(np.int16)
+            self._samples = play.samples
             self._pos = 0
             self._stopping = False
             self._done.clear()
-            self._stream = sd.OutputStream(
-                samplerate=sample_rate, channels=1, dtype="int16",
-                callback=self._callback, finished_callback=_finished,
-            )
-            self._stream.start()
+            self._play = play
+            stream = None
+            try:
+                stream = sd.OutputStream(
+                    samplerate=sample_rate, channels=1, dtype="int16",
+                    callback=self._callback, finished_callback=_finished,
+                )
+                stream.start()
+            except Exception:
+                play.cut = True
+                play.final_sent = True
+                play.reported = True
+                play.done.set()
+                self._samples = None
+                self._play = None
+                self._done.set()
+                if stream is not None:
+                    try:
+                        stream.close(ignore_errors=True)
+                    except Exception:
+                        pass
+                raise
+            self._stream = stream
         self.set_state(AgentState.SPEAKING)
+        self._announce(play)
+        if play.done.is_set() and not play.cut and self._play is play:
+            self.set_state(AgentState.IDLE)
         if blocking:
             self._done.wait()
             self.set_state(AgentState.IDLE)
+        return play
 
     def stop(self, reason: str = "barge-in") -> BargeIn | None:
         """
@@ -166,6 +329,10 @@ class AudioBus:
             stream = self._stream
             if stream is None:
                 return None
+            play = self._play
+            playing = not self._done.is_set()
+            if play is not None and playing:
+                play.cut = True
             self._stopping = True
             try:
                 stream.abort(ignore_errors=True)
@@ -178,7 +345,13 @@ class AudioBus:
             self._stream = None
             self._samples = None
             self._done.set()
+            if playing:
+                self._state = AgentState.IDLE
         stopped = time.perf_counter()
+        if play is not None and playing:
+            self._final(play)
+            play.done.set()
+            self._report(play)
         return BargeIn(requested_at=requested, stopped_at=stopped)
 
     def close(self) -> None:

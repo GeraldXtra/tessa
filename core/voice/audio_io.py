@@ -242,6 +242,7 @@ class ArmedMicrophone:
         self._captured: list[np.ndarray] | None = None
         self._armed_at: float | None = None
         self._first_after_arm: float | None = None
+        self.heard_speech = False
 
     @property
     def ring_bytes(self) -> int:
@@ -455,6 +456,7 @@ class ArmedMicrophone:
                     if r >= threshold:
                         last_speech = now
                         heard_any = True
+                        self.heard_speech = True
                 seen = len(chunks)
             if heard_any and (now - last_speech) * 1000.0 >= silence_ms:
                 return "silence"
@@ -469,6 +471,7 @@ class ArmedMicrophone:
         existed when the key went down.
         """
         pre = self._snapshot_ring()
+        self.heard_speech = False
         self._captured = []
         self._armed_at = time.perf_counter()
         self._first_after_arm = None

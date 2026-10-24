@@ -21,7 +21,7 @@ half-listening, and he says yes.
 FOUR MORE THINGS THIS DOES
 
   * It HOLDS and reads the command back verbatim before running anything. His
-    own microphone has produced "Alicoy" and "The game is over" from ordinary
+    own microphone has produced "Alicoy" and a sentence he never said from ordinary
     sentences; a mistranscribed command is the normal case, not the edge case.
   * It refuses while untrusted content is in context — the caller passes the
     `SessionContext` gate, same as every other red tool.

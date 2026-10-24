@@ -53,13 +53,13 @@ print("\nconversation memory\n")
 c = Conversation(tmp)
 check("starts empty when no file exists", c.turns == [] and c.load_error is None)
 
-c.add("user", "what is a closure in javascript")
+c.add("user", "Tell me what a closure does in code.")
 c.add("assistant", "Based on my knowledge, Emperor, a closure remembers where it "
                    "was born. Shall we trace a quick example together?")
 c.add("user", "Yes, please.")
 check("four... three turns recorded", len(c.turns) == 3)
 msgs = c.messages()
-check("history replays oldest first", msgs[0].content.startswith("what is a closure"))
+check("history replays oldest first", msgs[0].content.startswith("Tell me what a closure"))
 check("her offer is in the history 'yes, please' attaches to",
       "trace a quick example" in msgs[1].content)
 check("his 'Yes, please.' is the last turn", msgs[-1].content == "Yes, please.")
@@ -157,7 +157,7 @@ for phrase in ["forget that", "Tessa, forget that", "start fresh", "start over",
                "clear your memory", "clear the context", "new conversation",
                "wipe your memory", "forget the last thing", "never mind that"]:
     check(f"{phrase!r} clears", is_clear_request(phrase))
-for phrase in ["open my downloads", "what is a closure", "forget me not",
+for phrase in ["open my pictures", "what is a closure", "forget me not",
                "start the server"]:
     check(f"{phrase!r} does NOT clear", not is_clear_request(phrase))
 check("two spoken variants, so it is not a tic", len(set(CLEARED_LINES)) >= 2)

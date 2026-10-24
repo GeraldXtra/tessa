@@ -81,7 +81,7 @@ MAX_TOKENS = 220
 #: Tools the model is never offered — see the module docstring.
 NEVER_OFFERED = frozenset({
     "shell.execute", "claims.confirm", "claims.reject", "context.forget",
-    "browser.submit", "x.read_dm", "x.send_dm",
+    "browser.submit", "x.read_dm", "x.send_dm", "code.run_mine",
 })
 
 #: Parameters the EXECUTOR supplies by signature. Never in a schema, never

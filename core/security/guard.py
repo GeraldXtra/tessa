@@ -56,6 +56,53 @@ class Decision:
         return self.verdict is Verdict.ALLOW
 
 
+_HIS_FOLDERS = ("Desktop", "Documents", "Downloads", "Pictures", "Music", "Videos")
+_TARGET_KEYS = ("path", "source", "src", "folder", "target", "directory")
+
+
+def _norm(p: Path) -> str:
+    return os.path.normcase(os.path.normpath(str(p)))
+
+
+def whole_folder(target: Any) -> str:
+    try:
+        p = Path(os.path.expandvars(str(target or ""))).expanduser()
+    except (TypeError, ValueError):
+        return ""
+    if not str(target or "").strip() or not p.is_absolute():
+        return ""
+    try:
+        r = p.resolve()
+    except (OSError, RuntimeError, ValueError):
+        r = Path(os.path.normpath(str(p)))
+    if r.parent == r:
+        return f"the whole {r.drive or str(r)} drive"
+    home = Path.home()
+    named = {_norm(home): "your whole home folder"}
+    for name in _HIS_FOLDERS:
+        named[_norm(home / name)] = f"your whole {name} folder"
+        named[_norm(home / "OneDrive" / name)] = f"your whole {name} folder"
+    label = named.get(_norm(r)) or named.get(_norm(p))
+    if label:
+        return label
+    try:
+        if (r / ".git").exists():
+            return f"the whole {r.name} repository"
+    except OSError:
+        return ""
+    return ""
+
+
+def whole_folder_target(args: dict[str, Any] | None) -> tuple[str, str]:
+    for key in _TARGET_KEYS:
+        value = (args or {}).get(key)
+        if isinstance(value, str) and value.strip():
+            label = whole_folder(value)
+            if label:
+                return value, label
+    return "", ""
+
+
 class Guard:
     def __init__(self, config_path: str | os.PathLike[str]) -> None:
         self.config_path = Path(config_path)
@@ -134,6 +181,13 @@ class Guard:
             return Decision(
                 Verdict.CONFIRM, tier,
                 f"{target} is a protected path — confirm regardless of tier or actor",
+                capability, actor, target,
+            )
+        whole = whole_folder(target) if mutating and target is not None else ""
+        if whole and tier in ("amber", "red"):
+            return Decision(
+                Verdict.CONFIRM, tier,
+                f"{target} is {whole} — confirm regardless of tier or actor",
                 capability, actor, target,
             )
 
