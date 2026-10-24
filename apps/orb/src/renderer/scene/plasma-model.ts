@@ -147,6 +147,12 @@ export const CHIP_ABOVE_PX = 34;
 export const CAPTION_H_PX = 22;
 export const QUICK_H_PX = 28;
 export const QUICK_W_MAX_PX = 620;
+export const COMPACT_CHIP_ABOVE_PX = 30;
+export const COMPACT_RIBBON_W_PX = 220;
+export const COMPACT_RIBBON_H_PX = 14;
+export const COMPACT_CAPTION_W_PX = 250;
+export const COMPACT_QUICK_W_PX = 250;
+export const GROW_S = 0.65;
 
 export function ribbonBox(cx: number, cy: number, r: number): { x: number; y: number; w: number; h: number } {
   const h = Math.round(Math.min(RIBBON_H_MAX, Math.max(RIBBON_H_MIN, RIBBON_H_R * r)));

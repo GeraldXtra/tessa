@@ -174,6 +174,7 @@ export const IPC = {
    * renderer's worst outcome here is a file containing a word.
    */
   themeSet: 'tessa:theme-set',
+  themeChanged: 'tessa:theme-changed',
   /** renderer → main, send. Owner pressed RETRY after a terminal failure. */
   retryConnection: 'tessa:retry-connection',
   /**
@@ -189,9 +190,41 @@ export const IPC = {
   /** renderer → main, send. Frameless window needs its own controls. */
   windowMinimize: 'tessa:window-minimize',
   windowClose: 'tessa:window-close',
+  windowMode: 'tessa:window-mode',
+  trayCommand: 'tessa:tray-command',
+  startDecided: 'tessa:start-decided',
   ping: 'tessa:ping',
   disk: 'tessa:disk',
 } as const;
+
+export type TrayCommand =
+  | { kind: 'mode'; mode: 'full' | 'compact' }
+  | { kind: 'rail'; id: string }
+  | { kind: 'closeRefused'; via: string }
+  | { kind: 'stop' };
+
+export const STOP_HER_LABEL = 'Stop her answer';
+
+export interface VoiceLevelPush {
+  level: number;
+  seq: number | null;
+  ts: string;
+  mainAt: number;
+}
+
+export const DRAWER_LIST = [
+  { id: 'trace', name: 'TRACE' },
+  { id: 'sentinel', name: 'SENTINEL' },
+  { id: 'pulse', name: 'PULSE' },
+  { id: 'jobs', name: 'JOBS' },
+  { id: 'chat', name: 'CHAT' },
+  { id: 'arsenal', name: 'ARSENAL' },
+  { id: 'recall', name: 'RECALL' },
+  { id: 'signal', name: 'SIGNAL' },
+] as const;
+
+export const MUTE_WHY = 'Needs the daemon: it does not handle cmd.voice.mute yet.';
+export const PANIC_WHY = 'Needs the daemon: core has no panic stop yet.';
 
 export interface DiskUsage {
   drive: string;
@@ -391,6 +424,10 @@ export interface DaemonHealth {
  */
 export type PttMode = 'toggle' | 'hold';
 
+export type OrbMode = 'full' | 'ambient' | 'compact';
+
+export const COMPACT_WINDOW = { w: 280, h: 316, cardW: 624, cardH: 460, inset: 24, r: 96, head: 26, cardSlot: 320 } as const;
+
 /**
  * The microphone claim as the surface is entitled to describe it.
  *
@@ -571,7 +608,7 @@ export const AGENT_ACK_TIMEOUT_MS = 3000;
  * frame carries today. When `evt.companion.roster` is ever emitted this
  * becomes the seed of a list rather than the list.
  */
-export const DEFAULT_COMPANION = { id: 'tessa', name: 'TESSA' } as const;
+export const DEFAULT_COMPANION = { id: 'tessa', name: 'Tessa' } as const;
 
 /**
  * What `agentSend` resolves to. `ok: true` is the daemon's `res.agent.accepted`
@@ -588,6 +625,7 @@ export interface AgentCancelReply {
   messageId: string;
   /** True only for `res.ok`. */
   ok: boolean;
+  cancelled?: boolean;
   /** The reply's envelope type, e.g. `res.ok` or `err.internal`. */
   type: string;
   /** The daemon's `message`, or the type when it sent none. */
@@ -644,8 +682,11 @@ export interface BootstrapInfo {
   /** Why that theme. Logged, so a silent fallback to cyan cannot look chosen. */
   themeReason: string;
   fixture: string | null;
+  pins: string[];
   memTotalMB: number;
   churn: boolean;
+  voiceTrace: boolean;
+  startMode: OrbMode;
 }
 
 /* ───────────────────────────────────────────────────── the bridge, in types */
@@ -690,7 +731,7 @@ export interface TessaBridge {
   onTurnTiming(listener: (timing: TurnTiming) => void): () => void;
   onMachineLoad(listener: (load: MachineLoad) => void): () => void;
   onJobs(listener: (jobs: JobView[]) => void): () => void;
-  onVoiceLevel(listener: (level: number) => void): () => void;
+  onVoiceLevel(listener: (push: VoiceLevelPush) => void): () => void;
   onVoiceWords(listener: (words: VoiceWords) => void): () => void;
   onTranscriptPartial(listener: (partial: TranscriptPartial) => void): () => void;
 
@@ -741,17 +782,21 @@ export interface TessaBridge {
    */
   agentSend(companionId: string, text: string): Promise<AgentSendResult>;
   /** Cancel a turn main accepted. Ids main never issued are dropped in main. */
-  agentCancel(companionId: string, messageId: string): void;
+  agentCancel(companionId: string, messageId: string | null): void;
   /** Returns an unsubscribe function. The daemon's answer to a cancel. */
   onAgentCancelReply(listener: (reply: AgentCancelReply) => void): () => void;
   /** Persist the theme choice. Display has already changed; this only saves it. */
   setTheme(theme: string): void;
+  onThemeChanged(listener: (theme: string) => void): () => void;
   /** Report a push-to-talk key edge. Main decides what it means. */
   pushToTalkEdge(edge: 'down' | 'up'): void;
   setPushToTalkMode(mode: PttMode): void;
   retryConnection(): void;
   minimizeWindow(): void;
   closeWindow(): void;
+  setWindowMode(mode: OrbMode, card: boolean, waiting: boolean, stoppable: boolean): void;
+  onTrayCommand(listener: (command: TrayCommand) => void): () => void;
+  onStartDecided(listener: (mode: OrbMode) => void): () => void;
   /** Dev only; a no-op string sink in production. */
   reportMetrics(line: string): void;
 }

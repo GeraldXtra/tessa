@@ -10,7 +10,9 @@
 
 import { join } from 'node:path';
 
-import { BrowserWindow, screen, type WebContents } from 'electron';
+import { BrowserWindow, screen, type Rectangle, type WebContents } from 'electron';
+
+import { COMPACT_WINDOW } from '../shared/ipc-contract.ts';
 
 import {
   loadWindowState,
@@ -50,7 +52,20 @@ export interface WindowOptions {
   isDev: boolean;
   /** Dev-server URL from electron-vite; absent in a packaged build. */
   rendererUrl: string | undefined;
+  start?: StartDecision | null;
 }
+
+export interface StartDecision {
+  log: (line: string) => void;
+  decided: (granted: boolean) => void;
+}
+
+export const START_FOCUS_WAIT_MS = 1000;
+
+const WM_ACTIVATE = 0x0006;
+const WM_SETFOCUS = 0x0007;
+const WM_ACTIVATEAPP = 0x001c;
+const WM_NCACTIVATE = 0x0086;
 
 /**
  * Is this launch carrying measurement instrumentation?
@@ -230,12 +245,21 @@ export function createOrbWindow(options: WindowOptions): BrowserWindow {
     },
   });
 
+  const start = options.start ?? null;
   // First launch, or a discarded restore, opens filling the work area exactly.
-  if (initial.isMaximized) window.maximize();
+  if (start) beginCompactStart(window, initial.isMaximized, start.log);
+  else if (initial.isMaximized) window.maximize();
 
   const noActivate = options.isDev && process.argv.includes('--dev-noactivate');
   if (noActivate) window.setFocusable(false);
-  window.once('ready-to-show', () => (noActivate ? window.showInactive() : window.show()));
+  window.once('ready-to-show', () => {
+    if (start) {
+      showAndDecide(window, start);
+      return;
+    }
+    if (noActivate) window.showInactive();
+    else window.show();
+  });
 
   if (!instrumented) attachStatePersistence(window);
   attachFullscreenToggle(window);
@@ -258,6 +282,130 @@ export function createOrbWindow(options: WindowOptions): BrowserWindow {
  * owner can never get their smaller window back. getNormalBounds keeps the
  * pre-maximize rectangle, which is what "restore" is supposed to mean.
  */
+interface CompactSave {
+  bounds: Rectangle;
+  maximized: boolean;
+  fullScreen: boolean;
+}
+
+const compactSaves = new WeakMap<BrowserWindow, CompactSave>();
+
+export function isCompactWindow(window: BrowserWindow): boolean {
+  return compactSaves.has(window);
+}
+
+function compactTarget(window: BrowserWindow, card: boolean): Rectangle {
+  const { workArea } = screen.getDisplayMatching(window.getBounds());
+  const width = card ? COMPACT_WINDOW.cardW : COMPACT_WINDOW.w;
+  const height = card ? COMPACT_WINDOW.cardH : COMPACT_WINDOW.h;
+  return {
+    x: workArea.x + workArea.width - width - COMPACT_WINDOW.inset,
+    y: workArea.y + workArea.height - height - COMPACT_WINDOW.inset,
+    width,
+    height,
+  };
+}
+
+export function setCompactWindow(window: BrowserWindow, on: boolean, card: boolean, log: (line: string) => void): void {
+  if (window.isDestroyed()) return;
+  const saved = compactSaves.get(window);
+  if (!on) {
+    if (!saved) return;
+    window.setAlwaysOnTop(false);
+    window.setMinimumSize(MIN_WIDTH, MIN_HEIGHT);
+    window.setBounds(saved.bounds);
+    if (saved.maximized) window.maximize();
+    if (saved.fullScreen) window.setFullScreen(true);
+    compactSaves.delete(window);
+    const c = window.getContentBounds();
+    log(`compact OFF: restored ${saved.bounds.width}x${saved.bounds.height} at ${saved.bounds.x},${saved.bounds.y} maximized=${saved.maximized} fullScreen=${saved.fullScreen}; content now ${c.width}x${c.height} at ${c.x},${c.y}; focused=${window.isFocused()}`);
+    return;
+  }
+  if (!saved) {
+    compactSaves.set(window, { bounds: window.getNormalBounds(), maximized: window.isMaximized(), fullScreen: window.isFullScreen() });
+    if (window.isFullScreen()) window.setFullScreen(false);
+    if (window.isMaximized()) window.unmaximize();
+    window.setMinimumSize(COMPACT_WINDOW.w, COMPACT_WINDOW.h);
+    window.setAlwaysOnTop(true, 'floating');
+  }
+  const target = compactTarget(window, card);
+  window.setContentBounds(target);
+  const c = window.getContentBounds();
+  log(`compact ON card=${card}: target ${target.width}x${target.height} at ${target.x},${target.y}; content ${c.width}x${c.height} at ${c.x},${c.y}; alwaysOnTop=${window.isAlwaysOnTop()} focused=${window.isFocused()}`);
+  setTimeout(() => {
+    if (window.isDestroyed() || !compactSaves.has(window)) return;
+    const now = window.getContentBounds();
+    const want = compactTarget(window, card);
+    if (now.width !== want.width || now.height !== want.height || now.x !== want.x || now.y !== want.y) {
+      window.setContentBounds(want);
+      log(`compact re-applied: was ${now.width}x${now.height} at ${now.x},${now.y}`);
+    }
+  }, 350);
+}
+
+function beginCompactStart(window: BrowserWindow, maximized: boolean, log: (line: string) => void): void {
+  const full = window.getBounds();
+  compactSaves.set(window, { bounds: full, maximized, fullScreen: false });
+  window.setMinimumSize(COMPACT_WINDOW.w, COMPACT_WINDOW.h);
+  window.setAlwaysOnTop(true, 'floating');
+  window.setContentBounds(compactTarget(window, false));
+  const c = window.getContentBounds();
+  log(
+    `START compact first: the hidden window is ${c.width}x${c.height} at ${c.x},${c.y}, on top; ` +
+      `Full is kept for later as ${full.width}x${full.height} at ${full.x},${full.y} maximized=${maximized}; nothing is shown yet`,
+  );
+}
+
+function low(b: Buffer): number {
+  return b.length >= 4 ? b.readUInt32LE(0) : 0;
+}
+
+function showAndDecide(window: BrowserWindow, start: StartDecision): void {
+  const t0 = performance.now();
+  const ms = (): string => (performance.now() - t0).toFixed(1);
+  const seen: string[] = [];
+  const hooked = [WM_ACTIVATE, WM_SETFOCUS, WM_ACTIVATEAPP, WM_NCACTIVATE];
+  let done = false;
+  let timer: NodeJS.Timeout | null = null;
+  const finish = (granted: boolean, why: string): void => {
+    if (done) return;
+    done = true;
+    if (timer) clearTimeout(timer);
+    setImmediate(() => {
+      if (window.isDestroyed()) return;
+      for (const m of hooked) window.unhookWindowMessage(m);
+      if (!granted) window.flashFrame(false);
+      const c = window.getContentBounds();
+      start.log(
+        `START ${granted ? 'GRANTED: Windows made the Orb the foreground window; it grows to Full' : 'REFUSED: Windows kept the foreground on another window; the Orb stays Compact, on top, and its taskbar flash is stopped'}` +
+          ` (${why}) at +${ms()} ms wall=${Date.now()}; messages ${seen.join(', ') || 'none'}; content ${c.width}x${c.height} at ${c.x},${c.y}; isFocused=${window.isFocused()}`,
+      );
+      start.decided(granted);
+    });
+  };
+  window.hookWindowMessage(WM_NCACTIVATE, (w) => {
+    const v = low(w);
+    seen.push(`NCACTIVATE(${v}) +${ms()}`);
+    if (v !== 0) finish(true, 'WM_NCACTIVATE TRUE');
+  });
+  window.hookWindowMessage(WM_ACTIVATE, (w) => {
+    seen.push(`ACTIVATE(${low(w) & 0xffff}) +${ms()}`);
+  });
+  window.hookWindowMessage(WM_ACTIVATEAPP, (w, l) => {
+    seen.push(`ACTIVATEAPP(${low(w)},${low(l)}) +${ms()}`);
+  });
+  window.hookWindowMessage(WM_SETFOCUS, () => {
+    seen.push(`SETFOCUS +${ms()}`);
+  });
+  const wall = Date.now();
+  window.show();
+  start.log(
+    `START shown at Compact size, on top, at wall=${wall}; show() returned after ${ms()} ms; ` +
+      `waiting up to ${START_FOCUS_WAIT_MS} ms for Windows to make it the foreground window`,
+  );
+  if (!done) timer = setTimeout(() => finish(false, `no WM_NCACTIVATE TRUE within ${START_FOCUS_WAIT_MS} ms`), START_FOCUS_WAIT_MS);
+}
+
 function attachStatePersistence(window: BrowserWindow): void {
   let timer: NodeJS.Timeout | null = null;
 
@@ -266,6 +414,7 @@ function attachStatePersistence(window: BrowserWindow): void {
     timer = setTimeout(() => {
       timer = null;
       if (window.isDestroyed()) return;
+      if (compactSaves.has(window)) return;
       // Fullscreen bounds are the panel, not a window the owner chose. Saving
       // them would make every launch after an F11 session open fullscreen-sized.
       if (window.isFullScreen()) return;
@@ -291,7 +440,7 @@ function attachStatePersistence(window: BrowserWindow): void {
   // A close can outrun a pending debounce; flush synchronously.
   window.on('close', () => {
     if (timer) clearTimeout(timer);
-    if (window.isFullScreen()) return;
+    if (window.isFullScreen() || compactSaves.has(window)) return;
     const bounds = window.getNormalBounds();
     saveWindowState({
       width: bounds.width,
@@ -315,6 +464,11 @@ function attachFullscreenToggle(window: BrowserWindow): void {
   window.webContents.on('before-input-event', (event, input) => {
     if (input.type !== 'keyDown' || input.key !== 'F11') return;
     event.preventDefault();
+    if (compactSaves.has(window)) {
+      console.log('[orb] F11 ignored: the window is in Compact mode');
+      return;
+    }
     window.setFullScreen(!window.isFullScreen());
+    console.log(`[orb] F11 fullScreen=${window.isFullScreen()}`);
   });
 }

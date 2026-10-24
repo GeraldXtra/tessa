@@ -125,7 +125,7 @@ async function main(): Promise<void> {
             // That list is the only cheap enumeration of the tree we get, and
             // main needs it: the grandchild is invisible to main otherwise.
             const claimed = new Set<number>([pid])
-            for (const m of String(stdout ?? '').matchAll(/PID (\d+)/g)) {
+            for (const m of String(stdout ?? '').replace(/\([^)]*\)/g, '').matchAll(/PID (\d+)/g)) {
               if (m[1]) claimed.add(Number(m[1]))
             }
             toMain({ t: 'reaped', pids: [...claimed] })
@@ -149,26 +149,6 @@ async function main(): Promise<void> {
       return
     }
 
-    // DEV HARNESS ONLY. Same term.write() the renderer's keystrokes reach.
-    if (msg?.t === 'devInput') {
-      try {
-        term?.write(Buffer.from(msg.b64, 'base64').toString('utf8'))
-      } catch (err) {
-        toMain({ t: 'log', message: `devInput failed: ${(err as Error).message}` })
-      }
-      return
-    }
-
-    if (msg?.t === 'devResize') {
-      try {
-        if (msg.cols > 0 && msg.rows > 0) term?.resize(msg.cols, msg.rows)
-        toMain({ t: 'log', message: `devResize -> ${msg.cols}x${msg.rows}` })
-      } catch (err) {
-        toMain({ t: 'log', message: `devResize failed: ${(err as Error).message}` })
-      }
-      return
-    }
-
     if (msg?.t !== 'spawn') return
 
     const port = e.ports[0]
@@ -177,6 +157,7 @@ async function main(): Promise<void> {
       return
     }
 
+    const spawnStart = Date.now()
     try {
       term = pty.spawn(msg.shell, msg.args, {
         name: 'xterm-256color',
@@ -204,7 +185,7 @@ async function main(): Promise<void> {
         // packages/tokens: that decides which colours xterm paints, this decides
         // whether a program asks for colour at all. The ramp stays on xterm's
         // built-in defaults per Gerald's Phase 1a ruling.
-        env: { ...process.env, TERM: 'xterm-256color', COLORTERM: 'truecolor' } as Record<
+        env: { ...process.env, ...(msg.env ?? {}), TERM: 'xterm-256color', COLORTERM: 'truecolor' } as Record<
           string,
           string
         >,
@@ -214,6 +195,7 @@ async function main(): Promise<void> {
       return
     }
 
+    toMain({ t: 'log', message: `pty.spawn returned pid ${term.pid} after ${Date.now() - spawnStart} ms` })
     const send = (m: PtyFromHost): void => port.postMessage(m)
 
     port.start()
@@ -244,11 +226,19 @@ async function main(): Promise<void> {
       toMain({ t: 'log', message: `DEV: teeing PTY output to ${msg.capturePath}` })
     }
 
+    let probe: { id: number; ch: string; t0: number } | null = null
     term.onData((d) => {
+      if (probe && d.includes(probe.ch)) {
+        send({ t: 'probed', id: probe.id, ms: performance.now() - probe.t0 })
+        probe = null
+      }
       tee?.(d)
       send({ t: 'data', b64: Buffer.from(d, 'utf8').toString('base64') })
     })
-    term.onExit(({ exitCode, signal }) => send({ t: 'exit', code: exitCode, signal }))
+    term.onExit(({ exitCode, signal }) => {
+      send({ t: 'exit', code: exitCode, signal })
+      toMain({ t: 'exited', code: exitCode })
+    })
 
     port.on('message', (ev) => {
       const cmd = ev.data as PtyToHost
@@ -264,6 +254,11 @@ async function main(): Promise<void> {
           break
         case 'kill':
           term.kill()
+          break
+        case 'probe':
+          if (!msg.devProbe) break
+          probe = { id: cmd.id, ch: Buffer.from(cmd.b64, 'base64').toString('utf8'), t0: performance.now() }
+          term.write(probe.ch)
           break
       }
     })

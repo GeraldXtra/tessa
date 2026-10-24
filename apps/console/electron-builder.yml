@@ -114,6 +114,8 @@ extraResources:
     to: tcli.cmd
   - from: resources/tcli-daemon.mjs
     to: tcli-daemon.mjs
+  - from: resources/shell
+    to: shell
 
 win:
   target:

@@ -11,6 +11,11 @@ import {
   CAPTION_H_PX,
   CAPTION_W_R,
   CHIP_ABOVE_PX,
+  COMPACT_CAPTION_W_PX,
+  COMPACT_CHIP_ABOVE_PX,
+  COMPACT_QUICK_W_PX,
+  COMPACT_RIBBON_H_PX,
+  COMPACT_RIBBON_W_PX,
   QUICK_H_PX,
   QUICK_W_MAX_PX,
   CHANGE_JUMP,
@@ -25,6 +30,7 @@ import {
   FLOW_RATE_B,
   FLOW_RATE_C,
   FLOW_RATE_D,
+  GROW_S,
   HEART_RIM,
   HEART_SIZE,
   HEART_WINDOW_S,
@@ -44,6 +50,7 @@ import {
   OVERLAY_QUAD,
   PALETTE_TAU_S,
   PARAM_KEYS,
+  RIBBON_GAP_PX,
   RIBBON_IN_TAU_S,
   RIBBON_OUT_TAU_S,
   RIBBON_RATE_HZ,
@@ -152,6 +159,7 @@ export interface PlasmaEngineOptions {
   onMark?: (mark: MarkReport) => void;
   onSentinel?: (alert: boolean) => void;
   onPath?: (path: RenderPath, reason: string) => void;
+  hold?: boolean;
 }
 
 export interface Followers {
@@ -161,7 +169,9 @@ export interface Followers {
 }
 
 export interface PlasmaEngine {
-  setPlacement(cx: number, cy: number, r: number): void;
+  setPlacement(cx: number, cy: number, r: number, snap?: boolean): void;
+  setCompact(on: boolean): void;
+  grow(): void;
   setFollowers(f: Followers): void;
   setCentreOffset(xPx: number, yPx: number): void;
   setFit(factor: number): void;
@@ -182,6 +192,8 @@ export interface PlasmaEngine {
   loseContextForTest(restoreAfterMs: number): boolean;
   stats(): PlasmaStats;
   takeIntervals(): number[];
+  traceVoice(on: boolean): void;
+  takeVoiceTrace(): number[];
   dispose(): void;
 }
 
@@ -341,6 +353,7 @@ export function createPlasmaEngine(options: PlasmaEngineOptions): PlasmaEngine {
   let voice = 0;
   let voiceIn = 0;
   let voiceAt = -1e9;
+  let voiceTrace: number[] | null = null;
   let tick = 0;
   const tickCol = new Float32Array(3);
   let heartStart = -1e9;
@@ -395,6 +408,9 @@ export function createPlasmaEngine(options: PlasmaEngineOptions): PlasmaEngine {
   let quickX = -1e9;
   let quickY = -1e9;
   let quickW = -1;
+  let compact = false;
+  let bootK = options.hold === true && !reduced ? 0 : 1;
+  let growAt = 0;
   let cx = 0;
   let cy = 0;
   let R = 100;
@@ -818,6 +834,16 @@ export function createPlasmaEngine(options: PlasmaEngineOptions): PlasmaEngine {
       (1 + BREATH_SIZE * bAmt * breathS) *
       (1 + VOICE_SIZE * voice * vm) *
       (1 + HEART_SIZE * heart * (1 - cur.hollow));
+    if (growAt > 0) {
+      const g = Math.min(1, (nowMs - growAt) / (GROW_S * 1000));
+      bootK = 1 - (1 - g) ** 3;
+      if (g >= 1) growAt = 0;
+    }
+    if (bootK < 1) {
+      energy *= bootK;
+      rim *= bootK;
+      orbR *= 0.3 + 0.7 * bootK;
+    }
     writeSurface(mA, rot, SURFACE_TILT_A, 0);
     writeSurface(mB, rot2, SURFACE_TILT_B, SURFACE_ROLL_B);
     off4[0] = offA;
@@ -841,7 +867,7 @@ export function createPlasmaEngine(options: PlasmaEngineOptions): PlasmaEngine {
       ctx.uniform3fv(b.u.uBg, pal.bg);
       ctx.uniform3fv(b.u.uMid, outCol.mid);
       ctx.uniform3fv(b.u.uFlareCol, flareCol);
-      ctx.uniform1f(b.u.uLoad, loadA);
+      ctx.uniform1f(b.u.uLoad, loadA * bootK);
       ctx.uniform1f(b.u.uEnergy, energy);
       ctx.uniform1f(b.u.uHeart, heart);
       ctx.uniform1f(b.u.uFlare, flareV);
@@ -852,6 +878,10 @@ export function createPlasmaEngine(options: PlasmaEngineOptions): PlasmaEngine {
     } else {
       ctx.clearColor(0, 0, 0, 0);
       ctx.clear(ctx.COLOR_BUFFER_BIT);
+    }
+    if (bootK < 0.01) {
+      g.timer?.end();
+      return;
     }
     ctx.enable(ctx.BLEND);
     ctx.blendFunc(ctx.ONE, ctx.ONE);
@@ -954,10 +984,15 @@ export function createPlasmaEngine(options: PlasmaEngineOptions): PlasmaEngine {
     drawFallback(fbCtx, fbView);
   }
 
+  function rib(): { x: number; y: number; w: number; h: number } {
+    if (!compact) return ribbonBox(cx, cy, R);
+    return { x: cx - COMPACT_RIBBON_W_PX / 2, y: cy + R + RIBBON_GAP_PX, w: COMPACT_RIBBON_W_PX, h: COMPACT_RIBBON_H_PX };
+  }
+
   function placeFollowers(): void {
     const chip = followers.chip;
     if (chip) {
-      const y = cy - R - CHIP_ABOVE_PX;
+      const y = cy - R - (compact ? COMPACT_CHIP_ABOVE_PX : CHIP_ABOVE_PX);
       if (Math.abs(cx - chipX) > 0.25 || Math.abs(y - chipY) > 0.25) {
         chipX = cx;
         chipY = y;
@@ -966,8 +1001,8 @@ export function createPlasmaEngine(options: PlasmaEngineOptions): PlasmaEngine {
     }
     const caption = followers.caption;
     if (caption) {
-      const box = ribbonBox(cx, cy, R);
-      const w = Math.round(CAPTION_W_R * R);
+      const box = rib();
+      const w = compact ? COMPACT_CAPTION_W_PX : Math.round(CAPTION_W_R * R);
       const x = cx - w / 2;
       const y = box.y + box.h + CAPTION_GAP_PX;
       if (w !== capW) {
@@ -982,8 +1017,8 @@ export function createPlasmaEngine(options: PlasmaEngineOptions): PlasmaEngine {
     }
     const quick = followers.quick;
     if (quick) {
-      const box = ribbonBox(cx, cy, R);
-      const w = Math.round(Math.min(CAPTION_W_R * R, QUICK_W_MAX_PX));
+      const box = rib();
+      const w = compact ? COMPACT_QUICK_W_PX : Math.round(Math.min(CAPTION_W_R * R, QUICK_W_MAX_PX));
       const x = cx - w / 2;
       const y = box.y + (box.h + CAPTION_GAP_PX + CAPTION_H_PX - QUICK_H_PX) / 2;
       if (w !== quickW) {
@@ -1000,7 +1035,7 @@ export function createPlasmaEngine(options: PlasmaEngineOptions): PlasmaEngine {
 
   function placeRibbon(): void {
     if (!ribbonCanvas) return;
-    const box = ribbonBox(cx, cy, R);
+    const box = rib();
     const rw = box.w;
     const rh = box.h;
     const x = box.x;
@@ -1041,6 +1076,9 @@ export function createPlasmaEngine(options: PlasmaEngineOptions): PlasmaEngine {
       hAcc -= 1 / RIBBON_RATE_HZ;
       hHead = (hHead + 1) % RIBBON_SAMPLES;
       hist[hHead] = night ? 0 : voice;
+    }
+    if (voiceTrace && voiceTrace.length < 70000 && (shown === 'speaking' || ribbonA > 0.001)) {
+      voiceTrace.push(nowMs, fresh ? voiceIn : 0, voice, ribbonA, hist[hHead] ?? 0, orbR, energy);
     }
     const bw = ribbonCanvas.width;
     const bh = ribbonCanvas.height;
@@ -1359,12 +1397,12 @@ export function createPlasmaEngine(options: PlasmaEngineOptions): PlasmaEngine {
   requestDraw();
 
   return {
-    setPlacement(x, y, r) {
+    setPlacement(x, y, r, snap) {
       if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(r) || r <= 0) return;
       pcxT = x;
       pcyT = y;
       prT = r;
-      if (!placeSet) {
+      if (!placeSet || snap === true) {
         placeSet = true;
         pcx = x;
         pcy = y;
@@ -1382,6 +1420,25 @@ export function createPlasmaEngine(options: PlasmaEngineOptions): PlasmaEngine {
       quickX = -1e9;
       quickY = -1e9;
       quickW = -1;
+      requestDraw();
+    },
+    grow() {
+      if (bootK >= 1 || growAt > 0) return;
+      growAt = performance.now();
+      requestDraw();
+    },
+    setCompact(on) {
+      if (on === compact) return;
+      compact = on;
+      chipX = -1e9;
+      chipY = -1e9;
+      capX = -1e9;
+      capY = -1e9;
+      capW = -1;
+      quickX = -1e9;
+      quickY = -1e9;
+      quickW = -1;
+      ribbonDirty = true;
       requestDraw();
     },
     setCentreOffset(xPx, yPx) {
@@ -1607,6 +1664,15 @@ export function createPlasmaEngine(options: PlasmaEngineOptions): PlasmaEngine {
     takeIntervals() {
       const out = Array.from(ivHist);
       ivHist.fill(0);
+      return out;
+    },
+    traceVoice(on) {
+      voiceTrace = on ? [] : null;
+    },
+    takeVoiceTrace() {
+      if (!voiceTrace) return [];
+      const out = voiceTrace;
+      voiceTrace = [];
       return out;
     },
     dispose() {

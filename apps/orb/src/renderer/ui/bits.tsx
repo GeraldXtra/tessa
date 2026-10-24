@@ -1,6 +1,10 @@
-import type { ReactNode } from 'react';
+import type { CSSProperties, ReactNode } from 'react';
 
 import { hms } from './format.ts';
+
+export function stagger(i: number): CSSProperties {
+  return { ['--i' as string]: i } as CSSProperties;
+}
 
 export function Val({ text, className = 'v' }: { text: string; className?: string }) {
   return (

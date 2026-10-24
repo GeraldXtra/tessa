@@ -32,20 +32,7 @@ export type PtyToHost =
   | { t: 'write'; b64: string }
   | { t: 'resize'; cols: number; rows: number }
   | { t: 'kill' }
-
-/**
- * DEV HARNESS ONLY — main → host, to type into the PTY.
- *
- * There is no supported way to drive xterm's keyboard from outside the
- * renderer, and Step 5 requires the commands to run in the Console's OWN
- * terminal rather than in some other shell. This writes to the SAME
- * `term.write()` the renderer's keystrokes reach, so the path under test is the
- * real one; only the origin of the bytes differs.
- */
-export interface DevInput {
-  t: 'devInput'
-  b64: string
-}
+  | { t: 'probe'; id: number; b64: string }
 
 /** Host → renderer. */
 export type PtyFromHost =
@@ -53,6 +40,7 @@ export type PtyFromHost =
   | { t: 'data'; b64: string }
   | { t: 'exit'; code: number; signal?: number }
   | { t: 'error'; message: string }
+  | { t: 'probed'; id: number; ms: number }
 
 /** Host → main, on the control channel (not the MessagePort). */
 export type HostToMain =
@@ -69,6 +57,7 @@ export type HostToMain =
    * outside the observation set entirely while `killed` was reported as true.
    */
   | { t: 'reaped'; pids: number[] }
+  | { t: 'exited'; code: number }
 
 /** Main → host, on the control channel. */
 export type MainToHost =
@@ -79,6 +68,7 @@ export type MainToHost =
       cwd: string
       cols: number
       rows: number
+      env?: Record<string, string>
       /**
        * DEV HARNESS ONLY. Delay the `spawned` reply by this many ms.
        *
@@ -97,6 +87,7 @@ export type MainToHost =
        * substitute for it. Set only by `--capture`.
        */
       capturePath?: string
+      devProbe?: boolean
     }
   /**
    * Reap the PTY and exit.
@@ -106,9 +97,6 @@ export type MainToHost =
    * Step 2, where a force-kill left 2 cmd.exe and 4 conhost.exe behind.
    */
   | { t: 'shutdown' }
-  | DevInput
-  /** DEV HARNESS ONLY. Resize the PTY from main, for the Step 5 resize check. */
-  | { t: 'devResize'; cols: number; rows: number }
 
 /** Which rung is hosting the PTY. Reported so the UI can be honest about it. */
 export const PTY_HOST_KINDS = ['utilityProcess', 'main', 'forkedNode'] as const

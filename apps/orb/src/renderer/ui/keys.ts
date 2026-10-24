@@ -1,8 +1,10 @@
 import { approvalsStore } from '../state/approval-store.ts';
-import { closeQuick, composeStore, openQuick, requestComposeFocus } from '../state/compose-store.ts';
+import { closeQuick, composePatch, composeStore, openQuick, requestComposeFocus } from '../state/compose-store.ts';
 import { RAIL_IDS, connectionStore, railStore, type RailId } from '../state/store.ts';
+import { escStops, stopHer } from '../state/voice.ts';
 import { answerCard, cardFieldHasFocus, liveEntries } from './Card.tsx';
-import { debugStore, dockShownStore } from './stores.ts';
+import { closePalette, cycleMode, modeStore, openPalette, paletteStore, setMode } from './modes.ts';
+import { debugStore, dockShownStore, pushNote } from './stores.ts';
 
 function editable(target: EventTarget | null): boolean {
   if (!(target instanceof HTMLElement)) return false;
@@ -20,16 +22,46 @@ function chordName(e: KeyboardEvent): string {
   return parts.join('+');
 }
 
+function source(e: KeyboardEvent): string {
+  return `${chordName(e)} code=${e.code || '(empty)'} keyCode=${e.keyCode} trusted=${e.isTrusted}`;
+}
+
 export function cardWaiting(): boolean {
   return liveEntries(approvalsStore.get()).length > 0;
 }
 
-export function toggleRail(id: RailId, report: (line: string) => void, via: string): void {
+export function openRail(id: RailId, report: (line: string) => void, via: string): boolean {
   if (cardWaiting()) {
     report(`KEY ${via} refused: an approval card is waiting, drawers stay closed`);
+    return false;
+  }
+  closePalette(report, `drawer ${id}`);
+  if (modeStore.get() !== 'full') setMode('full', report, `${via}, a drawer opens in Full`);
+  railStore.set(id);
+  return true;
+}
+
+export function toggleRail(id: RailId, report: (line: string) => void, via: string): void {
+  const shown = railStore.get() === id && !paletteStore.get().open && modeStore.get() === 'full';
+  if (shown && !cardWaiting()) {
+    railStore.set(null);
     return;
   }
-  railStore.set(railStore.get() === id ? null : id);
+  openRail(id, report, via);
+}
+
+export function togglePalette(report: (line: string) => void, via: string): void {
+  if (paletteStore.get().open) {
+    closePalette(report, via);
+    return;
+  }
+  if (cardWaiting()) {
+    report(`KEY ${via} refused: an approval card is waiting, the palette stays closed`);
+    pushNote('ORB', 'Answer the approval first.', 'wait');
+    return;
+  }
+  if (modeStore.get() === 'compact') setMode('full', report, `${via}, the palette opens in Full`);
+  openPalette(report, via);
 }
 
 export function startTyping(report: (line: string) => void, via: string): void {
@@ -42,6 +74,15 @@ export function startTyping(report: (line: string) => void, via: string): void {
   report(`KEY ${via} -> quick line${cardWaiting() ? ' (an approval card is waiting; the quick line cannot answer it)' : ''}`);
 }
 
+export function askTessa(text: string, report: (line: string) => void, via: string): void {
+  const add = text.trim();
+  const draft = composeStore.get().draft;
+  const next = draft.length === 0 ? add : `${draft}${/\s$/.test(draft) ? '' : ' '}${add}`;
+  composePatch({ draft: next, error: null });
+  report(`ASK via=${via}: ${add.length} chars put in the shared draft (${draft.length} chars already there, kept), nothing sent`);
+  window.setTimeout(() => startTyping(report, via), 0);
+}
+
 export function installKeys(report: (line: string) => void): () => void {
   function onKey(e: KeyboardEvent): void {
     const typing = editable(e.target);
@@ -49,19 +90,38 @@ export function installKeys(report: (line: string) => void): () => void {
     const onlyCtrl = e.ctrlKey && !e.altKey && !e.shiftKey && !e.metaKey;
     const noMods = !e.ctrlKey && !e.altKey && !e.metaKey;
 
+    if (onlyCtrl && (e.code === 'KeyK' || (e.code === '' && e.keyCode === 75))) {
+      e.preventDefault();
+      if (!e.repeat) togglePalette(report, source(e));
+      return;
+    }
+
     if (e.key === 'Escape' && noMods && !e.shiftKey) {
+      if (paletteStore.get().open) {
+        e.preventDefault();
+        closePalette(report, 'Escape');
+        return;
+      }
       if (composeStore.get().quickOpen) {
         e.preventDefault();
         closeQuick();
         report(`KEY Escape closed the quick line, nothing sent, draft kept (${composeStore.get().draft.length} chars)`);
         return;
       }
-      if (railStore.get() !== null) {
+      if (railStore.get() !== null && modeStore.get() === 'full') {
         e.preventDefault();
         railStore.set(null);
+        report('KEY Escape closed the drawer');
         return;
       }
-      if (e.target instanceof HTMLTextAreaElement && e.target.dataset['place'] === 'dock') e.target.blur();
+      if (e.target instanceof HTMLTextAreaElement && e.target.dataset['place'] === 'dock') {
+        e.target.blur();
+        return;
+      }
+      if (!e.repeat && escStops(connectionStore.get().phase === 'connected')) {
+        e.preventDefault();
+        stopHer(`Escape ${source(e)}`);
+      }
       return;
     }
 
@@ -96,6 +156,12 @@ export function installKeys(report: (line: string) => void): () => void {
     if (noMods && !e.repeat && e.key === '/') {
       e.preventDefault();
       startTyping(report, '/');
+      return;
+    }
+
+    if (noMods && !e.shiftKey && (e.code === 'KeyF' || (e.code === '' && e.keyCode === 70))) {
+      e.preventDefault();
+      if (!e.repeat) cycleMode(report, source(e));
       return;
     }
 

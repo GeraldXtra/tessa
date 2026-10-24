@@ -28,6 +28,7 @@ import {
   type DaemonHealth,
   type DiskUsage,
   type MicState,
+  type OrbMode,
   type OrbNotification,
   type PermissionRequest,
   type PingResult,
@@ -42,6 +43,8 @@ import {
   type TranscriptPartial,
   type TurnTiming,
   type TessaBridge,
+  type TrayCommand,
+  type VoiceLevelPush,
   type VoiceWords,
 } from '../shared/ipc-contract.ts';
 
@@ -141,7 +144,7 @@ const bridge: TessaBridge = {
 
   onMachineLoad: subscribe<MachineLoad>(IPC.machineLoad),
   onJobs: subscribe<JobView[]>(IPC.jobs),
-  onVoiceLevel: subscribe<number>(IPC.voiceLevel),
+  onVoiceLevel: subscribe<VoiceLevelPush>(IPC.voiceLevel),
   onVoiceWords: subscribe<VoiceWords>(IPC.voiceWords),
   onTranscriptPartial: subscribe<TranscriptPartial>(IPC.transcriptPartial),
   onAuditAppended: subscribe<AuditEntry>(IPC.auditAppended),
@@ -202,12 +205,12 @@ const bridge: TessaBridge = {
     });
   },
 
-  agentCancel: (companionId: string, messageId: string): void => {
-    if (typeof companionId !== 'string' || typeof messageId !== 'string') return;
-    if (!companionId || !messageId) return;
+  agentCancel: (companionId: string, messageId: string | null): void => {
+    if (typeof companionId !== 'string' || !companionId) return;
+    if (messageId !== null && (typeof messageId !== 'string' || !messageId)) return;
     ipcRenderer.send(IPC.agentCancel, {
       companionId: companionId.slice(0, 64),
-      messageId: messageId.slice(0, 64),
+      messageId: messageId === null ? null : messageId.slice(0, 64),
     });
   },
 
@@ -216,6 +219,7 @@ const bridge: TessaBridge = {
   // Persistence only — the renderer has already repainted itself. Main
   // re-validates the id, so the worst a bad value achieves is being ignored.
   setTheme: (theme: string): void => ipcRenderer.send(IPC.themeSet, String(theme).slice(0, 32)),
+  onThemeChanged: subscribe<string>(IPC.themeChanged),
 
   /**
    * An EDGE, not an action. Note what is NOT here: no `startRecording`, no way
@@ -236,6 +240,11 @@ const bridge: TessaBridge = {
   retryConnection: (): void => ipcRenderer.send(IPC.retryConnection),
   minimizeWindow: (): void => ipcRenderer.send(IPC.windowMinimize),
   closeWindow: (): void => ipcRenderer.send(IPC.windowClose),
+  setWindowMode: (mode: OrbMode, card: boolean, waiting: boolean, stoppable: boolean): void => {
+    if (mode === 'full' || mode === 'ambient' || mode === 'compact') ipcRenderer.send(IPC.windowMode, { mode, card: card === true, waiting: waiting === true, stoppable: stoppable === true });
+  },
+  onTrayCommand: subscribe<TrayCommand>(IPC.trayCommand),
+  onStartDecided: subscribe<OrbMode>(IPC.startDecided),
 
   // Coerced to a string here rather than trusted from the caller: this channel
   // ends up in a log line, and the renderer does not get to choose its shape.

@@ -1,62 +1,29 @@
-/**
- * apps/console/src/main/shells.ts — which shell, and where is it really.
- *
- * Three shells, because Gerald asked for "all commands that are running on
- * command prompt, powershell and linux, mac os":
- *
- *   powershell  DEFAULT. `clear` works natively, and it is what modern tooling
- *               assumes on Windows.
- *   cmd         `cls`. Kept because some things still only work here.
- *   gitbash     THE ANSWER TO "mac os commands". ls, grep, cat, chmod, find,
- *               sed, awk, head, tail — a real Unix userland (MSYS2), not an
- *               emulation of one.
- *
- * NO ALIAS SHIMS. Defining `ls` as `dir` inside cmd was considered and rejected:
- * the shims break the moment a real flag is used (`ls -la`, `grep -r`), and they
- * teach a vocabulary that fails under pressure. A real bash is honest about what
- * it is.
- *
- * ─────────────────────────────────────────────────────────────────────────────
- * GIT BASH IS RESOLVED, NEVER HARD-CODED
- *
- * `C:\Program Files\Git\bin\bash.exe` is only the most common answer. A per-user
- * install lands in %LOCALAPPDATA%\Programs\Git, a portable install lands
- * wherever it was unzipped, and either can move. So it is looked up in the order
- * a human would: the installer's own registry key, then the `git` already on
- * PATH, then the standard locations. Whichever answers first is reported, so a
- * support question is answered by the log rather than by guessing.
- */
-
 import { execFileSync } from 'node:child_process'
 import { existsSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 
-export const SHELL_IDS = ['powershell', 'cmd', 'gitbash'] as const
+export const SHELL_IDS = ['powershell', 'gitbash', 'cmd', 'pwsh', 'wsl'] as const
 export type ShellId = (typeof SHELL_IDS)[number]
 
 export interface ShellSpec {
   id: ShellId
-  /** What the UI calls it. */
-  label: string
-  /** Absolute path to the executable, or '' when unavailable. */
+  tag: string
+  name: string
+  version: string
+  key: string
   exe: string
-  args: string[]
   available: boolean
-  /** How it was found — registry, PATH, a standard location. For the log. */
   how: string
-  /**
-   * What this shell EMITS.
-   *
-   * The terminal always decodes UTF-8 (see Terminal.tsx — bytes reach xterm as
-   * a Uint8Array, not a binary string). PowerShell 5.1 and Git Bash emit UTF-8.
-   * cmd.exe emits the console's OEM codepage, which on this machine is 850/437,
-   * so anything non-ASCII would arrive as the wrong glyph. It is switched to
-   * 65001 at spawn, quietly, rather than left to produce mojibake.
-   */
-  emits: 'utf8' | 'oem->utf8'
+  integrated: boolean
 }
 
-/** Read a registry value, or '' — never throws. */
+export interface SpawnPlan {
+  exe: string
+  args: string[]
+  env: Record<string, string>
+  integrated: boolean
+}
+
 function regValue(hive: string, key: string, name: string): string {
   try {
     const out = execFileSync('reg', ['query', `${hive}\\${key}`, '/v', name], {
@@ -71,180 +38,177 @@ function regValue(hive: string, key: string, name: string): string {
   }
 }
 
-/** Where is `git`, if it is on PATH at all? */
-function gitOnPath(): string {
+function regSubkeys(hive: string, key: string): string[] {
   try {
-    const out = execFileSync('where', ['git'], {
+    const out = execFileSync('reg', ['query', `${hive}\\${key}`], {
       encoding: 'utf8',
       windowsHide: true,
       timeout: 4000,
     })
-    return out.split(/\r?\n/).find((l) => l.trim().toLowerCase().endsWith('git.exe'))?.trim() ?? ''
+    return out
+      .split(/\r?\n/)
+      .map((l) => l.trim())
+      .filter((l) => l.toUpperCase().startsWith(`${hive}\\${key}\\`.toUpperCase()))
   } catch {
-    return ''
+    return []
   }
 }
 
-/** (path, how) for Git Bash, or ('', why-not). */
-export function findGitBash(): { exe: string; how: string } {
-  // 1. The installer's own key. Most authoritative, and it is what Git for
-  //    Windows writes on both machine-wide and per-user installs.
+export function onPath(exeName: string): string {
+  const dirs = (process.env['PATH'] ?? '').split(';').map((d) => d.trim()).filter(Boolean)
+  for (const d of dirs) {
+    const p = join(d, exeName)
+    if (existsSync(p)) return p
+  }
+  return ''
+}
+
+function majorMinor(v: string): string {
+  const m = v.match(/^(\d+)\.(\d+)/)
+  return m ? `${m[1]}.${m[2]}` : ''
+}
+
+function findGitBash(): { exe: string; how: string; version: string } {
   for (const hive of ['HKLM', 'HKCU']) {
     const root = regValue(hive, 'SOFTWARE\\GitForWindows', 'InstallPath')
     if (root) {
       const exe = join(root, 'bin', 'bash.exe')
-      if (existsSync(exe)) return { exe, how: `registry ${hive}\\SOFTWARE\\GitForWindows` }
+      if (existsSync(exe)) {
+        return {
+          exe,
+          how: `registry ${hive}\\SOFTWARE\\GitForWindows`,
+          version: majorMinor(regValue(hive, 'SOFTWARE\\GitForWindows', 'CurrentVersion')),
+        }
+      }
     }
   }
-
-  // 2. Derive it from the `git` he already has. `<root>\cmd\git.exe` or
-  //    `<root>\mingw64\bin\git.exe` both sit a known distance from bin\bash.exe.
-  const git = gitOnPath()
+  const git = onPath('git.exe')
   if (git) {
     for (const up of [2, 3]) {
       let root = git
       for (let i = 0; i < up; i++) root = dirname(root)
       const exe = join(root, 'bin', 'bash.exe')
-      if (existsSync(exe)) return { exe, how: `derived from git on PATH (${git})` }
+      if (existsSync(exe)) return { exe, how: `derived from git on PATH (${git})`, version: '' }
     }
   }
-
-  // 3. The usual places, last.
   const candidates = [
     join(process.env['ProgramFiles'] ?? 'C:\\Program Files', 'Git', 'bin', 'bash.exe'),
-    join(process.env['ProgramFiles(x86)'] ?? 'C:\\Program Files (x86)', 'Git', 'bin', 'bash.exe'),
     join(process.env['LOCALAPPDATA'] ?? '', 'Programs', 'Git', 'bin', 'bash.exe'),
   ]
   for (const exe of candidates) {
-    if (exe && existsSync(exe)) return { exe, how: `standard location ${exe}` }
+    if (exe && existsSync(exe)) return { exe, how: `standard location ${exe}`, version: '' }
   }
-
-  return { exe: '', how: 'not found in the registry, on PATH, or in the standard locations' }
+  return { exe: '', how: 'not found in the registry, on PATH, or in the standard locations', version: '' }
 }
 
-function findPowerShell(): { exe: string; how: string } {
-  // Windows PowerShell 5.1 ships with the OS and is what this machine has.
-  // PowerShell 7 (`pwsh.exe`) is preferred when present — it is not, here.
-  const pwsh = join(process.env['ProgramFiles'] ?? '', 'PowerShell', '7', 'pwsh.exe')
-  if (existsSync(pwsh)) return { exe: pwsh, how: 'PowerShell 7' }
-  const ps = join(
-    process.env['SystemRoot'] ?? 'C:\\Windows',
-    'System32',
-    'WindowsPowerShell',
-    'v1.0',
-    'powershell.exe',
-  )
-  if (existsSync(ps)) return { exe: ps, how: 'Windows PowerShell 5.1 (in-box)' }
-  return { exe: '', how: 'no powershell.exe or pwsh.exe found' }
+function findWindowsPowerShell(): { exe: string; how: string; version: string } {
+  const exe = join(process.env['SystemRoot'] ?? 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe')
+  if (!existsSync(exe)) return { exe: '', how: 'powershell.exe not found', version: '' }
+  const v = regValue('HKLM', 'SOFTWARE\\Microsoft\\PowerShell\\3\\PowerShellEngine', 'PowerShellVersion')
+  return { exe, how: 'Windows PowerShell (in-box)', version: majorMinor(v) }
+}
+
+function findPwsh(): { exe: string; how: string; version: string } {
+  const fixed = join(process.env['ProgramFiles'] ?? 'C:\\Program Files', 'PowerShell', '7', 'pwsh.exe')
+  if (existsSync(fixed)) return { exe: fixed, how: 'Program Files\\PowerShell\\7', version: '7' }
+  const p = onPath('pwsh.exe')
+  if (p) return { exe: p, how: `pwsh.exe on PATH (${p})`, version: '' }
+  return { exe: '', how: 'pwsh.exe not in Program Files\\PowerShell\\7 or on PATH', version: '' }
 }
 
 function findCmd(): { exe: string; how: string } {
   const exe = process.env['COMSPEC'] ?? join(process.env['SystemRoot'] ?? 'C:\\Windows', 'System32', 'cmd.exe')
-  return existsSync(exe)
-    ? { exe, how: exe === process.env['COMSPEC'] ? '%COMSPEC%' : 'System32' }
-    : { exe: '', how: 'cmd.exe not found' }
+  return existsSync(exe) ? { exe, how: '%COMSPEC%' } : { exe: '', how: 'cmd.exe not found' }
 }
 
-/** Every shell, whether or not it is installed. Ordered as the UI shows them. */
-export function resolveShells(): ShellSpec[] {
-  const ps = findPowerShell()
-  const cmd = findCmd()
-  const bash = findGitBash()
+function findWsl(): { exe: string; how: string } {
+  const exe = join(process.env['SystemRoot'] ?? 'C:\\Windows', 'System32', 'wsl.exe')
+  if (!existsSync(exe)) return { exe: '', how: 'wsl.exe not found' }
+  const distros = regSubkeys('HKCU', 'Software\\Microsoft\\Windows\\CurrentVersion\\Lxss')
+    .map((k) => regValue('HKCU', k.slice('HKCU\\'.length), 'DistributionName'))
+    .filter(Boolean)
+  const usable = distros.filter((d) => !/^docker-desktop/i.test(d))
+  if (!usable.length) {
+    return {
+      exe: '',
+      how: distros.length
+        ? `wsl.exe present, but the only distributions are ${distros.join(', ')}`
+        : 'wsl.exe present, but no distribution is installed',
+    }
+  }
+  return { exe, how: `WSL distributions: ${usable.join(', ')}` }
+}
 
+export function resolveShells(): ShellSpec[] {
+  const ps = findWindowsPowerShell()
+  const bash = findGitBash()
+  const cmd = findCmd()
+  const pwsh = findPwsh()
+  const wsl = findWsl()
   return [
-    {
-      id: 'powershell',
-      label: 'PowerShell',
-      exe: ps.exe,
-      // -NoLogo, and NOT -NoProfile: his profile is his environment, and a
-      // terminal that silently ignores it is not his shell.
-      //
-      // THE ENCODING LINE IS NOT OPTIONAL, AND I HAD THIS WRONG.
-      //
-      // I first marked PowerShell as emitting UTF-8. Measured on a real PTY it
-      // does not: Windows PowerShell 5.1 writes the OEM codepage, so `café`
-      // arrived as `caf` + a replacement character and box-drawing and emoji
-      // were dropped entirely before they ever reached the terminal. That is a
-      // shell-side loss — no amount of correct decoding in the renderer can
-      // recover a byte the shell never sent.
-      //
-      // PowerShell 7 does default to UTF-8, which is why this is written to be
-      // harmless there rather than conditional on the version.
-      args: [
-        '-NoLogo',
-        '-NoExit',
-        '-Command',
-        '[Console]::OutputEncoding=[System.Text.UTF8Encoding]::new();' +
-          '[Console]::InputEncoding=[System.Text.UTF8Encoding]::new();' +
-          '$OutputEncoding=[System.Text.UTF8Encoding]::new()',
-      ],
-      available: !!ps.exe,
-      how: ps.how,
-      emits: 'oem->utf8',
-    },
-    {
-      id: 'cmd',
-      label: 'Command Prompt',
-      exe: cmd.exe,
-      // Switch the codepage to UTF-8 on the way in, quietly. Without it cmd
-      // emits the OEM codepage and every non-ASCII glyph arrives wrong — the
-      // exact mojibake he has already seen once in this project.
-      args: ['/K', 'chcp 65001>nul'],
-      available: !!cmd.exe,
-      how: cmd.how,
-      emits: 'oem->utf8',
-    },
-    {
-      id: 'gitbash',
-      label: 'Git Bash',
-      exe: bash.exe,
-      // --login so the MSYS2 PATH is built and the Unix userland is actually on
-      // it; -i so it is an interactive shell with a prompt and job control.
-      args: ['--login', '-i'],
-      available: !!bash.exe,
-      how: bash.how,
-      emits: 'utf8',
-    },
+    { id: 'powershell', tag: 'PS', name: 'PowerShell', version: ps.version, key: '1', exe: ps.exe, available: !!ps.exe, how: ps.how, integrated: true },
+    { id: 'gitbash', tag: 'BASH', name: 'Git Bash', version: bash.version, key: '2', exe: bash.exe, available: !!bash.exe, how: bash.how, integrated: true },
+    { id: 'cmd', tag: 'CMD', name: 'Command Prompt', version: '', key: '3', exe: cmd.exe, available: !!cmd.exe, how: cmd.how, integrated: true },
+    { id: 'pwsh', tag: 'PWSH', name: 'PowerShell 7', version: '', key: '4', exe: pwsh.exe, available: !!pwsh.exe, how: pwsh.how, integrated: false },
+    { id: 'wsl', tag: 'WSL', name: 'WSL', version: '', key: '5', exe: wsl.exe, available: !!wsl.exe, how: wsl.how, integrated: false },
   ]
 }
 
-export const DEFAULT_SHELL: ShellId = 'powershell'
-
-/**
- * Pick a shell, falling back rather than failing.
- *
- * Returns what was chosen AND what was asked for, so the caller can tell him
- * plainly that a substitution happened. Silently opening a different shell than
- * the one he clicked would be worse than an error.
- */
-export function pickShell(
-  wanted: ShellId | undefined,
-  shells = resolveShells(),
-): { spec: ShellSpec; substituted: boolean; wanted: ShellId; message: string } {
-  const want = (wanted && SHELL_IDS.includes(wanted) ? wanted : DEFAULT_SHELL) as ShellId
-  const first = shells.find((s) => s.id === want)
-  if (first?.available) return { spec: first, substituted: false, wanted: want, message: '' }
-
-  const fallback = shells.find((s) => s.available)
-  if (!fallback) {
-    return {
-      spec: shells[0] as ShellSpec,
-      substituted: false,
-      wanted: want,
-      message: 'No shell could be found on this machine — not even cmd.exe. Nothing can be spawned.',
-    }
-  }
-  return {
-    spec: fallback,
-    substituted: true,
-    wanted: want,
-    message:
-      `${first?.label ?? want} is not installed on this machine ` +
-      `(${first?.how ?? 'not found'}). Opening ${fallback.label} instead.`,
-  }
+export function isShellId(v: unknown): v is ShellId {
+  return typeof v === 'string' && (SHELL_IDS as readonly string[]).includes(v)
 }
 
-/** Absolute, normalised, for the audit line and the log. */
+export function shellScriptDir(isPackaged: boolean, resourcesPath: string, mainDir: string): string {
+  return isPackaged ? join(resourcesPath, 'shell') : resolve(mainDir, '..', '..', 'resources', 'shell')
+}
+
+export function planSpawn(
+  spec: ShellSpec,
+  scriptDir: string,
+  extraEnv: Record<string, string>,
+  log: (m: string) => void,
+): SpawnPlan {
+  const env = { ...extraEnv }
+  if (spec.id === 'powershell') {
+    const file = join(scriptDir, 'tessa.ps1')
+    if (existsSync(file)) {
+      const quoted = file.replace(/'/g, "''")
+      return {
+        exe: spec.exe,
+        args: ['-NoLogo', '-NoExit', '-Command', `. ([ScriptBlock]::Create([System.IO.File]::ReadAllText('${quoted}')))`],
+        env,
+        integrated: true,
+      }
+    } else {
+      log(`shell script missing (${file}) - PowerShell opens without command lines`)
+      return {
+        exe: spec.exe,
+        args: ['-NoLogo', '-NoExit', '-Command', '[Console]::OutputEncoding=[System.Text.UTF8Encoding]::new();[Console]::InputEncoding=[System.Text.UTF8Encoding]::new();$OutputEncoding=[System.Text.UTF8Encoding]::new()'],
+        env,
+        integrated: false,
+      }
+    }
+  }
+  if (spec.id === 'gitbash') {
+    const file = join(scriptDir, 'tessa.bash')
+    if (existsSync(file)) {
+      return { exe: spec.exe, args: ['--init-file', file.replace(/\\/g, '/'), '-i'], env: { ...env, TESSA_SHELL_LOGIN: '1' }, integrated: true }
+    }
+    log(`shell script missing (${file}) - Git Bash opens without command lines`)
+    return { exe: spec.exe, args: ['--login', '-i'], env, integrated: false }
+  }
+  if (spec.id === 'cmd') {
+    const file = join(scriptDir, 'tessa.cmd')
+    if (existsSync(file)) {
+      return { exe: spec.exe, args: ['/K', file], env: { ...env, TESSA_OWN_PROMPT: process.env['PROMPT'] ?? '$P$G' }, integrated: true }
+    }
+    log(`shell script missing (${file}) - Command Prompt opens without command lines`)
+    return { exe: spec.exe, args: ['/K', 'chcp 65001>nul'], env, integrated: false }
+  }
+  if (spec.id === 'pwsh') return { exe: spec.exe, args: ['-NoLogo'], env, integrated: false }
+  return { exe: spec.exe, args: [], env, integrated: false }
+}
+
 export function describeShell(s: ShellSpec): string {
-  return `${s.id} (${s.label}) -> ${s.exe ? resolve(s.exe) : 'UNAVAILABLE'} [${s.how}]`
+  return `${s.id} (${s.name}${s.version ? ` ${s.version}` : ''}) -> ${s.exe ? resolve(s.exe) : 'NOT FOUND'} [${s.how}]`
 }

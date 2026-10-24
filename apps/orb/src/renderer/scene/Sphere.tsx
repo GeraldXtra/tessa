@@ -51,6 +51,7 @@ export function Sphere({
       onMark: (mark) => onMarkRef.current?.(mark),
       onSentinel: (alert) => sentinelFlareStore.set(alert),
       onPath: (path, reason) => onPathRef.current?.(path, reason),
+      hold: !window.matchMedia('(prefers-reduced-motion: reduce)').matches,
     });
     engineRef.current = engine;
     onEngineReadyRef.current?.(engine);
@@ -92,7 +93,7 @@ export function Sphere({
     });
     const staleTimer = window.setInterval(live, 1000);
     const offLoad = window.tessa.onMachineLoad((load) => engine.setLoad(load.cpu, load.mem));
-    const offVoice = window.tessa.onVoiceLevel((level) => engine.setVoiceLevel(level));
+    const offVoice = window.tessa.onVoiceLevel((push) => engine.setVoiceLevel(push.level));
     const offDisplay = window.tessa.onDisplayChanged(() => engine.reprobeRefresh());
     const offJobs = jobsStore.subscribe(applyJobs);
     const offDev = devVisualStore.subscribe(applyDev);

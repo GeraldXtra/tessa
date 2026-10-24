@@ -1,4 +1,4 @@
-import { forwardRef, useCallback, useLayoutEffect, useRef } from 'react';
+import { forwardRef, useCallback, useEffect, useLayoutEffect, useRef } from 'react';
 
 import type { ApprovalDecision } from '../../shared/ipc-contract.ts';
 import {
@@ -99,7 +99,19 @@ export const Card = forwardRef<HTMLElement, { width: number }>(function Card({ w
 
   useLayoutEffect(() => {
     frontCardStore.set(frontId ? { id: frontId, shownAt: performance.now(), at: Date.now() } : null);
-    if (frontId) report(`CARD-SHOWN request=${frontId} lock=${ANSWER_LOCK_MS}ms`);
+    if (frontId) report(`CARD-SHOWN request=${frontId} lock=${ANSWER_LOCK_MS}ms hidden=${document.hidden}`);
+  }, [frontId]);
+
+  useEffect(() => {
+    if (!frontId) return;
+    const onVisible = (): void => {
+      const front = frontCardStore.get();
+      if (document.hidden || !front || front.id !== frontId) return;
+      frontCardStore.set({ ...front, shownAt: performance.now() });
+      report(`CARD-SHOWN again request=${frontId}: the window became visible, the ${ANSWER_LOCK_MS} ms lock starts now`);
+    };
+    document.addEventListener('visibilitychange', onVisible);
+    return () => document.removeEventListener('visibilitychange', onVisible);
   }, [frontId]);
 
   if (!entry) return null;

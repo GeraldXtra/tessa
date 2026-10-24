@@ -581,12 +581,43 @@ kbd {
   z-index: 3;
 }
 
-.cap.over {
+.cap .clip {
+  position: absolute;
+  left: 0;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  overflow: hidden;
+}
+
+.cap.stopping .clip {
+  right: 58px;
+}
+
+.cap.fading .clip {
+  opacity: 0;
+  transition: opacity 0.45s ease;
+}
+
+.cap .stop {
+  position: absolute;
+  right: 0;
+  top: 2px;
+  height: 18px;
+  padding: 0 7px;
+  font-size: 9.5px;
+  letter-spacing: 0.2em;
+  color: var(--hot);
+  border: 1px solid var(--rule2);
+  background: var(--panel);
+}
+
+.cap.over .clip {
   -webkit-mask-image: linear-gradient(90deg, var(--theme-void) 0, var(--theme-void) 86%, transparent);
   mask-image: linear-gradient(90deg, var(--theme-void) 0, var(--theme-void) 86%, transparent);
 }
 
-.cap.over.both {
+.cap.over.both .clip {
   -webkit-mask-image: linear-gradient(90deg, transparent, var(--theme-void) 7%, var(--theme-void) 93%, transparent);
   mask-image: linear-gradient(90deg, transparent, var(--theme-void) 7%, var(--theme-void) 93%, transparent);
 }
@@ -1646,6 +1677,195 @@ kbd {
   border-top: 0;
   margin: 0 6px;
   flex: none;
+}
+
+.pinbox .pins {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  column-gap: 12px;
+}
+
+.pin {
+  display: grid;
+  grid-template-columns: 16px 1fr;
+  gap: 6px;
+  width: 100%;
+  padding: 4px 0;
+  border-top: 1px solid var(--rule);
+  color: var(--ink2);
+}
+
+.pin:hover {
+  color: var(--hot);
+}
+
+.orb .tb,
+.orb .col,
+.orb .band,
+.orb .cal,
+.orb .rails,
+.orb .chip {
+  transition: opacity 0.6s ease;
+}
+
+.orb.ambient .tb,
+.orb.ambient .col,
+.orb.ambient .band,
+.orb.ambient .cal,
+.orb.ambient .rails {
+  opacity: 0.1;
+}
+
+.orb.ambient .chip {
+  opacity: 0.35;
+}
+
+.orb.boot .tb .c,
+.orb.boot .tb .win,
+.orb.boot .rail,
+.orb.boot .col,
+.orb.boot .band,
+.orb.boot .cal,
+.orb.boot .chip,
+.orb.boot .cap,
+.orb.boot .dbg {
+  opacity: 0;
+  transition: none;
+}
+
+.orb .tb .c,
+.orb .tb .win,
+.orb .rail,
+.orb .dbg {
+  transition: opacity 0.32s ease calc(var(--i, 0) * 45ms);
+}
+
+.bootlog {
+  position: absolute;
+  z-index: 7;
+  margin: 0;
+  font: inherit;
+  font-size: 11px;
+  letter-spacing: 0.16em;
+  line-height: 1.9;
+  color: var(--ink2);
+  white-space: pre;
+  pointer-events: none;
+}
+
+.cwin {
+  position: absolute;
+  z-index: 3;
+  border: 1px solid var(--rule2);
+  pointer-events: none;
+}
+
+.cwin .ch {
+  height: 26px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 10px;
+  border-bottom: 1px solid var(--rule);
+  font-size: 10px;
+  letter-spacing: 0.26em;
+  color: var(--mid);
+  pointer-events: auto;
+  -webkit-app-region: drag;
+}
+
+.cwin .ch span {
+  color: var(--ink4);
+  letter-spacing: 0.14em;
+  font-size: 9px;
+}
+
+.orb.compact .card {
+  right: 292px;
+  top: 12px;
+  max-height: calc(100% - 24px);
+}
+
+.pal {
+  top: calc(var(--top) + 12px);
+  max-height: calc(100% - var(--top) - 24px);
+  display: flex;
+  flex-direction: column;
+  border-left: 1px solid var(--rule2);
+}
+
+.pal .pi {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  gap: 8px;
+  align-items: center;
+  padding: 11px 14px;
+  border-bottom: 1px solid var(--rule2);
+}
+
+.pal .pi .p {
+  color: var(--mid);
+}
+
+.pal input {
+  min-width: 0;
+  background: transparent;
+  border: 0;
+  outline: none;
+  color: var(--hot);
+  font-size: 13px;
+  user-select: text;
+}
+
+.pal input::placeholder {
+  color: var(--ink4);
+  letter-spacing: 0.06em;
+}
+
+.pal .pl {
+  overflow: auto;
+  padding: 4px 0 8px;
+  scrollbar-width: thin;
+  scrollbar-color: var(--rule2) transparent;
+}
+
+.pal .gh {
+  padding: 8px 14px 3px;
+}
+
+.pal .it {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 2px 10px;
+  width: 100%;
+  padding: 5px 14px;
+  border-left: 1px solid transparent;
+  font-size: 12px;
+  color: var(--ink2);
+}
+
+.pal .it em {
+  font-style: normal;
+  font-size: 9.5px;
+  letter-spacing: 0.14em;
+  color: var(--ink4);
+}
+
+.pal .it[aria-selected='true'] {
+  background: var(--fill);
+  border-left-color: var(--mid);
+  color: var(--hot);
+}
+
+.pal .it[aria-disabled='true'] {
+  color: var(--ink4);
+  cursor: default;
+}
+
+.pal .it .why {
+  grid-column: 1 / -1;
+  font-size: 10.5px;
+  color: var(--ink3);
 }
 
 .dev-overlay {

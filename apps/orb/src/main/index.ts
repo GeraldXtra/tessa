@@ -13,18 +13,20 @@
 import {
   app,
   BrowserWindow,
+  dialog,
   globalShortcut,
   ipcMain,
   Menu,
   screen,
   session,
   type Session,
+  type WebContents,
 } from 'electron';
 
 import { readFileSync } from 'node:fs';
 import { statfs, writeFile } from 'node:fs/promises';
-import { totalmem } from 'node:os';
-import { join } from 'node:path';
+import { homedir, totalmem } from 'node:os';
+import { join, resolve } from 'node:path';
 
 import { AGENT_STATES } from '@tessa/protocol';
 
@@ -32,6 +34,7 @@ import { developmentCsp, PRODUCTION_CSP } from '../shared/csp.ts';
 import {
   AGENT_TEXT_MAX,
   IPC,
+  type AgentCancelReply,
   type AgentSendResult,
   type AuditEntry,
   type BootstrapInfo,
@@ -40,16 +43,21 @@ import {
   type DaemonHealth,
   type DiskUsage,
   type MicState,
+  type OrbMode,
   type PermissionRequest,
   type PtySession,
   type PttMode,
+  type TrayCommand,
 } from '../shared/ipc-contract.ts';
+import { buildFailureText, buildSummary, checkBuild } from './build-check.ts';
 import { gpuFeatureSummary, probeGpu } from './gpu-probe.ts';
 import { JobTable, KEEP_TERMINAL_MS } from './job-table.ts';
 import { MachineLoadSampler } from './machine-load.ts';
 import { PttController } from './ptt-controller.ts';
 import { DEFAULT_THEME, isThemeId, loadTheme, orbThemePath, saveTheme } from './theme-state.ts';
-import { createOrbWindow, hardenWebContents, isInstrumentedLaunch } from './window.ts';
+import { setStartAtSignIn, shortcutPlace, startupExists } from './shortcuts.ts';
+import { OrbTray, type TrayActions, type TrayView } from './tray.ts';
+import { createOrbWindow, hardenWebContents, isInstrumentedLaunch, setCompactWindow } from './window.ts';
 import { createWidgetWindow, widgetBounds } from './widget-window.ts';
 import { DaemonConnection, type FixtureTurn, type FixtureTyped } from './ws-client.ts';
 
@@ -265,6 +273,46 @@ function log(message: string): void {
   console.log(`[orb] ${message}`);
 }
 
+const DEV_INPUT_KEYS: Readonly<Record<string, string>> = {
+  escape: 'Escape',
+  esc: 'Escape',
+  enter: 'Enter',
+  up: 'Up',
+  down: 'Down',
+  backspace: 'Backspace',
+  space: 'Space',
+  tab: 'Tab',
+  f11: 'F11',
+};
+
+function sendDevInput(contents: WebContents, chord: string): void {
+  if (!isDev || contents.isDestroyed()) return;
+  const parts = chord.split('+').filter(Boolean);
+  const key = parts.pop() ?? '';
+  const modifiers = parts.map((p) => (p.toLowerCase() === 'ctrl' ? 'control' : p.toLowerCase())).filter((m) => m === 'control' || m === 'shift' || m === 'alt' || m === 'meta');
+  const keyCode = DEV_INPUT_KEYS[key.toLowerCase()] ?? (key.length === 1 ? key.toLowerCase() : null);
+  if (!keyCode || modifiers.length !== parts.length) {
+    log(`SENDINPUT refused: "${chord}" is not a chord this instrument knows`);
+    return;
+  }
+  const win = BrowserWindow.fromWebContents(contents);
+  contents.sendInputEvent({ type: 'keyDown', keyCode, modifiers: modifiers as ('control' | 'shift' | 'alt' | 'meta')[] });
+  if (key.length === 1 && !modifiers.includes('control') && !modifiers.includes('alt')) {
+    contents.sendInputEvent({ type: 'char', keyCode: key, modifiers: modifiers as ('control' | 'shift' | 'alt' | 'meta')[] });
+  }
+  contents.sendInputEvent({ type: 'keyUp', keyCode, modifiers: modifiers as ('control' | 'shift' | 'alt' | 'meta')[] });
+  log(`SENDINPUT sent "${chord}" keyCode=${keyCode} modifiers=${modifiers.join(',') || 'none'} windowFocused=${win ? win.isFocused() : 'none'} focusable=${win ? win.isFocusable() : 'none'}`);
+}
+
+function sendDevMouse(contents: WebContents, x: number, y: number): void {
+  if (!isDev || contents.isDestroyed()) return;
+  const at = Date.now();
+  contents.sendInputEvent({ type: 'mouseMove', x, y });
+  contents.sendInputEvent({ type: 'mouseDown', x, y, button: 'left', clickCount: 1 });
+  contents.sendInputEvent({ type: 'mouseUp', x, y, button: 'left', clickCount: 1 });
+  log(`SENDMOUSE click at ${x},${y} (webContents.sendInputEvent) at wall=${at}`);
+}
+
 interface FixtureFrame {
   at: number;
   type?: string;
@@ -288,6 +336,7 @@ interface Fixture {
   frames: FixtureFrame[];
   every: FixtureRepeat[];
   typed: FixtureTyped | null;
+  pins: string[];
 }
 
 function loadFixture(): Fixture | null {
@@ -318,7 +367,7 @@ function loadFixture(): Fixture | null {
             if (typeof a === 'string') return [{ text: a.slice(0, 2000) }];
             if (typeof a !== 'object' || a === null || typeof (a as FixtureTurn).text !== 'string') return [];
             const turn = a as FixtureTurn;
-            return [{ text: turn.text.slice(0, 2000), ackMs: num(turn.ackMs) ?? undefined, thinkMs: num(turn.thinkMs) ?? undefined }];
+            return [{ text: turn.text.slice(0, 2000), ackMs: num(turn.ackMs) ?? undefined, thinkMs: num(turn.thinkMs) ?? undefined, speakMs: num(turn.speakMs) ?? undefined, levelHz: num(turn.levelHz) ?? undefined, gapAtMs: num(turn.gapAtMs) ?? undefined, gapMs: num(turn.gapMs) ?? undefined }];
           }),
         }
       : null;
@@ -333,6 +382,7 @@ function loadFixture(): Fixture | null {
     frames,
     every,
     typed,
+    pins: Array.isArray(o['pins']) ? (o['pins'] as unknown[]).filter((p): p is string => typeof p === 'string').map((p) => p.slice(0, 40)).slice(0, 8) : [],
   };
 }
 
@@ -408,9 +458,10 @@ app.enableSandbox();
  * exposure for the seconds it lasts, on a dev build only, and it is the reason
  * this is not simply `if (isInstrumentedLaunch())`.
  */
-const instrumentedDevLaunch = !app.isPackaged && isInstrumentedLaunch();
+const instrumentedDevLaunch = !app.isPackaged && isInstrumentedLaunch() && !process.argv.includes('--dev-lock');
 if (!instrumentedDevLaunch && !app.requestSingleInstanceLock()) {
-  app.quit();
+  log(`another Orb is already running and was asked to come to the front; this launch (pid ${process.pid}) exits now and leaves only that Orb running`);
+  app.exit(0);
 } else {
   app.setAppUserModelId('com.titanwave.tessa.orb');
 
@@ -470,18 +521,33 @@ if (!instrumentedDevLaunch && !app.requestSingleInstanceLock()) {
    */
   const refusableApprovals = new Map<string, PermissionRequest>();
 
+  let summon: (() => void) | null = null;
   app.on('second-instance', () => {
-    const [existing] = BrowserWindow.getAllWindows();
-    if (existing) {
-      if (existing.isMinimized()) existing.restore();
-      existing.focus();
-    }
+    log(`second launch refused by the lock at wall=${Date.now()}; bringing this Orb to the front`);
+    summon?.();
   });
 
   // Every WebContents, not just the first window.
   app.on('web-contents-created', (_event, contents) => hardenWebContents(contents));
 
   void app.whenReady().then(() => {
+    const failLoudly = (detail: string): void => {
+      const owner = new BrowserWindow({ show: false, alwaysOnTop: true, skipTaskbar: true, frame: false, focusable: false, width: 1, height: 1 });
+      owner.setAlwaysOnTop(true, 'screen-saver');
+      dialog.showMessageBoxSync(owner, { type: 'none', title: 'Tessa Orb', message: 'Tessa Orb did not start', detail, buttons: ['OK'], noLink: true });
+      if (!owner.isDestroyed()) owner.destroy();
+    };
+    if (!rendererUrl) {
+      const outDir = resolve(devFlagValue('--dev-out-dir=') ?? join(__dirname, '..'));
+      const check = checkBuild(outDir);
+      if (!check.ok) {
+        log(`!! BUILD CHECK FAILED in ${outDir}: ${check.problems.join(' | ')}`);
+        failLoudly(buildFailureText(check, outDir));
+        app.quit();
+        return;
+      }
+      log(`build: ${outDir} is one build from source ${check.stamps['main']?.source} (${buildSummary(check)})`);
+    }
     applyContentSecurityPolicy(session.defaultSession);
     denyAllPermissions(session.defaultSession);
 
@@ -511,6 +577,17 @@ if (!instrumentedDevLaunch && !app.requestSingleInstanceLock()) {
      * matches `--force-` precisely so it can never persist.
      */
     const instrumented = isInstrumentedLaunch();
+    const throwawayAppData = (() => {
+      const local = process.env['LOCALAPPDATA'];
+      if (!local) return false;
+      return resolve(local).toLowerCase() !== resolve(join(homedir(), 'AppData', 'Local')).toLowerCase();
+    })();
+    const themePersist = isDev && process.argv.includes('--dev-theme-persist') && throwawayAppData;
+    if (isDev && process.argv.includes('--dev-theme-persist')) {
+      log(themePersist
+        ? `dev: --dev-theme-persist ON — the theme file is read and written at ${orbThemePath()} (LOCALAPPDATA is not his)`
+        : '!! --dev-theme-persist REFUSED — LOCALAPPDATA is his real folder, so his theme file stays untouched');
+    }
     const forcedTheme = (() => {
       if (!isDev) return null;
       const flag = process.argv.find((a) => a.startsWith('--force-theme='));
@@ -524,7 +601,7 @@ if (!instrumentedDevLaunch && !app.requestSingleInstanceLock()) {
     // instrumented run — which is every capture and every measurement in this
     // project — was rendering a palette no code path would ever choose. It
     // reads DEFAULT_THEME now, so the fallback cannot drift again.
-    const themeLoad = instrumented
+    const themeLoad = instrumented && !themePersist
       ? {
           theme: DEFAULT_THEME,
           migrated: false,
@@ -545,6 +622,61 @@ if (!instrumentedDevLaunch && !app.requestSingleInstanceLock()) {
       log(`!! ${orbThemePath()} was rewritten. apps/console reads this file too.`);
     }
 
+    let activeTheme: string = theme;
+    let lastAgentState: string | null = null;
+    let rendererMode: OrbMode = 'full';
+    let rendererWaiting = false;
+    let rendererStoppable = false;
+    let lastWindowKey = '';
+    const startDecides = !instrumented || (isDev && process.argv.includes('--dev-noactivate') && process.argv.includes('--dev-unfocused-start'));
+    let startMode: OrbMode = startDecides && !process.argv.includes('--widget-only') ? 'compact' : 'full';
+    let quitting = false;
+    let orbTray: OrbTray | null = null;
+    const shortcuts = instrumented
+      ? (() => {
+          const dir = devFlagValue('--dev-shortcut-dir=');
+          return dir ? shortcutPlace(resolve(dir)) : null;
+        })()
+      : shortcutPlace(null);
+    const cardsWaiting = (): boolean => pendingApprovals.size > 0 || rendererWaiting;
+    const trayView = (): TrayView => ({
+      theme: activeTheme,
+      phase: lastPhase ?? 'offline',
+      agentState: lastAgentState,
+      waiting: cardsWaiting(),
+      mode: rendererMode,
+      stoppable: rendererStoppable && lastPhase === 'connected',
+      startup: shortcuts ? startupExists(shortcuts) : null,
+      startupWhy: shortcuts ? '' : 'A test launch never touches the real shortcuts.',
+    });
+    const orbWindows = (): BrowserWindow[] => (orbWindow && !orbWindow.isDestroyed() ? [orbWindow] : []);
+    const refreshTray = (): void => {
+      orbTray?.update(trayView(), orbWindows);
+    };
+    let flashing = false;
+    const cardsChanged = (why: string): void => {
+      const [win] = orbWindows();
+      if (win && why === 'arrived') {
+        const minimised = win.isMinimized();
+        const hidden = !minimised && !win.isVisible();
+        if (hidden || minimised) win.showInactive();
+        if (!win.isFocused()) {
+          win.flashFrame(true);
+          flashing = true;
+        }
+        log(
+          `CARD arrived at wall=${Date.now()}: the window was ${hidden ? 'hidden in the tray' : minimised ? 'minimised' : 'already showing'}` +
+            `${hidden || minimised ? ', now shown without focus' : ''}; visible=${win.isVisible()} minimised=${win.isMinimized()} ` +
+            `maximized=${win.isMaximized()} focused=${win.isFocused()} taskbarFlashing=${flashing}`,
+        );
+      }
+      if (win && flashing && !cardsWaiting()) {
+        win.flashFrame(false);
+        flashing = false;
+        log(`CARD none waiting (${why}): taskbar flash stopped`);
+      }
+      refreshTray();
+    };
     const bootstrap: BootstrapInfo = {
       surfaceVersion: app.getVersion(),
       isDev,
@@ -552,8 +684,11 @@ if (!instrumentedDevLaunch && !app.requestSingleInstanceLock()) {
       theme,
       themeReason,
       fixture: fixture ? fixture.label : null,
+      pins: fixture ? fixture.pins : [],
       memTotalMB: Math.round(totalmem() / (1024 * 1024)),
       churn: isDev && process.argv.includes('--dev-churn'),
+      voiceTrace: isDev && process.argv.includes('--dev-voice-trace'),
+      startMode,
       devKeys: isDev && process.argv.includes('--dev-keys'),
       forceFallback: isDev && process.argv.includes('--force-fallback'),
       clock: (() => {
@@ -632,6 +767,7 @@ if (!instrumentedDevLaunch && !app.requestSingleInstanceLock()) {
       for (const requestId of ids) {
         broadcast(IPC.approvalCleared, { requestId, reason: 'daemonRestarted' });
       }
+      cardsChanged('invalidated');
       return ids.length;
     };
 
@@ -766,7 +902,7 @@ if (!instrumentedDevLaunch && !app.requestSingleInstanceLock()) {
         jobTable.apply(event, Date.now());
         publishJobs();
       },
-      onVoiceLevel: (level) => broadcast(IPC.voiceLevel, level),
+      onVoiceLevel: (level, seq, ts) => broadcast(IPC.voiceLevel, { level, seq, ts, mainAt: Date.now() }),
       onVoiceWords: (words) => {
         log(`voice words: ${words.words.length} for ${words.messageId || '(no id)'}`);
         broadcast(IPC.voiceWords, words);
@@ -875,6 +1011,8 @@ if (!instrumentedDevLaunch && !app.requestSingleInstanceLock()) {
         const n = detail ? Object.values(detail).filter(Boolean).length : 0;
         log(`agent state: ${state}${n ? ` (+${n} detail field${n === 1 ? '' : 's'})` : ''}`);
         broadcast(IPC.agentStateChanged, { state, detail: detail ?? null, ts, arrivedAt: Date.now() });
+        lastAgentState = state;
+        refreshTray();
       },
 
       // Item 9. Straight through: main validated the closed stage vocabulary
@@ -911,6 +1049,7 @@ if (!instrumentedDevLaunch && !app.requestSingleInstanceLock()) {
         pendingApprovals.set(request.requestId, request);
         log(`approval pending: ${request.requestId} (${pendingApprovals.size} open)`);
         broadcast(IPC.approvalRequested, request);
+        cardsChanged('arrived');
       },
 
       /**
@@ -973,6 +1112,7 @@ if (!instrumentedDevLaunch && !app.requestSingleInstanceLock()) {
           message,
           requestStillPending: stillPending,
         });
+        cardsChanged('refused');
       },
 
       onApprovalResolved: (requestId, decision, decidedBy) => {
@@ -985,6 +1125,7 @@ if (!instrumentedDevLaunch && !app.requestSingleInstanceLock()) {
             `${had ? '' : ' (not one of ours — clearing the card anyway)'}`,
         );
         broadcast(IPC.approvalCleared, { requestId, reason: 'resolved', decision });
+        cardsChanged('resolved');
       },
 
       onStatus: (status: ConnectionStatus) => {
@@ -994,6 +1135,8 @@ if (!instrumentedDevLaunch && !app.requestSingleInstanceLock()) {
         if (changed) {
           const from = lastPhase;
           lastPhase = status.phase;
+          if (status.phase !== 'connected') lastAgentState = null;
+          refreshTray();
           log(`connection: ${status.phase}${status.detail ? ` — ${status.detail}` : ''} at=${new Date().toISOString()}`);
           if (status.phase !== 'connected' && jobTable.view(Date.now()).length > 0) {
             jobTable.clear();
@@ -1034,7 +1177,7 @@ if (!instrumentedDevLaunch && !app.requestSingleInstanceLock()) {
       },
     });
 
-    ipcMain.handle(IPC.bootstrap, () => bootstrap);
+    ipcMain.handle(IPC.bootstrap, () => ({ ...bootstrap, theme: activeTheme, startMode }));
     let lastPingAt = 0;
     ipcMain.handle(IPC.ping, async () => {
       const now = Date.now();
@@ -1139,6 +1282,7 @@ if (!instrumentedDevLaunch && !app.requestSingleInstanceLock()) {
         );
         refusableApprovals.delete(requestId);
         broadcast(IPC.approvalCleared, { requestId, reason: 'resolved', decision });
+        cardsChanged('answered');
         return;
       }
 
@@ -1153,6 +1297,7 @@ if (!instrumentedDevLaunch && !app.requestSingleInstanceLock()) {
         // the record of what he authorised, and it is the one line that answers
         // "what did the Orb actually send".
         log(`APPROVAL-OUT ${result.frame}`);
+        cardsChanged('answered');
       } else {
         // Nothing left the machine, so the request is untouched daemon-side.
         // Put it straight back rather than clearing: under Session 1's ruling 2
@@ -1237,24 +1382,25 @@ if (!instrumentedDevLaunch && !app.requestSingleInstanceLock()) {
     ipcMain.on(IPC.agentCancel, (_event, message: unknown) => {
       if (typeof message !== 'object' || message === null) return;
       const { companionId, messageId } = message as { companionId?: unknown; messageId?: unknown };
-      if (typeof messageId !== 'string' || !messageId) return;
+      if (messageId !== null && (typeof messageId !== 'string' || !messageId)) return;
       if (typeof companionId !== 'string' || !/^[A-Za-z0-9_-]{1,64}$/.test(companionId)) return;
-      if (!acceptedTurns.has(messageId)) {
+      if (messageId !== null && !acceptedTurns.has(messageId)) {
         // Loud. Either the turn was never ours or it was already forgotten;
         // in both cases a cancel for it must not reach the daemon.
         log(`!! refused a cancel for ${messageId}: main never received an acceptance for it`);
         return;
       }
+      log(`CANCEL-ASKED messageId=${messageId ?? '(none: her current speech)'} at wall=${Date.now()}`);
       void (
         connection?.sendAgentCancel(companionId, messageId) ??
-        Promise.resolve({
-          messageId,
+        Promise.resolve<AgentCancelReply>({
+          messageId: messageId ?? '',
           ok: false,
           type: 'unavailable',
           message: 'no connection object',
         })
       ).then((reply) => {
-        log(`cancel ${messageId} → ${reply.type}${reply.ok ? '' : `: ${reply.message}`}`);
+        log(`cancel ${messageId ?? '(none)'} → ${reply.type}${reply.ok ? '' : `: ${reply.message}`}${reply.cancelled === undefined ? '' : ` cancelled=${reply.cancelled}`} at wall=${Date.now()}`);
         broadcast(IPC.agentCancelReply, reply);
       });
     });
@@ -1273,7 +1419,10 @@ if (!instrumentedDevLaunch && !app.requestSingleInstanceLock()) {
         log(`!! refused theme ${JSON.stringify(value)} — not one of the five`);
         return;
       }
-      if (instrumented) {
+      activeTheme = value;
+      broadcast(IPC.themeChanged, value);
+      refreshTray();
+      if (instrumented && !themePersist) {
         log(`theme ${value} NOT saved — instrumented launch (would overwrite his choice)`);
         return;
       }
@@ -1295,6 +1444,23 @@ if (!instrumentedDevLaunch && !app.requestSingleInstanceLock()) {
       BrowserWindow.fromWebContents(event.sender)?.minimize(),
     );
     ipcMain.on(IPC.windowClose, (event) => BrowserWindow.fromWebContents(event.sender)?.close());
+    ipcMain.on(IPC.windowMode, (event, value: unknown) => {
+      const win = BrowserWindow.fromWebContents(event.sender);
+      if (!win || win.isDestroyed() || win === widgetWindow) return;
+      const v = typeof value === 'object' && value !== null ? (value as { mode?: unknown; card?: unknown; waiting?: unknown; stoppable?: unknown }) : null;
+      const mode = v?.mode === 'full' || v?.mode === 'ambient' || v?.mode === 'compact' ? v.mode : null;
+      if (!mode) {
+        log(`!! refused window mode ${JSON.stringify(value)}`);
+        return;
+      }
+      const windowKey = `${mode}:${v?.card === true}`;
+      if (windowKey !== lastWindowKey) setCompactWindow(win, mode === 'compact', v?.card === true, log);
+      lastWindowKey = windowKey;
+      rendererMode = mode;
+      rendererWaiting = v?.waiting === true;
+      rendererStoppable = v?.stoppable === true;
+      cardsChanged('renderer');
+    });
 
     // Dev only. In a packaged build the channel is simply never handled, so a
     // renderer that somehow sent on it would be talking to nothing.
@@ -1310,6 +1476,24 @@ if (!instrumentedDevLaunch && !app.requestSingleInstanceLock()) {
          * one `capturePage()` into TESSA_CAPTURE_DIR under that name. Dev
          * only, and inert without the directory.
          */
+        const input = /^SENDINPUT ([A-Za-z0-9+/`]{1,40})$/.exec(String(line));
+        if (input) sendDevInput(event.sender, input[1] as string);
+        const mouse = /^SENDMOUSE (\d{1,5}) (\d{1,5})$/.exec(String(line));
+        if (mouse && instrumented) sendDevMouse(event.sender, Number(mouse[1]), Number(mouse[2]));
+        if (String(line) === 'LINKDROP' && instrumented) {
+          log(`LINKDROP-HOOK at wall=${Date.now()}: ${connection?.devDropLink() ?? 'no connection'} (a dev-only hook; the reconnect that follows is the Orb's own path)`);
+        }
+        const trayHook = /^TRAY ([a-z]{1,16}(?::[a-z]{1,16})?)$/.exec(String(line));
+        if (trayHook && instrumented) {
+          const id = trayHook[1] as string;
+          const what =
+            id === 'restart' && process.argv.includes('--dev-restarted')
+              ? 'refused: this Orb was itself started by Restart (dev hook only, so a test cannot loop)'
+              : orbTray
+                ? orbTray.hook(id)
+                : 'no tray yet';
+          log(`TRAY-HOOK ${id} at wall=${Date.now()}: ${what} (a dev-only hook calling the handler the tray calls; the real tray is Windows')`);
+        }
         const m = /^CAPTURE ([A-Za-z0-9_-]{1,40})$/.exec(String(line));
         const dir = process.env['TESSA_CAPTURE_DIR'];
         if (m && dir) {
@@ -1367,9 +1551,14 @@ if (!instrumentedDevLaunch && !app.requestSingleInstanceLock()) {
      * look at all day.
      */
     const widgetOnly = process.argv.includes('--widget-only');
+    const startDecided = (granted: boolean): void => {
+      startMode = granted ? 'full' : 'compact';
+      if (granted) broadcast(IPC.startDecided, 'full');
+      refreshTray();
+    };
     let orbWindow: BrowserWindow | null = widgetOnly
       ? null
-      : createOrbWindow({ isDev, rendererUrl });
+      : createOrbWindow({ isDev, rendererUrl, start: startDecides ? { log, decided: startDecided } : null });
     const heapProfileS = (() => {
       const raw = devFlagValue('--dev-heap-profile=');
       if (raw === null) return 0;
@@ -1438,6 +1627,7 @@ if (!instrumentedDevLaunch && !app.requestSingleInstanceLock()) {
     const showOrb = (): BrowserWindow => {
       if (!orbWindow || orbWindow.isDestroyed()) {
         orbWindow = createOrbWindow({ isDev, rendererUrl });
+        prepareOrbWindow(orbWindow);
         attachOrbCloseGuard(orbWindow);
       }
       if (orbWindow.isMinimized()) orbWindow.restore();
@@ -1445,6 +1635,129 @@ if (!instrumentedDevLaunch && !app.requestSingleInstanceLock()) {
       orbWindow.focus();
       return orbWindow;
     };
+
+    const sendTray = (command: TrayCommand): void => {
+      const [win] = orbWindows();
+      if (win) win.webContents.send(IPC.trayCommand, command);
+    };
+
+    const revealInactive = (): BrowserWindow => {
+      const win = orbWindow && !orbWindow.isDestroyed() ? orbWindow : showOrb();
+      if (!win.isVisible() || win.isMinimized()) win.showInactive();
+      return win;
+    };
+
+    const shownLine = (win: BrowserWindow): string =>
+      `visible=${win.isVisible()} minimised=${win.isMinimized()} focused=${win.isFocused()} wall=${Date.now()}`;
+
+    summon = () => {
+      const win = showOrb();
+      log(`second launch: this Orb shown and given focus; ${shownLine(win)}`);
+    };
+
+    const restart = (): void => {
+      const flags = instrumented ? process.argv.slice(1).filter((a) => a.startsWith('--') && a !== '--dev-restarted') : [];
+      const args = [app.getAppPath(), ...flags, ...(instrumented ? ['--dev-restarted'] : [])];
+      delete process.env['ELECTRON_RENDERER_URL'];
+      log(
+        `TRAY Restart: this Orb (pid ${process.pid}) quits; Electron's relauncher starts "${process.execPath}" ` +
+          `${args.map((a) => (a.includes(' ') ? `"${a}"` : a)).join(' ')} after this process has exited, so the new Orb never meets this one's lock`,
+      );
+      app.relaunch({ execPath: process.execPath, args });
+      quitting = true;
+      app.quit();
+    };
+
+    const trayActions: TrayActions = {
+      click: () => {
+        const at = Date.now();
+        const win = showOrb();
+        log(`TRAY click at wall=${at}: Orb shown and given focus; ${shownLine(win)}`);
+      },
+      show: () => {
+        const at = Date.now();
+        const win = showOrb();
+        log(`TRAY Show at wall=${at}: ${shownLine(win)}`);
+      },
+      mode: (mode) => {
+        const win = mode === 'compact' ? revealInactive() : showOrb();
+        sendTray({ kind: 'mode', mode });
+        log(`TRAY ${mode === 'full' ? 'Full' : 'Compact'}: asked the renderer's mode code for ${mode}; ${shownLine(win)}`);
+      },
+      open: (id) => {
+        const win = showOrb();
+        sendTray({ kind: 'rail', id });
+        log(`TRAY Open ${id}: asked the rails' own code to open it; ${shownLine(win)}`);
+      },
+      stop: () => {
+        const at = Date.now();
+        sendTray({ kind: 'stop' });
+        log(`TRAY stop at wall=${at}: asked the renderer's stop code, the one Esc and STOP run`);
+      },
+      startup: (on) => {
+        if (!shortcuts) return;
+        void setStartAtSignIn(shortcuts, on, log).then((now) => {
+          log(`TRAY Start at sign-in ${on ? 'on' : 'off'} -> the shortcut ${now ? 'exists' : 'does not exist'} at ${shortcuts.startup}`);
+          refreshTray();
+        });
+      },
+      restart,
+      quit: () => {
+        log('TRAY Quit: the Orb ends');
+        quitting = true;
+        app.quit();
+      },
+    };
+
+    orbTray = new OrbTray(trayActions, log, screen.getPrimaryDisplay().scaleFactor);
+    const trayClose = !instrumented || process.argv.includes('--dev-tray-close');
+    let sessionEndAt = 0;
+
+    function prepareOrbWindow(win: BrowserWindow): void {
+      if (orbTray) win.setIcon(orbTray.windowIcon(trayView()));
+      const loudFailure = (what: string): void => {
+        log(`!! ${what}`);
+        failLoudly(`${what}\n\nFix: in ${app.getAppPath()} run npm run build, then start the Orb again.`);
+        quitting = true;
+        app.quit();
+      };
+      win.webContents.on('did-fail-load', (_event, code, description, url, isMainFrame) => {
+        if (isMainFrame && code !== -3) loudFailure(`The Orb's window could not load its interface: ${description} (${code}) at ${url}.`);
+      });
+      win.webContents.on('preload-error', (_event, path, error) => {
+        loudFailure(`The Orb's preload script failed: ${path}: ${String(error)}.`);
+      });
+      win.on('focus', () => {
+        flashing = false;
+      });
+      win.on('close', (event) => {
+        if (quitting || !trayClose) return;
+        if (Date.now() - sessionEndAt < 60_000) {
+          log('CLOSE during a Windows session end: not intercepted, the Orb ends');
+          return;
+        }
+        event.preventDefault();
+        if (cardsWaiting()) {
+          log(`CLOSE refused at wall=${Date.now()}: an approval card is waiting, the Orb stays on screen`);
+          sendTray({ kind: 'closeRefused', via: 'close' });
+          return;
+        }
+        win.hide();
+        log(`CLOSE -> hidden to the tray at wall=${Date.now()}; Quit in the tray ends the Orb`);
+      });
+      win.on('query-session-end', (event) => {
+        sessionEndAt = Date.now();
+        log(`SESSION query-session-end (${event.reasons.join(',') || 'no reason given'}) at wall=${sessionEndAt}: allowed, never prevented; close-to-tray stands down`);
+      });
+      win.on('session-end', (event) => {
+        log(`SESSION session-end (${event.reasons.join(',') || 'no reason given'}) at wall=${Date.now()}: tray icon removed, the Orb quits`);
+        quitting = true;
+        orbTray?.destroy();
+        app.quit();
+      });
+    }
+
+    if (orbWindow) prepareOrbWindow(orbWindow);
 
     /* ── the ambient widget ──────────────────────────────────────────────────
      *
@@ -1474,7 +1787,7 @@ if (!instrumentedDevLaunch && !app.requestSingleInstanceLock()) {
      */
     const attachOrbCloseGuard = (win: BrowserWindow): void => {
       win.on('close', (event) => {
-        if (!widgetWindow || widgetWindow.isDestroyed()) return;
+        if (event.defaultPrevented || !widgetWindow || widgetWindow.isDestroyed()) return;
         event.preventDefault();
         win.hide();
         widgetWindow.showInactive();
@@ -1530,6 +1843,16 @@ if (!instrumentedDevLaunch && !app.requestSingleInstanceLock()) {
         widgetWindow.setIgnoreMouseEvents(!over, { forward: true });
       });
     }
+
+    orbTray.create(trayView(), orbWindows);
+    log(
+      `tray: icon created; close ${trayClose ? 'hides the Orb to the tray' : 'quits the Orb (dev launch)'}; ` +
+        `start at sign-in ${shortcuts ? `${startupExists(shortcuts) ? 'ON' : 'off'} (${shortcuts.startup}${shortcuts.real ? '' : ', a test folder'})` : 'not available in a test launch'}`,
+    );
+    app.on('before-quit', () => {
+      quitting = true;
+    });
+    app.on('will-quit', () => orbTray?.destroy());
 
     /**
      * §R.8 item 8. A display change can alter the refresh rate out from under

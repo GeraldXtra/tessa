@@ -1,7 +1,7 @@
 import type { ConnectionPhase, DaemonHealth } from '../../shared/ipc-contract.ts';
 import { connectionStore, healthStore, micStore, useStore } from '../state/store.ts';
 import { tickStore } from '../state/tick.ts';
-import { Bar, Val } from './bits.tsx';
+import { Bar, stagger, Val } from './bits.tsx';
 import { DAYS, MONTHS, dur, hms, naira, pad2 } from './format.ts';
 import { beatsStore } from './stores.ts';
 
@@ -97,13 +97,13 @@ export function TopBar({ narrow, fixture }: { narrow: boolean; fixture: string |
 
   return (
     <header className="tb">
-      <div className="c brand">TESSA</div>
-      <div className={`c${mic.claimed ? ' warn' : ''}`}>
+      <div className="c brand" style={stagger(0)}>TESSA</div>
+      <div className={`c${mic.claimed ? ' warn' : ''}`} style={stagger(1)}>
         <span className="k">MIC</span>
         <Val text={micText} />
         {!narrow && mic.chord ? <span className="k">{chordWords(mic.chord)}</span> : null}
       </div>
-      <div className={`c live${connected ? '' : ' off'}`}>
+      <div className={`c live${connected ? '' : ' off'}`} style={stagger(2)}>
         <span className="k">LINK</span>
         <Val text={LINK_WORD[connection.phase]} />
         {!narrow && connected && connection.daemonVersion ? <span className="k">v{connection.daemonVersion}</span> : null}
@@ -114,26 +114,26 @@ export function TopBar({ narrow, fixture }: { narrow: boolean; fixture: string |
           </button>
         ) : null}
       </div>
-      <div className={`c${up === null ? ' off' : ''}`}>
+      <div className={`c${up === null ? ' off' : ''}`} style={stagger(3)}>
         <span className="k">UP</span>
         <Val text={up === null ? '--' : dur(up)} />
       </div>
-      <div className="c off">
+      <div className="c off" style={stagger(4)}>
         <span className="k">DATA</span>
         <span className="v">NO DATA</span>
       </div>
-      <div className={`c${spend ? '' : ' off'}`}>
+      <div className={`c${spend ? '' : ' off'}`} style={stagger(5)}>
         <span className="k">SPEND</span>
         <Val text={spend ? `${naira(spend.budgetSpent)} / ${naira(spend.budgetCap)}` : 'NO DATA'} />
         {spend ? <Bar value={spend.budgetSpent / spend.budgetCap} /> : null}
       </div>
       <div className="fill" />
-      {fixture ? <div className="c demo">FIXTURE DATA</div> : null}
-      <div className="c clock">
+      {fixture ? <div className="c demo" style={stagger(7)}>FIXTURE DATA</div> : null}
+      <div className="c clock" style={stagger(8)}>
         {narrow ? null : <span className="k">{date}</span>}
         <Val text={hms(d)} />
       </div>
-      <div className="win">
+      <div className="win" style={stagger(9)}>
         <button type="button" aria-label="Minimise" onClick={() => window.tessa.minimizeWindow()}>
           <i className="gmin" />
         </button>

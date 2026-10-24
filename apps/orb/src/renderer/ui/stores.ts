@@ -2,6 +2,36 @@ import type { AgentState } from '@tessa/protocol';
 
 import type { DaemonHealth, DiskUsage, JobView, PingResult } from '../../shared/ipc-contract.ts';
 import { createStore } from '../state/store.ts';
+import type { ThemeId } from '../theme.ts';
+
+type ThemeSwitch = (next: ThemeId, via: string, t0: number) => void;
+
+let themeSwitch: ThemeSwitch | null = null;
+
+export function setThemeSwitch(fn: ThemeSwitch | null): void {
+  themeSwitch = fn;
+}
+
+export function runThemeSwitch(next: ThemeId, via: string): boolean {
+  if (!themeSwitch) return false;
+  themeSwitch(next, via, performance.now());
+  return true;
+}
+
+export const themeStampStore = createStore<number>(0);
+
+export const pinsStore = createStore<readonly string[]>([]);
+
+export type BootPhase = 'log' | 'fade' | 'done' | 'off';
+
+export const bootStore = createStore<BootPhase>('log');
+
+export const linkSeenStore = createStore<boolean>(false);
+
+export function runPinned(name: string, report: (line: string) => void, via: string): void {
+  report(`PIN "${name}" via=${via}: pinned commands are not built, nothing was sent`);
+  pushNote('PINNED', `${name}: pinned commands are not built. Nothing was sent.`);
+}
 
 export type NoteKind = '' | 'wait' | 'threat';
 

@@ -50,7 +50,7 @@ rem  halves are safe. Not passing it at all is the simpler half.
 rem
 rem  The empty "" is START's window-TITLE argument. Omit it and START treats
 rem  the quoted exe path as a title and opens a stray console instead.
-start "" "%TESSA_EXE%" %*
+start "" "%TESSA_EXE%" %* --cwd "%CD%\."
 endlocal
 exit /b 0
 

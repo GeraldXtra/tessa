@@ -1,70 +1,15 @@
-/*
- * Design tokens come from packages/tokens — the SHARED source of truth that
- * apps/orb also consumes. No hex value may appear in this file or any other
- * file under src/renderer: scripts/check-contract.mjs fails the build on one.
- */
 @import '@tessa/tokens/dist/tokens.css';
 
-/* ── THE COMPANION THEME ────────────────────────────────────────────────────
-   The Console takes the Orb's colour. `data-theme` is set on <html> from the
-   value the Orb persists; each block rebinds only --accent, so every rule that
-   already used var(--accent) themes for free.
-
-   THESE NAMES WERE WRONG AND IT BROKE EVERYTHING ACCENT-COLOURED.
-   This file aliased gold to --theme-amber-core and red to --theme-ember-core,
-   because those were the nearest hues that existed when it was written. Session
-   2 has since published real gold and red tokens and RENAMED amber and ember
-   out of existence. A `var()` naming a token that does not exist makes the
-   custom property GUARANTEED-INVALID, so --accent resolved to nothing and every
-   rule using it fell back silently: the watermark lost its colour, the focused
-   pane lost its border, the active tab lost its bar. Measured at runtime as
-   `accent=` — an empty string.
-
-   The `-body` step is the accent: Session 2's own token comments say so in as
-   many words ("this is --accent under gold"). `-core` is the brighter sphere
-   step and is not what chrome should use. */
-:root[data-theme='gold']    { --accent: var(--theme-gold-body); }
-:root[data-theme='magenta'] { --accent: var(--theme-magenta-body); }
-:root[data-theme='cyan']    { --accent: var(--theme-cyan-body); }
-:root[data-theme='violet']  { --accent: var(--theme-violet-body); }
-:root[data-theme='emerald'] { --accent: var(--theme-emerald-body); }
-:root[data-theme='red']     { --accent: var(--theme-red-body); }
-
-/* THE WATERMARK USES THE BRIGHTER `-core` STEP, deliberately and only here.
-   At 0.11 opacity the accent step is too dark to read as a mark on the void —
-   violet's accent is 4.46:1 against 7.72:1 for its core — and this is the one
-   element whose job is to be seen at very low alpha. Chrome stays on --accent. */
-:root[data-theme='gold']    { --mark: var(--theme-gold-core); }
-:root[data-theme='magenta'] { --mark: var(--theme-magenta-core); }
-:root[data-theme='cyan']    { --mark: var(--theme-cyan-core); }
-:root[data-theme='violet']  { --mark: var(--theme-violet-core); }
-:root[data-theme='emerald'] { --mark: var(--theme-emerald-core); }
-:root[data-theme='red']     { --mark: var(--theme-red-core); }
-
-/* A BASE VALUE, so an unknown data-theme still paints a mark rather than
-   silently unstyling the stage — the failure mode that cost this round. */
-:root { --mark: var(--theme-gold-core); }
-
-/* ── THREE TIERS, BY WEIGHT ────────────────────────────────────────────────
-   His complaint was exact: everything sits at one weight and nothing leads.
-   The fix is less, not more — the chrome recedes so the terminal is the only
-   thing that reads as primary.
-
-     PRIMARY    terminal text           --text      16.35:1  measured
-     SECONDARY  tabs, focused identity  --tier-2     7.35:1  accent, worst theme
-     RECESSIVE  title, status, buttons  --tier-3     3.78:1  deliberately low
-
-   Recessive is BELOW AA on purpose: these are labels and controls, not
-   information. Anything he must READ — output, errors, the paste warning — is
-   primary or an alarm colour, never tier 3. */
 :root {
-  --tier-3: var(--text-muted);
-  --tier-2: var(--accent);
-  --chrome-size: 10px;
-  --chrome-tracking: 0.14em;
+  --font: 'Bahnschrift', 'Segoe UI', system-ui, sans-serif;
+  --mono: 'Cascadia Mono', 'Cascadia Code', Consolas, 'Lucida Console', monospace;
+  --fs: 14px;
+  color-scheme: dark;
 }
 
-* {
+*,
+*::before,
+*::after {
   box-sizing: border-box;
 }
 
@@ -72,887 +17,1399 @@ html,
 body,
 #root {
   height: 100%;
+  margin: 0;
 }
 
 body {
-  margin: 0;
-  background: var(--bg-void);
-  color: var(--text);
-  font-family: var(--font-mono);
-  font-size: var(--fs-base);
-  line-height: var(--lh-base);
+  overflow: hidden;
+  background: var(--console-bg);
+  color: var(--console-t2);
+  font-family: var(--font);
+  font-size: 12.5px;
+  font-variant-numeric: tabular-nums;
   -webkit-font-smoothing: antialiased;
-  /* The renderer hosts untrusted program output; never let it feel like a page. */
   user-select: none;
   cursor: default;
+}
+
+::selection {
+  background: var(--console-select);
+  color: var(--console-t1);
+}
+
+button {
+  font: inherit;
+  color: inherit;
+  background: none;
+  border: 0;
+  padding: 0;
+  cursor: pointer;
+}
+
+button:focus-visible,
+input:focus-visible {
+  outline: 1px solid var(--console-t1);
+  outline-offset: 1px;
+}
+
+.lab {
+  font-size: 9.5px;
+  letter-spacing: 0.22em;
+  color: var(--console-t4);
+}
+
+.dim {
+  color: var(--console-t4);
+}
+
+kbd {
+  display: inline-block;
+  padding: 2px 6px 1px;
+  border: 1px solid var(--console-line2);
+  font-family: var(--font);
+  font-size: 9.5px;
+  letter-spacing: 0.1em;
+  color: var(--console-t3);
+  line-height: 1.4;
+}
+
+@keyframes fadein {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes scan {
+  from {
+    transform: translateY(0);
+    opacity: 1;
+  }
+  to {
+    transform: translateY(var(--scan-h, 300px));
+    opacity: 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * {
+    animation: none !important;
+    transition: none !important;
+  }
+}
+
+#win {
+  position: relative;
+  height: 100%;
+  display: grid;
+  grid-template-rows: 40px minmax(0, 1fr) 28px;
+  background: var(--console-bg);
   overflow: hidden;
 }
 
-/* "There's not enough space at all. Everything seems jam-packed together, no
-   room for reading clearly." Both numbers go up one step on the spacing scale:
-   padding --sp-3 (12px) -> --sp-4 (16px), gap --sp-2 (8px) -> --sp-3 (12px).
-   The glyph size is deliberately untouched — he has already set that himself. */
-.shell {
+.tbar {
   display: flex;
-  flex-direction: column;
-  height: 100%;
-  padding: var(--sp-4);
-  gap: var(--sp-3);
-}
-
-/* ── header ──────────────────────────────────────────────────────────────── */
-
-.top {
-  display: flex;
-  align-items: baseline;
-  gap: var(--sp-4);
-  flex: 0 0 auto;
+  align-items: stretch;
+  min-width: 0;
+  border-bottom: 1px solid var(--console-line);
+  background: var(--console-bg1);
+  -webkit-app-region: drag;
 }
 
 .brand {
-  margin: 0;
-  font-size: var(--fs-md);
-  font-weight: 500;
-  letter-spacing: var(--label-tracking);
-  color: var(--accent);
-}
-
-.phase {
-  font-size: var(--fs-label);
-  text-transform: var(--label-transform);
-  letter-spacing: var(--label-tracking);
-  color: var(--text-muted);
-}
-
-b[data-state='ok'] {
-  color: var(--status-active);
-  font-weight: 500;
-}
-b[data-state='checking'] {
-  color: var(--status-warn);
-  font-weight: 500;
-}
-b[data-state='failed'] {
-  color: var(--status-error);
-  font-weight: 700;
-}
-
-/* ── terminal ────────────────────────────────────────────────────────────── */
-
-.term-wrap {
-  display: flex;
-  flex-direction: column;
-  flex: 1 1 auto;
-  min-height: 0; /* lets the xterm host actually shrink inside a flex column */
-  gap: var(--sp-2);
-}
-
-.term-bar {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  flex: 0 0 auto;
-  font-size: var(--fs-label);
-  text-transform: var(--label-transform);
-  letter-spacing: var(--label-tracking);
-  color: var(--text-muted);
+  gap: 10px;
+  padding: 0 20px;
+  white-space: nowrap;
 }
 
-.term-bar button {
-  font-family: var(--font-mono);
-  font-size: var(--fs-label);
-  text-transform: var(--label-transform);
-  letter-spacing: var(--label-tracking);
-  color: var(--text);
-  background: var(--panel);
-  border: 1px solid var(--panel-border);
-  border-radius: var(--radius-sm);
-  padding: var(--sp-1) var(--sp-3);
-  cursor: pointer;
+.brand b {
+  font-weight: 600;
+  font-size: 11.5px;
+  letter-spacing: 0.42em;
+  color: var(--console-t1);
 }
 
-.term-bar button:hover:not(:disabled) {
-  border-color: var(--accent);
-  color: var(--accent);
+.brand span {
+  font-size: 9.5px;
+  letter-spacing: 0.3em;
+  color: var(--console-t4);
 }
 
-.term-bar button:disabled {
-  color: var(--text-muted);
-  cursor: default;
-}
-
-/* ── THE SCROLLBAR ────────────────────────────────────────────────────────
-   xterm's viewport gets Chromium's default scrollbar, which on this dark theme
-   is a bright grey slab down the right of EVERY pane. At two panes that was one
-   of them; with unlimited splitting it is one per pane, and four bright bars is
-   the opposite of the calm Windows Terminal look he pointed at.
-
-   Narrow, token-coloured, and transparent until there is something to scroll. */
-.xterm .xterm-viewport::-webkit-scrollbar {
-  width: var(--sp-2);
-}
-
-.xterm .xterm-viewport::-webkit-scrollbar-track {
-  background: transparent;
-}
-
-.xterm .xterm-viewport::-webkit-scrollbar-thumb {
-  background: var(--panel-border);
-  border-radius: var(--radius-sm);
-}
-
-.xterm .xterm-viewport::-webkit-scrollbar-thumb:hover {
-  background: var(--accent);
-}
-
-/* The terminal is the centre stage: it floats over void with no card. */
-.term-host {
-  flex: 1 1 auto;
-  min-height: 0;
-  /* xterm manages its own selection and cursor inside this element. */
-  user-select: text;
-  cursor: text;
-}
-
-.term-report {
-  flex: 0 0 auto;
-  margin: 0;
-  padding: var(--sp-3);
-  max-height: 240px;
-  overflow: auto;
-  background: var(--panel);
-  border: 1px solid var(--panel-border);
-  border-radius: var(--radius-sm);
-  font-size: var(--fs-sm);
-  color: var(--text);
-  white-space: pre;
-  user-select: text;
-}
-
-/* ── PANES ─────────────────────────────────────────────────────────────────
-   The stage is the whole remaining height; the tree fills it recursively.
-   Every colour here is a token — check-contract.mjs fails the build on a hex,
-   and it has already caught one of mine. */
-
-/* A SIZE CONTAINER, so the watermark can be sized in `cqw` — a fraction of the
-   TERMINAL AREA rather than of the window. With `vw` the mark stayed 1105px
-   wide when the file tree narrowed the stage to ~910px, overflowed it, and
-   `place-items: center` then aligned it to the start instead of the centre:
-   measured at centre 822 against a stage centre of 812, fits=false. */
-.pane-stage {
-  container-type: size;
-  position: relative;
-  flex: 1 1 auto;
-  min-height: 0;
-  min-width: 0;
-}
-
-/* Each pane is placed from the computed layout rather than nested, so that a
-   split never changes a terminal's position in the React tree. See App. */
-.pane-frame {
-  position: absolute;
+.tabs {
   display: flex;
+  min-width: 0;
   overflow: hidden;
-}
-
-.pane-divider {
-  position: absolute;
-  z-index: 2;
-  background: var(--panel-border);
-  transition: background 120ms ease;
-}
-
-.pane-divider[data-dir='row'] {
-  cursor: col-resize;
-}
-
-.pane-divider[data-dir='col'] {
-  cursor: row-resize;
-}
-
-.pane-divider:hover {
-  background: var(--accent);
-}
-
-/* ── THE FOCUSED PANE MUST BE OBVIOUS AT A GLANCE ──────────────────────────
-   TWO signals, not one. A border alone is easy to miss on a dark theme at
-   1366px, and typing into the wrong shell is a silent failure — he would not
-   find out until the command ran somewhere he did not mean. So the focused
-   pane keeps an accent border AND full brightness; the others recede. */
-.pane {
-  display: flex;
-  flex-direction: column;
-  flex: 1 1 auto;
-  min-width: 0;
-  min-height: 0;
-  /* TRANSPARENT, NOT ABSENT. The 1px is still reserved so a pane does not shift
-     by a pixel the moment it gains or loses focus — but nothing is painted. */
-  border: 1px solid transparent;
-  border-radius: var(--radius-sm);
-  /* ROOM TO READ. Was --sp-1 (4px), which ran the first column of output
-     almost into the pane edge. */
-  padding: var(--sp-3);
-  gap: var(--sp-2);
-}
-
-/* ── THE ACCENT RECTANGLE HE ASKED TO BE RID OF ────────────────────────────
-   With ONE pane filling the stage, `.pane[data-focused=yes]` painted an accent
-   border around the entire terminal area — which is not a pane affordance at
-   all, it is a border around the Console, and that is what he was looking at.
-   So a single-pane tab now paints NOTHING.
-
-   With TWO OR MORE panes the same border is the only thing answering "which
-   shell am I typing into", and lifting the two-pane cap makes that question
-   more pressing, not less. So it is kept exactly where it earns its place.
-
-   `data-panes` is written by the tab page from the placed-leaf count. If he
-   wants the border gone in every case too, delete this one rule — nothing else
-   depends on it. */
-.tab-page[data-panes='1'] .pane[data-focused='yes'] {
-  border-color: transparent;
-}
-
-.pane[data-focused='yes'] {
-  border-color: var(--accent);
-  opacity: 1;
-}
-
-/*
-   THE UNFOCUSED PANE IS NO LONGER DIMMED AS A WHOLE.
-   It was `opacity: 0.62`, and that had two costs. It dimmed his terminal
-   OUTPUT, which nobody asked for — an unfocused pane is still a pane he is
-   reading. And it made the watermark bleed through the unfocused pane at 38%
-   while the focused pane hid it completely, which is precisely the "TES and
-   part of an S, clipped by the right pane" he photographed: the mark was
-   showing through the LEFT pane because it was unfocused, and stopping dead at
-   the focused one.
-
-   Two signals remain and neither touches the terminal: the accent border, and
-   the pane's meta line changing colour. */
-.pane[data-focused='no'] {
-  border-color: transparent;
-}
-
-.pane-meta {
-  display: flex;
-  flex: 0 0 auto;
-  gap: var(--sp-2);
-  font-size: var(--fs-label);
-  text-transform: var(--label-transform);
-  letter-spacing: var(--label-tracking);
-  color: var(--text-muted);
-}
-
-.pane[data-focused='yes'] .pane-meta {
-  color: var(--accent);
-}
-
-.pane-pid,
-.pane-rung {
-  color: var(--text-muted);
-}
-
-.pane-notice {
-  flex: 0 0 auto;
-  padding: var(--sp-1) var(--sp-3);
-  font-size: var(--fs-label);
-  color: var(--status-warn);
-  border: 1px solid var(--panel-border);
-  border-radius: var(--radius-sm);
-  background: var(--panel);
-}
-
-.bar-sep {
-  flex: 1 1 auto;
-}
-
-/* ── TABS ──────────────────────────────────────────────────────────────────
-   Every tab stays mounted. Only the active one is visible, and it is hidden
-   with `visibility` rather than `display` so a hidden pane keeps its box — and
-   therefore its column count. See the note in App. */
-
-/* ── WHY THE ROW AND THE STRIP ARE TWO ELEMENTS ────────────────────────────
-   `.tab-strip` scrolls horizontally so many tabs stay reachable. A scrolling
-   box is also a CLIPPING box, and the shell dropdown hangs BELOW the strip —
-   so with the `∨` inside the strip its popup was clipped to nothing. It opened
-   correctly and could not be seen, which is the worst possible failure: the
-   click logged `DEVCLICK .tab-menu found=true` and the screenshot showed
-   nothing at all.
-
-   So the row holds two children: the strip, which scrolls, and the new-tab
-   group, which does not. That is Windows Terminal's arrangement too — the tabs
-   scroll under a pinned `+`. */
-.tab-row {
-  display: flex;
-  align-items: stretch;
-  flex: 0 0 auto;
-  gap: var(--sp-2);
-}
-
-.tab-strip {
-  display: flex;
-  align-items: stretch;
-  /* Shrinkable, so a long tab list scrolls instead of pushing the `+` off. */
-  flex: 0 1 auto;
-  min-width: 0;
-  /* --sp-1 (4px) crammed the tabs against each other. */
-  gap: var(--sp-2);
-  padding-bottom: var(--sp-1);
-  overflow-x: auto;
+  border-left: 1px solid var(--console-line);
 }
 
 .tab {
-  display: flex;
+  position: relative;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto 18px;
   align-items: center;
-  gap: var(--sp-2);
-  /* --sp-1/--sp-2 (4px 8px) put the close X hard against the title. */
-  padding: var(--sp-2) var(--sp-3);
-  max-width: 22ch;
-  border: 1px solid var(--panel-border);
-  border-radius: var(--radius-sm);
-  background: var(--panel);
-  color: var(--text-muted);
-  font-size: var(--fs-label);
-  letter-spacing: var(--label-tracking);
+  gap: 10px;
+  flex: 0 1 240px;
+  min-width: 150px;
+  padding: 0 8px 0 16px;
+  border-right: 1px solid var(--console-line);
+  color: var(--console-t3);
   cursor: pointer;
-  user-select: none;
+  -webkit-app-region: no-drag;
 }
 
-.tab[data-active='yes'] {
-  border-color: var(--accent);
-  color: var(--accent);
+.tab .k {
+  font-size: 9px;
+  letter-spacing: 0.2em;
+  color: var(--console-t5);
 }
 
-.tab-label {
+.tab .t {
+  font-size: 13px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.tab-x,
-.tab-add,
-.tab-menu {
-  font-family: var(--font-mono);
-  font-size: var(--fs-label);
-  line-height: 1;
-  color: var(--text-muted);
-  background: none;
-  border: none;
-  padding: 0 var(--sp-1);
-  cursor: pointer;
+.tab .m {
+  font-size: 9px;
+  letter-spacing: 0.16em;
+  color: var(--console-t4);
+  white-space: nowrap;
 }
 
-/* ── THE `+` AND THE `∨`, AS ONE CONTROL GROUP ─────────────────────────────
-   Windows Terminal sets them slightly apart from the tabs and joins them to
-   each other. `margin-left` is the gap before the pair; the two buttons then
-   sit flush so they read as one control with two halves.
+.tab .m.bad {
+  color: var(--console-t1);
+}
 
-   Geometry is Windows Terminal's; every colour is Tessa's active theme via
-   tokens, so a theme change repaints these with everything else. */
-.tab-new {
-  display: flex;
-  align-items: stretch;
-  flex: 0 0 auto;
+.tab .m.dot {
+  width: 5px;
+  height: 5px;
+  background: var(--console-t2);
+}
+
+.tab .x {
   position: relative;
+  width: 18px;
+  height: 18px;
+  opacity: 0;
 }
 
-.tab-add,
-.tab-menu {
-  border: 1px solid var(--panel-border);
-  background: var(--panel);
-  padding: 0 var(--sp-3);
-  display: flex;
-  align-items: center;
-}
-
-.tab-add {
-  border-radius: var(--radius-sm) 0 0 var(--radius-sm);
-  border-right: none;
-}
-
-.tab-menu {
-  border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
-  padding: 0 var(--sp-2);
-}
-
-.tab-x:hover,
-.tab-add:hover,
-.tab-menu:hover {
-  color: var(--accent);
-  border-color: var(--accent);
-}
-
-/* The shell list. Anchored under the `∨`, above everything, and it closes on
-   any click elsewhere — the overlay below is what catches that click. */
-.tab-menu-pop {
+.tab .x::before,
+.tab .x::after {
+  content: '';
   position: absolute;
-  top: calc(100% + var(--sp-1));
-  right: 0;
-  z-index: 20;
-  min-width: 22ch;
-  display: flex;
-  flex-direction: column;
-  padding: var(--sp-1);
-  gap: var(--sp-1);
-  background: var(--panel);
-  border: 1px solid var(--panel-border);
-  border-radius: var(--radius-sm);
+  left: 5px;
+  right: 5px;
+  top: 8.5px;
+  height: 1px;
+  background: var(--console-t3);
+  transform: rotate(45deg);
 }
 
-.tab-menu-pop button {
-  font-family: var(--font-mono);
-  font-size: var(--fs-label);
-  text-transform: var(--label-transform);
-  letter-spacing: var(--label-tracking);
-  text-align: left;
-  color: var(--text);
-  background: none;
-  border: 1px solid transparent;
-  border-radius: var(--radius-sm);
-  padding: var(--sp-2) var(--sp-3);
-  cursor: pointer;
+.tab .x::after {
+  transform: rotate(-45deg);
 }
 
-.tab-menu-pop button:hover:not(:disabled) {
-  color: var(--accent);
-  border-color: var(--accent);
+.tab .x:hover::before,
+.tab .x:hover::after {
+  background: var(--console-t1);
 }
 
-.tab-menu-pop button:disabled {
-  color: var(--text-muted);
-  cursor: default;
+.tab:hover .x,
+.tab.on .x {
+  opacity: 1;
 }
 
-/* Catches the click that dismisses the popup, without stealing it from the
-   popup's own buttons — which sit above it on z-index. */
-.tab-menu-scrim {
-  position: fixed;
-  inset: 0;
-  z-index: 10;
+.tab:hover {
+  color: var(--console-t2);
+  background: var(--console-tab-hover);
 }
 
-/* Each tab's page fills the stage and stacks on the others. */
-.tab-page {
-  position: absolute;
-  inset: 0;
+.tab.on {
+  background: var(--console-bg);
+  color: var(--console-t1);
 }
 
-.tab-page[data-active='no'] {
-  visibility: hidden;
-  pointer-events: none;
+.tab.on .k {
+  color: var(--console-t4);
 }
 
-
-/* ══ HIERARCHY PASS ════════════════════════════════════════════════════════
-   Everything below overrides earlier rules deliberately: the chrome drops to
-   tier 3 and shrinks, the tab strip becomes unmistakable, and the watermark
-   appears behind every pane. */
-
-/* RECESSIVE — the title, the status line, the buttons. Controls and labels. */
-.top {
-  align-items: baseline;
-}
-
-.brand {
-  font-size: var(--chrome-size);
-  font-weight: 400;
-  letter-spacing: var(--chrome-tracking);
-  text-transform: uppercase;
-  color: var(--tier-3);
-}
-
-.phase {
-  font-size: var(--chrome-size);
-  letter-spacing: var(--chrome-tracking);
-  color: var(--tier-3);
-}
-
-/* The one exception in tier 3: a BROKEN connection is an alarm, not a label. */
-.phase b[data-state='failed'] {
-  color: var(--status-error);
-}
-
-.phase b[data-state='ok'] {
-  color: var(--tier-3);
-  font-weight: 400;
-}
-
-.term-bar {
-  font-size: var(--chrome-size);
-  letter-spacing: var(--chrome-tracking);
-  color: var(--tier-3);
-  gap: var(--sp-1);
-}
-
-.term-bar button {
-  font-size: var(--chrome-size);
-  letter-spacing: var(--chrome-tracking);
-  color: var(--tier-3);
-  background: transparent;
-  border: 1px solid transparent;
-}
-
-.term-bar button:hover:not(:disabled) {
-  color: var(--accent);
-  border-color: var(--panel-border);
-}
-
-.term-meta {
-  color: var(--tier-3);
-}
-
-/* SECONDARY — the tab strip. The active tab must not need reading to find. */
-.tab {
-  border: 1px solid transparent;
-  border-bottom: none;
-  border-radius: var(--radius-sm) var(--radius-sm) 0 0;
-  background: transparent;
-  color: var(--tier-3);
-  font-size: var(--chrome-size);
-  letter-spacing: var(--chrome-tracking);
-  padding: var(--sp-1) var(--sp-3);
-  position: relative;
-}
-
-/* THREE signals at once, because one was not enough at 1366px on a dark theme:
-   a filled ground, a full-strength label, and a 2px accent bar along the top.
-   The bar is what carries at a glance — fill alone reads as noise on a panel
-   that is already dark. */
-.tab[data-active='yes'] {
-  background: var(--panel);
-  color: var(--text);
-  border-color: var(--panel-border);
-}
-
-.tab[data-active='yes']::before {
+.tab.on::before {
   content: '';
   position: absolute;
   left: 0;
   right: 0;
   top: 0;
-  height: 2px;
-  background: var(--accent);
-  border-radius: var(--radius-sm) var(--radius-sm) 0 0;
+  height: 1px;
+  background: var(--console-tab-top);
 }
 
-.tab[data-active='no']:hover {
-  color: var(--text);
+.tab.on::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: -1px;
+  height: 1px;
+  background: var(--console-bg);
 }
 
-/* The focused pane's own identity is secondary, not recessive. */
-.pane[data-focused='yes'] .pane-meta {
-  color: var(--tier-2);
+.tab.other {
+  color: var(--console-t2);
 }
 
-.pane-meta {
-  font-size: var(--chrome-size);
-  letter-spacing: var(--chrome-tracking);
-  color: var(--tier-3);
+.tab.other::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 0;
+  height: 1px;
+  background: var(--console-line2);
 }
 
-/* ── THE WATERMARK ─────────────────────────────────────────────────────────
-   His own idea, and the right one: empty space that reads as intentional
-   rather than empty.
-
-   IT SITS ON THE STAGE, BEHIND EVERY PANE — not inside one. Splitting cannot
-   give him two marks or cut one at a divider, because there is exactly one
-   element and the panes are painted over it.
-
-   OPACITY 0.11 of the accent. It was 0.04, which measured beautifully and was
-   INVISIBLE ON HIS PANEL — he relaunched, looked, and said it was not showing.
-   At 1.036:1 that was correct behaviour and the instruction was the thing that
-   was wrong: no non-zero opacity clears "not measurably different".
-
-   Measured on --bg-void across all six themes at 0.11:
-
-     mark's own contrast   1.126:1 (violet) to 1.233:1 (cyan)
-     terminal text over it 14.525:1 (violet) to 13.259:1 (cyan)
-     over bare void        16.353:1
-     worst delta           -3.094
-
-   So the worst case leaves terminal text at 13.26:1 — still THREE TIMES the
-   4.5:1 AA threshold, and above AAA's 7:1. The mark itself stays far below AA
-   in every theme, which is Session 2's ornament rule; it carries no numeral,
-   which is the other half, for free.
-
-   `pointer-events: none` so it can never eat a click meant for a terminal. */
-/* ── THE "TESSA" WATERMARK IS GONE ─────────────────────────────────────────
-   "Remove the Tessa Background there or find another thing to be there.
-   Doesn't look good there."
-
-   Removed rather than replaced. An empty terminal is what Windows Terminal
-   shows and what he pointed at, and inventing decorative artwork to fill the
-   space is not something to do unasked.
-
-   Two things that were built for it are deliberately KEPT, because they are
-   load-bearing for the panes and not for the mark:
-     * `.pane-stage { container-type: size }` — panes are still measured
-       against the stage.
-     * the `--mark` token block at the top — Session 2's tokens define it and
-       this file only maps it; leaving the mapping costs nothing and removing
-       it would be an edit to a shared naming scheme for no reason.
-   The `.watermark` rules and the `<div className="watermark">` in App.tsx are
-   both gone; nothing references either. */
-
-
-/* Panes paint over the mark. They have no background of their own, so the mark
-   shows through the gaps and is simply invisible behind glyphs — it never
-   competes with output because output is drawn on top of it. */
-.pane-frame,
-.tab-page {
-  z-index: 1;
+.tab input.ren {
+  width: 100%;
+  min-width: 0;
+  background: transparent;
+  border: 0;
+  outline: 1px solid var(--console-t3);
+  color: var(--console-t1);
+  font: inherit;
+  font-size: 13px;
+  padding: 2px 4px;
+  user-select: text;
 }
 
-/* The pid is situational: present when he needs it, silent when he does not. */
-.term-pid {
-  opacity: 0.55;
+.newtab {
+  position: relative;
+  width: 44px;
+  flex: none;
+  border-right: 1px solid var(--console-line);
+  -webkit-app-region: no-drag;
 }
 
-/* ── THE FILE TREE ─────────────────────────────────────────────────────────
-   LEFT, because every tool he already uses puts it there — Explorer, VS Code,
-   the Orb's own left rail — and because terminal output is left-aligned, so a
-   right-hand rail would sit against the ragged edge of every line.
+.newtab::before,
+.newtab::after {
+  content: '';
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 12px;
+  height: 1px;
+  margin: -0.5px 0 0 -6px;
+  background: var(--console-t3);
+}
 
-   It is chrome, so it lives at tier 3 and never competes with output. */
+.newtab::after {
+  transform: rotate(90deg);
+}
 
-.stage-row {
+.newtab:hover,
+.newtab.on {
+  background: var(--console-tab-hover);
+}
+
+.newtab:hover::before,
+.newtab:hover::after,
+.newtab.on::before,
+.newtab.on::after {
+  background: var(--console-t1);
+}
+
+.tfill {
+  flex: 1;
+  min-width: 16px;
+}
+
+.wctl {
   display: flex;
-  flex: 1 1 auto;
+  -webkit-app-region: no-drag;
+}
+
+.wctl button {
+  position: relative;
+  width: 46px;
+}
+
+.wctl button:hover {
+  background: var(--console-bg3);
+}
+
+.wctl .mn::before {
+  content: '';
+  position: absolute;
+  left: 18px;
+  right: 18px;
+  top: 50%;
+  height: 1px;
+  background: var(--console-t3);
+}
+
+.wctl .mx::before {
+  content: '';
+  position: absolute;
+  left: 18px;
+  top: 15px;
+  width: 10px;
+  height: 10px;
+  border: 1px solid var(--console-t3);
+}
+
+.wctl .mx.restore::before {
+  left: 18px;
+  top: 17px;
+  width: 8px;
+  height: 8px;
+}
+
+.wctl .mx.restore::after {
+  content: '';
+  position: absolute;
+  left: 20px;
+  top: 15px;
+  width: 8px;
+  height: 8px;
+  border-top: 1px solid var(--console-t3);
+  border-right: 1px solid var(--console-t3);
+}
+
+.wctl .cl::before,
+.wctl .cl::after {
+  content: '';
+  position: absolute;
+  left: 17px;
+  right: 17px;
+  top: 50%;
+  height: 1px;
+  background: var(--console-t3);
+  transform: rotate(45deg);
+}
+
+.wctl .cl::after {
+  transform: rotate(-45deg);
+}
+
+.wctl button:hover::before,
+.wctl button:hover::after {
+  background: var(--console-t1);
+}
+
+.wctl .mx:hover::before {
+  background: transparent;
+  border-color: var(--console-t1);
+}
+
+.wctl .mx.restore:hover::after {
+  background: transparent;
+  border-color: var(--console-t1);
+}
+
+.panes {
+  position: relative;
+  min-width: 0;
   min-height: 0;
-  min-width: 0;
-  gap: var(--sp-2);
+  overflow: hidden;
+  background: var(--console-bg);
 }
 
-.tree {
-  display: flex;
-  flex-direction: column;
-  flex: 0 0 250px;
-  min-width: 0;
-  border: 1px solid var(--panel-border);
-  border-radius: var(--radius-sm);
-  background: var(--panel);
+.split {
+  position: absolute;
+  background: var(--console-line);
+  z-index: 4;
+}
+
+.tv {
+  position: absolute;
   overflow: hidden;
 }
 
-.tree-head {
+.tv-under {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 0;
+}
+
+.tv-band,
+.tv-sel {
+  position: absolute;
+  left: 0;
+  right: 34px;
+}
+
+.tv-band {
+  background: var(--console-band);
+}
+
+.tv-sel {
+  background: var(--console-hl);
+}
+
+.tv-host {
+  position: absolute;
+  left: 36px;
+  right: 34px;
+  top: 18px;
+  bottom: 6px;
+  z-index: 1;
+  user-select: text;
+  cursor: text;
+}
+
+.tv-host .xterm,
+.tv-host .xterm-viewport,
+.tv-host .xterm-screen {
+  background: transparent;
+}
+
+.tv-host .xterm-viewport {
+  scrollbar-width: none;
+}
+
+.tv-host .xterm-viewport::-webkit-scrollbar {
+  display: none;
+  width: 0;
+  height: 0;
+}
+
+.tv-host .xterm-scrollable-element > .shadow {
+  display: none !important;
+}
+
+.tv-host .xterm-scrollable-element > .scrollbar.vertical.invisible.fade {
+  opacity: 1 !important;
+  pointer-events: auto !important;
+}
+
+.tv-host .xterm-scrollable-element > .scrollbar.vertical > .slider {
+  left: 4px !important;
+  width: 2px !important;
+}
+
+.tv-gutter {
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 36px;
+  z-index: 2;
+}
+
+.tv-g {
+  position: absolute;
+  left: 0;
+  width: 36px;
+  cursor: pointer;
+}
+
+.tv-g i {
+  position: absolute;
+  left: 16px;
+  width: 2px;
+  background: var(--console-t5);
+}
+
+.tv-g:hover i {
+  background: var(--console-t3);
+}
+
+.tv-g.run i {
+  background: var(--console-t3);
+}
+
+.tv-g.fail i {
+  background: var(--console-t1);
+}
+
+.tv-g.stop i {
+  width: 0;
+  background: transparent;
+  border-left: 2px dashed var(--console-t4);
+}
+
+.tv-live {
+  position: absolute;
+  left: 16px;
+  width: 2px;
+  background: var(--console-t1);
+}
+
+.tv-meta {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 3;
+}
+
+.tv-m {
+  position: absolute;
+  right: 34px;
+  padding-left: 28px;
+  font-family: var(--font);
+  font-size: 9.5px;
+  letter-spacing: 0.18em;
+  color: var(--console-t4);
+  background: linear-gradient(90deg, transparent, var(--console-bg) 20px);
+  white-space: nowrap;
+}
+
+.tv-m.run {
+  color: var(--console-t3);
+}
+
+.tv-m.bad {
+  color: var(--console-t1);
+}
+
+.tv-m.sel {
+  background: none;
+}
+
+.pane {
+  position: absolute;
+  pointer-events: none;
+  z-index: 5;
+}
+
+.brk {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 9;
+}
+
+.pane .brk {
+  opacity: 0;
+}
+
+.pane.focus .brk {
+  opacity: 1;
+}
+
+.brk i {
+  position: absolute;
+  width: 10px;
+  height: 10px;
+  border-color: var(--console-brk);
+  border-style: solid;
+  border-width: 0;
+}
+
+.brk i.tl {
+  left: 0;
+  top: 0;
+  border-left-width: 1px;
+  border-top-width: 1px;
+}
+
+.brk i.tr {
+  right: 0;
+  top: 0;
+  border-right-width: 1px;
+  border-top-width: 1px;
+}
+
+.brk i.bl {
+  left: 0;
+  bottom: 0;
+  border-left-width: 1px;
+  border-bottom-width: 1px;
+}
+
+.brk i.br {
+  right: 0;
+  bottom: 0;
+  border-right-width: 1px;
+  border-bottom-width: 1px;
+}
+
+.ph {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 0;
+  height: 30px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 0 18px;
+  border-bottom: 1px solid var(--console-line);
+  font-size: 12px;
+  color: var(--console-t4);
+  white-space: nowrap;
+  overflow: hidden;
+  background: var(--console-bg);
+  pointer-events: auto;
+}
+
+.ph .k {
+  font-size: 9px;
+  letter-spacing: 0.2em;
+  color: var(--console-t5);
+}
+
+.ph .t {
+  color: var(--console-t4);
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.pane.focus .ph .k {
+  color: var(--console-t3);
+}
+
+.pane.focus .ph .t {
+  color: var(--console-t1);
+}
+
+.ph .run {
+  margin-left: auto;
+  font-size: 9.5px;
+  letter-spacing: 0.18em;
+  color: var(--console-t4);
+}
+
+.ph.find {
+  gap: 12px;
+  color: var(--console-t3);
+  background: var(--console-bg1);
+}
+
+.ph.find input {
+  flex: 1;
+  min-width: 60px;
+  max-width: 360px;
+  background: transparent;
+  border: 0;
+  border-bottom: 1px solid var(--console-t3);
+  outline: none;
+  color: var(--console-t1);
+  font: inherit;
+  font-size: 13px;
+  padding: 2px 0;
+  user-select: text;
+}
+
+.ph.find input::placeholder {
+  color: var(--console-t5);
+}
+
+.ph.find .cnt {
+  color: var(--console-t1);
+  font-size: 11px;
+  letter-spacing: 0.1em;
+}
+
+.ph.find button {
+  padding: 2px 8px;
+  border: 1px solid var(--console-line2);
+  font-size: 9.5px;
+  letter-spacing: 0.14em;
+  color: var(--console-t3);
+}
+
+.ph.find button:hover {
+  color: var(--console-t1);
+  border-color: var(--console-t4);
+}
+
+.ph.find .esc {
+  margin-left: auto;
+}
+
+.sticky {
+  position: absolute;
+  left: 0;
+  right: 0;
+  z-index: 6;
+  display: grid;
+  grid-template-columns: 36px minmax(0, 1fr) auto;
+  align-items: center;
+  height: 36px;
+  padding-right: 34px;
+  background: var(--console-bg1);
+  border-bottom: 1px solid var(--console-line);
+  font-family: var(--mono);
+  font-size: var(--fs);
+  color: var(--console-t2);
+  white-space: pre;
+  cursor: pointer;
+  pointer-events: auto;
+  animation: fadein 0.12s ease-out;
+}
+
+.sticky .g {
+  position: relative;
+  align-self: stretch;
+}
+
+.sticky .g::before {
+  content: '';
+  position: absolute;
+  left: 16px;
+  width: 2px;
+  top: 10px;
+  bottom: 10px;
+  background: var(--console-t5);
+}
+
+.sticky.run .g::before {
+  background: var(--console-t3);
+}
+
+.sticky.fail .g::before {
+  background: var(--console-t1);
+}
+
+.sticky .l {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.sticky .pr {
+  color: var(--console-t4);
+}
+
+.sticky .cmd {
+  color: var(--console-t1);
+}
+
+.sticky:hover .cmd {
+  text-decoration: underline;
+  text-decoration-color: var(--console-link);
+  text-underline-offset: 3px;
+}
+
+.sticky .st {
+  font-family: var(--font);
+  font-size: 9.5px;
+  letter-spacing: 0.18em;
+  color: var(--console-t4);
+  padding-left: 16px;
+}
+
+.sticky.fail .st {
+  color: var(--console-t1);
+}
+
+.waiting {
+  position: absolute;
+  left: 36px;
+  right: 34px;
+  padding-top: 18px;
+  font-size: 13px;
+  color: var(--console-t3);
+}
+
+.waiting p {
+  margin: 8px 0 0;
+}
+
+.newout {
+  position: absolute;
+  left: 50%;
+  bottom: 16px;
+  transform: translateX(-50%);
+  z-index: 7;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 8px 6px 14px;
+  background: var(--console-bg2);
+  border: 1px solid var(--console-line2);
+  font-size: 9.5px;
+  letter-spacing: 0.2em;
+  color: var(--console-t1);
+  white-space: nowrap;
+  pointer-events: auto;
+}
+
+.newout:hover {
+  border-color: var(--console-t4);
+}
+
+.guard {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 8;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 12px 18px;
+  background: var(--console-bg2);
+  border-top: 1px solid var(--console-t4);
+  font-size: 13px;
+  color: var(--console-t1);
+  pointer-events: auto;
+  animation: fadein 0.15s ease-out;
+}
+
+.guard .q {
+  flex: 1;
+  min-width: 0;
+}
+
+.guard .q small {
+  display: block;
+  color: var(--console-t3);
+  font-size: 11.5px;
+  margin-top: 3px;
+}
+
+.guard button {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px 6px 12px;
+  border: 1px solid var(--console-line2);
+  font-size: 10px;
+  letter-spacing: 0.16em;
+  color: var(--console-t2);
+  white-space: nowrap;
+}
+
+.guard button.go {
+  border-color: var(--console-t3);
+  color: var(--console-t1);
+}
+
+.guard button:hover {
+  border-color: var(--console-t2);
+}
+
+.scanline {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 0;
+  height: 1px;
+  background: var(--console-sweep);
+  pointer-events: none;
+  z-index: 9;
+  animation: scan 0.5s ease-in forwards;
+}
+
+.ruler {
+  position: absolute;
+  width: 5px;
+  pointer-events: none;
+  z-index: 6;
+}
+
+.ruler i {
+  position: absolute;
+  left: -2px;
+  right: -2px;
+  height: 2px;
+  background: var(--console-t1);
+}
+
+.ruler i.view {
+  left: -1px;
+  right: -1px;
+  height: auto;
+  background: transparent;
+  border: 1px solid var(--console-line2);
+}
+
+.empty {
+  position: absolute;
+  inset: 0;
+  z-index: 5;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  font-family: var(--font);
+  padding: 24px;
+  background: var(--console-bg);
+}
+
+.empty .wm {
+  font-size: 40px;
+  font-weight: 300;
+  letter-spacing: 0.5em;
+  margin-right: -0.5em;
+  color: var(--console-t1);
+  line-height: 1;
+}
+
+.empty p {
+  margin: 18px 0 30px;
+  font-size: 14px;
+  color: var(--console-t3);
+}
+
+.empty .acts {
+  display: flex;
+  flex-direction: column;
+  width: min(420px, 100%);
+  border-top: 1px solid var(--console-line);
+}
+
+.empty .act {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  flex: 0 0 auto;
-  padding: var(--sp-1) var(--sp-2);
-  border-bottom: 1px solid var(--panel-border);
-  font-size: var(--chrome-size);
-  letter-spacing: var(--chrome-tracking);
-  text-transform: uppercase;
-  color: var(--tier-3);
+  gap: 16px;
+  padding: 12px 6px 12px 4px;
+  border-bottom: 1px solid var(--console-line);
+  font-size: 13.5px;
+  color: var(--console-t2);
+  text-align: left;
 }
 
-.tree-root {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  color: var(--tier-2);
+.empty .act:hover {
+  color: var(--console-t1);
+  background: var(--console-hl);
 }
 
-.tree-refresh {
-  font-family: var(--font-mono);
-  color: var(--tier-3);
-  background: none;
-  border: none;
-  cursor: pointer;
-  padding: 0 var(--sp-1);
+.empty .act.main {
+  color: var(--console-t1);
 }
 
-.tree-refresh:hover {
-  color: var(--accent);
-}
-
-.tree-body {
-  flex: 1 1 auto;
-  overflow: auto;
-  padding-bottom: var(--sp-2);
-}
-
-.tree-row {
-  display: flex;
-  align-items: center;
-  gap: var(--sp-1);
-  padding: 1px var(--sp-2) 1px 0;
-  font-size: var(--fs-sm);
-  color: var(--text-muted);
-  cursor: pointer;
-  white-space: nowrap;
-}
-
-.tree-row:hover {
-  color: var(--text);
-  background: var(--panel-border);
-}
-
-.tree-row[data-kind='dir'] {
-  color: var(--tier-3);
-}
-
-.tree-caret {
-  width: 1ch;
-  flex: 0 0 auto;
-  color: var(--tier-3);
-}
-
-.tree-name {
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-/* A reparse point is MARKED, never followed. It is a fact about the entry, not
-   an alarm, so it sits at tier 3 rather than in an alarm colour. */
-.tree-cloud {
-  flex: 0 0 auto;
-  color: var(--tier-3);
-  opacity: 0.7;
-}
-
-.tree-size {
-  margin-left: auto;
-  flex: 0 0 auto;
-  font-size: var(--chrome-size);
-  color: var(--tier-3);
-  opacity: 0.6;
-}
-
-.tree-note {
-  padding: 2px var(--sp-2);
-  font-size: var(--chrome-size);
-  color: var(--tier-3);
-  font-style: italic;
-}
-
-/* An unreadable folder is a REAL failure and gets an alarm colour, because the
-   difference between "empty" and "I could not look" matters. */
-.tree-error {
-  padding: 2px var(--sp-2);
-  font-size: var(--chrome-size);
-  color: var(--status-warn);
-}
-
-/* ── THE CHAT PANE ─────────────────────────────────────────────────────────
-   A pane that hosts her rather than a shell. It inherits `.pane` entirely —
-   the focus border, the meta row, the sizing — because it IS a pane and the
-   layout must not care what is inside it. */
-
-.pane.chat {
-  overflow: hidden;
-}
-
-.chat-state {
-  margin-left: auto;
-  color: var(--tier-3);
-}
-
-.chat-state[data-busy='yes'] {
-  color: var(--accent);
-}
-
-.chat-body {
-  flex: 1 1 auto;
-  min-height: 0;
-  overflow-y: auto;
-  overflow-x: hidden;
+.empty .recent {
   display: flex;
   flex-direction: column;
-  gap: var(--sp-2);
-  padding: var(--sp-2) var(--sp-1);
-  /* LONG ANSWERS WRAP. A pane has room, so there is no excerpt and no word
-     count — the Orb needs those because it has one line. */
-  overflow-wrap: anywhere;
-  user-select: text;
-  cursor: auto;
+  align-items: center;
+  gap: 2px;
+  margin-top: 30px;
 }
 
-.chat-empty {
-  color: var(--tier-3);
-  font-size: var(--fs-sm);
-  font-style: italic;
+.empty .recent .lab {
+  margin-bottom: 8px;
 }
 
-.chat-line {
+.empty .recent button {
+  max-width: calc(100vw - 64px);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  padding: 4px 10px;
+  font-family: var(--mono);
+  font-size: 13px;
+  color: var(--console-t3);
+}
+
+.empty .recent button:hover {
+  color: var(--console-t1);
+}
+
+.sbar {
   display: flex;
-  gap: var(--sp-2);
   align-items: stretch;
-}
-
-/* ── THE PROVENANCE GUTTER ─────────────────────────────────────────────────
-   The security model, drawn. Four sources and four colours, straight from the
-   shared tokens so the Console and the Orb say the same thing with the same
-   hue. `external` is the one that earns its place: content she fetched is
-   neither his speech nor hers, and typing is exactly where he would paste
-   something out of a web page without thinking. */
-.chat-gutter {
-  flex: 0 0 2px;
-  border-radius: 1px;
-  background: var(--prov-program);
-}
-
-.chat-gutter[data-prov='human'] {
-  background: var(--prov-human);
-}
-
-.chat-gutter[data-prov='agent'] {
-  background: var(--prov-agent);
-}
-
-.chat-gutter[data-prov='external'] {
-  background: var(--status-warn);
-}
-
-.chat-text {
-  flex: 1 1 auto;
   min-width: 0;
-  color: var(--text);
-  white-space: pre-wrap;
+  border-top: 1px solid var(--console-line);
+  background: var(--console-bg1);
+  font-size: 11.5px;
+  white-space: nowrap;
+  overflow: hidden;
 }
 
-.chat-who {
+.sb {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 16px;
+  border-right: 1px solid var(--console-line);
+  color: var(--console-t3);
+}
+
+.sb .k {
+  font-size: 9px;
+  letter-spacing: 0.2em;
+  color: var(--console-t4);
+}
+
+.sb .v {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.sb.cwd {
+  min-width: 0;
+  flex: 0 1 auto;
+}
+
+.sb.fill {
+  flex: 1;
+  padding: 0;
+}
+
+.sb.last .v {
+  font-size: 9.5px;
+  letter-spacing: 0.18em;
+  white-space: pre;
+}
+
+.sb.fail .v {
+  color: var(--console-t1);
+}
+
+.sb.tessa {
+  border-right: 0;
+  border-left: 1px solid var(--console-line);
+}
+
+.sb.tessa .v {
+  font-size: 9.5px;
+  letter-spacing: 0.18em;
+  color: var(--console-t2);
+}
+
+.sb.tessa.off .v {
+  color: var(--console-t5);
+}
+
+.sb.wait {
+  background: var(--blocked-mid);
+  color: var(--console-bg);
+  cursor: pointer;
+  border-right: 0;
+  border-left: 1px solid var(--blocked-mid);
+}
+
+.sb.wait .v {
+  color: var(--console-bg);
+  font-size: 9.5px;
+  letter-spacing: 0.18em;
+  white-space: pre;
+}
+
+.sb.threat {
+  background: var(--threat);
+  color: var(--console-bg);
+  cursor: pointer;
+  border-right: 0;
+  border-left: 1px solid var(--threat);
+  font-size: 9.5px;
+  letter-spacing: 0.18em;
+}
+
+.menu {
+  position: absolute;
+  z-index: 20;
+  min-width: 300px;
+  padding: 6px 0;
+  background: var(--console-bg2);
+  border: 1px solid var(--console-line2);
+  animation: fadein 0.12s ease-out;
+}
+
+.menu .mh {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 6px 16px 8px;
+}
+
+.menu .it {
+  display: grid;
+  grid-template-columns: 46px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 8px 14px 8px 16px;
+  text-align: left;
+  font-size: 13px;
+  color: var(--console-t2);
+}
+
+.menu .it .k {
+  font-size: 9px;
+  letter-spacing: 0.2em;
+  color: var(--console-t4);
+}
+
+.menu .it em {
+  font-style: normal;
+  padding: 2px 6px 1px;
+  border: 1px solid var(--console-line2);
+  font-size: 9.5px;
+  letter-spacing: 0.1em;
+  color: var(--console-t3);
+  line-height: 1.4;
+}
+
+.menu .it em.none {
+  display: none;
+}
+
+.menu .it small {
   display: block;
-  font-size: var(--chrome-size);
-  letter-spacing: var(--chrome-tracking);
-  text-transform: uppercase;
-  color: var(--tier-3);
-  margin-bottom: 2px;
+  font-size: 10.5px;
+  color: var(--console-t4);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  margin-top: 1px;
 }
 
-.chat-working {
-  color: var(--tier-3);
-  font-style: italic;
+.menu .it:hover:not([disabled]),
+.menu .it.sel {
+  background: var(--console-bg3);
+  color: var(--console-t1);
 }
 
-.chat-input {
-  flex: 0 0 auto;
-  resize: none;
-  font-family: var(--font-mono);
-  font-size: var(--fs-sm);
-  color: var(--text);
-  background: var(--panel);
-  border: 1px solid var(--panel-border);
-  border-radius: var(--radius-sm);
-  padding: var(--sp-2);
+.menu .it.sel em {
+  border-color: var(--console-t4);
+  color: var(--console-t2);
+}
+
+.menu .it[disabled] {
+  cursor: default;
+  opacity: 0.4;
+}
+
+.menu .it[disabled] em {
+  border-color: transparent;
+}
+
+.menu .sep {
+  height: 1px;
+  margin: 6px 0;
+  background: var(--console-line);
+}
+
+.pal {
+  left: 50%;
+  top: 56px;
+  width: min(600px, calc(100% - 40px));
+  transform: translateX(-50%);
+  padding: 0 0 6px;
+}
+
+.pal .pin {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--console-line);
+}
+
+.pal .pin span {
+  color: var(--console-t4);
+}
+
+.pal input {
+  flex: 1;
+  background: transparent;
+  border: 0;
   outline: none;
+  color: var(--console-t1);
+  font: inherit;
+  font-size: 15px;
   user-select: text;
 }
 
-.chat-input:focus {
-  border-color: var(--accent);
+.pal input::placeholder {
+  color: var(--console-t5);
 }
 
-.chat-input:disabled {
-  color: var(--tier-3);
-  cursor: not-allowed;
+.pal .list {
+  max-height: min(380px, 60vh);
+  overflow: auto;
+  scrollbar-width: thin;
+  scrollbar-color: var(--console-line2) transparent;
 }
 
-/* A pane hidden by ZOOM keeps its box and its shell — see layoutOf in App.
-   `visibility` rather than `display`, for the same reason a hidden tab uses it:
-   an element with no box makes xterm report zero columns. */
-.pane-frame[data-hidden='yes'] {
-  visibility: hidden;
+.pal .gh {
+  padding: 10px 16px 4px;
+}
+
+.set {
+  position: absolute;
+  z-index: 18;
+  right: 0;
+  top: 41px;
+  bottom: 29px;
+  width: min(400px, 92%);
+  display: flex;
+  flex-direction: column;
+  background: var(--console-bg2);
+  border-left: 1px solid var(--console-line2);
+  animation: fadein 0.15s ease-out;
+}
+
+.set .sh {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 16px 20px 12px;
+  border-bottom: 1px solid var(--console-line);
+}
+
+.set .sh b {
+  font-weight: 600;
+  font-size: 11.5px;
+  letter-spacing: 0.36em;
+  color: var(--console-t1);
+}
+
+.set .sbd {
+  flex: 1;
+  overflow: auto;
+  padding: 4px 20px 20px;
+  scrollbar-width: thin;
+  scrollbar-color: var(--console-line2) transparent;
+}
+
+.set .sec {
+  margin-top: 20px;
+}
+
+.set .sr {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 14px;
+  padding: 11px 0;
+  border-bottom: 1px solid var(--console-line);
+  font-size: 13px;
+  color: var(--console-t1);
+}
+
+.set .sr small {
+  display: block;
+  color: var(--console-t4);
+  font-size: 11px;
+  margin-top: 2px;
+}
+
+.set .seg {
+  display: flex;
+}
+
+.set .seg button {
+  padding: 4px 9px;
+  border: 1px solid var(--console-line2);
+  margin-left: -1px;
+  font-size: 9.5px;
+  letter-spacing: 0.14em;
+  color: var(--console-t4);
+}
+
+.set .seg button.on {
+  position: relative;
+  border-color: var(--console-t3);
+  color: var(--console-t1);
+  background: var(--console-bg3);
+}
+
+.set .pf {
+  display: grid;
+  grid-template-columns: 46px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--console-line);
+  font-size: 13px;
+  color: var(--console-t1);
+}
+
+.set .pf .k {
+  font-size: 9px;
+  letter-spacing: 0.2em;
+  color: var(--console-t4);
+}
+
+.set .pf.miss {
+  opacity: 0.4;
+}
+
+.set .hint {
+  margin: 20px 0 0;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--console-t4);
+}
+
+.toasts {
+  position: absolute;
+  right: 18px;
+  bottom: 44px;
+  z-index: 16;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: min(340px, calc(100% - 36px));
   pointer-events: none;
+}
+
+.toast {
+  position: relative;
+  padding: 11px 14px 12px 16px;
+  background: var(--console-bg2);
+  border: 1px solid var(--console-line2);
+  font-size: 12.5px;
+  line-height: 1.45;
+  color: var(--console-t1);
+  pointer-events: auto;
+  animation: fadein 0.2s ease-out;
+  transition: opacity 0.3s;
+  overflow-wrap: anywhere;
+}
+
+.toast::before {
+  content: '';
+  position: absolute;
+  left: -1px;
+  top: -1px;
+  bottom: -1px;
+  width: 2px;
+  background: var(--console-note-bar);
+}
+
+.toast .lab {
+  display: flex;
+  justify-content: space-between;
+  margin-bottom: 4px;
+}
+
+.toast.out {
+  opacity: 0;
+}
+
+.toast.wait::before {
+  background: var(--blocked-mid);
+}
+
+.toast.threat::before {
+  background: var(--threat);
+}
+
+#win.narrow .brand span {
+  display: none;
+}
+
+#win.narrow .tab {
+  min-width: 110px;
+  grid-template-columns: minmax(0, 1fr) auto 18px;
+  padding-left: 14px;
+}
+
+#win.narrow .tab .k {
+  display: none;
+}
+
+#win.narrow .tab .m:not(.dot):not(.none) {
+  font-size: 0;
+  width: 6px;
+  height: 6px;
+}
+
+#win.narrow .tab .m.run {
+  border: 1px solid var(--console-t3);
+}
+
+#win.narrow .tab .m.bad {
+  background: var(--console-t1);
 }

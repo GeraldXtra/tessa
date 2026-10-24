@@ -31,9 +31,11 @@ import {
   composeRefused,
   composeStore,
   composeUnsentOnDrop,
+  heldLine,
   type ComposePlace,
 } from '../state/compose-store.ts';
 import { latencyMarkAck, latencyMarkSent } from '../state/latency.ts';
+import { noteAccepted } from '../state/voice.ts';
 import { companionStore, connectionStore, devStore, railStore, useStore } from '../state/store.ts';
 import { cardWaiting } from '../ui/keys.ts';
 import { pushNote } from '../ui/stores.ts';
@@ -103,9 +105,15 @@ export function Composer({ place }: { place: ComposePlace }) {
 
   const send = useCallback(async () => {
     const s = composeStore.get();
-    if (!online || s.awaitingAck) return;
+    if (s.awaitingAck) return;
     const text = s.draft;
     if (text.trim().length === 0) return;
+    const phase = connectionStore.get().phase;
+    if (phase !== 'connected') {
+      composePatch({ heldOffline: true, error: null });
+      window.tessa.reportMetrics(`COMPOSE not sent: she is offline (${phase}); ${text.length} chars stay in the ${place} box, nothing queued`);
+      return;
+    }
     if (text.length > AGENT_TEXT_MAX) {
       // Refused, with the number. Never truncated.
       composePatch({ error: tooLong(text.length) });
@@ -118,13 +126,14 @@ export function Composer({ place }: { place: ComposePlace }) {
     if (result.ok) {
       latencyMarkAck();
       composeAccepted(text, result.messageId, performance.now());
+      noteAccepted(result.messageId);
     } else {
       composeRefused(result.error);
       if ((result.code === 'unavailable' || connectionStore.get().phase !== 'connected') && composeUnsentOnDrop(text, sentAt, Date.now())) {
         pushNote('CHAT', 'Your message was not confirmed before the link dropped. Nothing was queued. It is still in the box.');
       }
     }
-  }, [online, companion.id, place]);
+  }, [companion.id, place]);
 
   const onKeyDown = useCallback(
     (event: React.KeyboardEvent<HTMLTextAreaElement>) => {
@@ -157,9 +166,10 @@ export function Composer({ place }: { place: ComposePlace }) {
     if (place === 'quick' && document.hasFocus() && composeStore.get().draft.trim().length === 0) closeQuick();
   }, [place]);
 
+  const held = compose.heldOffline ? heldLine(online) : null;
   const quickError = place === 'quick' && online && compose.error !== null ? `NOT SENT: ${compose.error}` : null;
-  const hint = !online ? HINT_OFFLINE : over ? tooLong(compose.draft.length) : (quickError ?? HINT_DEFAULT);
-  const tone = online && (compose.error !== null || over) ? 'error' : 'muted';
+  const hint = place === 'quick' && held ? held : !online ? HINT_OFFLINE : over ? tooLong(compose.draft.length) : (quickError ?? HINT_DEFAULT);
+  const tone = held !== null || (online && (compose.error !== null || over)) ? 'error' : 'muted';
   const placeholder = online
     ? place === 'quick'
       ? `Message ${companion.name}. Enter sends, Esc cancels`
@@ -184,16 +194,15 @@ export function Composer({ place }: { place: ComposePlace }) {
         rows={1}
         spellCheck={false}
         autoComplete="off"
-        disabled={!online}
         placeholder={placeholder}
         aria-labelledby={labelId}
         aria-describedby={hintId}
         aria-invalid={tone === 'error' || undefined}
-        onChange={(event) => composePatch({ draft: event.target.value, error: null })}
+        onChange={(event) => composePatch({ draft: event.target.value, error: null, heldOffline: false })}
         onKeyDown={onKeyDown}
         onBlur={onBlur}
       />
-      <kbd id={hintId} data-tone={tone} title={quickError ?? undefined}>
+      <kbd id={hintId} data-tone={tone} title={(place === 'quick' ? held : null) ?? quickError ?? undefined}>
         {hint}
       </kbd>
     </div>

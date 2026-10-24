@@ -19,16 +19,22 @@ import {
   auditLoadedStore,
   diskStore,
   lastHealthStore,
+  linkSeenStore,
   memTotalStore,
   noteJobs,
+  pinsStore,
   pushBeat,
   pushMachine,
   pushNote,
+  setThemeSwitch,
   stateSinceStore,
+  themeStampStore,
   threatStore,
 } from './ui/stores.ts';
 import { StateDwell } from './state/state-dwell.ts';
 import { composeLinkDropped, composeNoteLine, composeNoteState, composePatch } from './state/compose-store.ts';
+import { levelTrace, noteCancelReply, noteHerLine, noteLevel, noteLinkDown, noteRawState, takeLevelTrace } from './state/voice.ts';
+import { modeStore, setMode } from './ui/modes.ts';
 import { startTick } from './state/tick.ts';
 import { DevOverlay } from './layout/DevOverlay.tsx';
 import { Sphere } from './scene/Sphere.tsx';
@@ -106,13 +112,19 @@ export function App() {
   useEffect(() => {
     let alive = true;
 
+    const offStart = window.tessa.onStartDecided((mode) => {
+      setMode(mode, (line) => window.tessa.reportMetrics(line), 'start: Windows gave the Orb the foreground');
+    });
     void window.tessa.bootstrap().then((info) => {
       if (!alive) return;
+      if (info.startMode !== modeStore.get()) setMode(info.startMode, (line) => window.tessa.reportMetrics(line), 'start');
+      levelTrace.on = info.isDev && info.voiceTrace;
       setBootstrap(info);
       // Per-keystroke instrumentation in the compose box reads this rather
       // than paying for an IPC message it cannot know is a no-op.
       devStore.set(info.isDev);
       memTotalStore.set(info.memTotalMB);
+      pinsStore.set(info.pins);
 
       /**
        * Paint the theme before anything else in this callback.
@@ -151,6 +163,7 @@ export function App() {
         everConnected = true;
       }
       connectionStore.set(snap.connection);
+      linkSeenStore.set(true);
       if (snap.health) {
         healthStore.set(snap.health);
         lastHealthStore.set(snap.health);
@@ -173,6 +186,7 @@ export function App() {
     const offConnection = window.tessa.onConnection((status) => {
       const up = status.phase === 'connected';
       if (wasConnected && !up) {
+        noteLinkDown();
         pushNote('LINK', `Daemon link lost (${status.phase}). Retrying.`);
         const unconfirmed = composeLinkDropped(Date.now());
         if (unconfirmed) {
@@ -188,6 +202,7 @@ export function App() {
       wasConnected = up;
       if (up) everConnected = true;
       connectionStore.set(status);
+      linkSeenStore.set(true);
       // A dropped link must not leave a frozen uptime on screen looking live.
       // The aura goes out with it, for the same reason and by the same rule the
       // equatorial pulse stops: an instrument holding its last value is a lie
@@ -217,6 +232,7 @@ export function App() {
       if (partial.role === 'assistant') captionText(partial.messageId, partial.text, partial.done);
     });
     const offWords = window.tessa.onVoiceWords((words) => captionWords(words));
+    const offLevel = window.tessa.onVoiceLevel((push) => noteLevel(push));
 
     // SENTINEL's two real sources. History seeds the list; the live stream
     // prepends onto it, newest first, bounded so a long-running surface cannot
@@ -273,15 +289,14 @@ export function App() {
       // not a rendering — the line itself is drawn by TRACE from the store.
       composeNoteLine(line);
       if (line.role === 'assistant') captionText(line.messageId, line.text, true);
+      noteHerLine(line);
     });
 
     // What the daemon said to a cancel. `res.ok` ends the turn; anything
     // else leaves it running and puts the daemon's own words in the hint.
     const offCancelReply = window.tessa.onAgentCancelReply((reply) => {
       composePatch(reply.ok ? { inflight: null, error: null } : { error: reply.message });
-      window.tessa.reportMetrics(
-        `CANCEL-RESULT messageId=${reply.messageId} ok=${reply.ok} type=${reply.type}`,
-      );
+      noteCancelReply(reply);
     });
 
     // Main has already validated this against AGENT_STATES before sending.
@@ -313,6 +328,7 @@ export function App() {
       // The raw arrival, before the dwell: idle-after-busy closes a typed
       // turn in flight. Bookkeeping, not a drawing.
       composeNoteState(state);
+      noteRawState(state);
       // The detail is set BEFORE the state. The chip renders both from one
       // paint, and setting the state first would show the new state beside the
       // old target for a frame — which is a wrong statement about what she is
@@ -330,6 +346,8 @@ export function App() {
 
     return () => {
       alive = false;
+      offStart();
+      offLevel();
       offConnection();
       offHealth();
       offJobs();
@@ -368,40 +386,37 @@ export function App() {
     pushNote('MIC', `Push-to-talk shortcut unavailable. ${mic.chord} is already held by another application. Push-to-talk still works while the Orb has focus.`);
   }, [mic.mode, mic.chord, mic.chordRegistered]);
 
-  /**
-   * Ctrl+Shift+<letter> — the theme switcher. NOT dev-gated: this is the
-   * owner's display preference, not an instrument.
-   *
-   * A renderer keydown listener, deliberately not a `globalShortcut`. Taking
-   * five OS-wide chords away from every other application on the machine so the
-   * Orb can change colour would be indefensible, and the push-to-talk work
-   * already established what a global grab costs — it consumes the key even for
-   * the app the owner is typing into.
-   *
-   * `event.code` rather than `event.key`, so the letter is the PHYSICAL key and
-   * Shift does not turn it into an uppercase character that has to be matched
-   * separately.
-   */
   useEffect(() => {
+    const switchTheme = (next: ThemeId, via: string, t0: number): void => {
+      if (next === currentTheme()) {
+        window.tessa.reportMetrics(`THEME unchanged=${next} via=${via}`);
+        return;
+      }
+      const steps = applyTheme(next);
+      window.tessa.setTheme(next);
+      themeStampStore.set(themeStampStore.get() + 1);
+      window.tessa.reportMetrics(`THEME switched=${next} via=${via} mid=${steps.mid} hot=${steps.hot} bg=${steps.bg}`);
+      engine?.retint();
+      engine?.mark(`Theme ${next}`, t0, 0);
+    };
     function onThemeKey(event: KeyboardEvent) {
       if (!event.ctrlKey || !event.shiftKey || event.altKey || event.metaKey) return;
-      if (editableTarget(event.target)) return;
-      const next = themeForKey(event.code, event.key);
-      if (!next || next === currentTheme()) return;
+      const next = themeForKey(event.code, event.keyCode);
+      if (!next) return;
       event.preventDefault();
-      const steps = applyTheme(next);
-      // Display first, persistence second, and they are separate concerns: the
-      // renderer owns what is on screen, main owns what survives a restart, and
-      // main refuses to write on an instrumented launch.
-      window.tessa.setTheme(next);
-      window.tessa.reportMetrics(`THEME switched=${next} mid=${steps.mid} hot=${steps.hot} bg=${steps.bg}`);
-      // The sphere's colours are uniforms resolved once at construction, not
-      // CSS. Without this the chrome changes and the sphere does not.
-      engine?.retint();
-      engine?.mark(`Theme ${next}`, event.timeStamp, 0);
+      const via = `key code=${JSON.stringify(event.code)} keyCode=${event.keyCode} key=${JSON.stringify(event.key)} trusted=${event.isTrusted} focus=${document.hasFocus()}`;
+      if (event.repeat) {
+        window.tessa.reportMetrics(`THEME unchanged=${next} via=${via} (repeat)`);
+        return;
+      }
+      switchTheme(next, via, event.timeStamp);
     }
+    setThemeSwitch(switchTheme);
     window.addEventListener('keydown', onThemeKey);
-    return () => window.removeEventListener('keydown', onThemeKey);
+    return () => {
+      setThemeSwitch(null);
+      window.removeEventListener('keydown', onThemeKey);
+    };
   }, [engine]);
 
   /**
@@ -536,6 +551,26 @@ export function App() {
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
   }, [isDev]);
+
+  useEffect(() => {
+    if (!isDev || !bootstrap?.voiceTrace || !engine) return;
+    engine.traceVoice(true);
+    const id = window.setInterval(() => {
+      const arrivals = takeLevelTrace();
+      for (let k = 0; k < arrivals.length; k += 10) window.tessa.reportMetrics(`VOICE-IN ${arrivals.slice(k, k + 10).join(';')}`);
+      const tr = engine.takeVoiceTrace();
+      if (tr.length === 0) return;
+      const rows: string[] = [];
+      for (let i = 0; i + 6 < tr.length; i += 7) {
+        rows.push([tr[i] ?? 0, tr[i + 1] ?? 0, tr[i + 2] ?? 0, tr[i + 3] ?? 0, tr[i + 4] ?? 0, tr[i + 5] ?? 0, tr[i + 6] ?? 0].map((v, k) => v.toFixed(k === 0 ? 1 : 4)).join(','));
+      }
+      for (let k = 0; k < rows.length; k += 6) window.tessa.reportMetrics(`VOICE-TRACE ${rows.slice(k, k + 6).join(';')}`);
+    }, 500);
+    return () => {
+      window.clearInterval(id);
+      engine.traceVoice(false);
+    };
+  }, [isDev, bootstrap?.voiceTrace, engine]);
 
   useEffect(() => {
     if (!bootstrap?.churn) return;

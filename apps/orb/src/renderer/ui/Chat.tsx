@@ -2,10 +2,11 @@ import { useEffect, useLayoutEffect, useRef, type RefObject } from 'react';
 
 import type { TranscriptLine } from '../../shared/ipc-contract.ts';
 import { Composer } from '../layout/Composer.tsx';
-import { useComposeField, type Unconfirmed } from '../state/compose-store.ts';
+import { heldLine, useComposeField, type Unconfirmed } from '../state/compose-store.ts';
 import { agentStateStore, connectionStore, transcriptStore, useStore } from '../state/store.ts';
 import { ErrorLine, Loading, Val } from './bits.tsx';
 import { hmOf, hms, hmsOf } from './format.ts';
+import { frontCardStore } from './stores.ts';
 import { LINK_WORD } from './TopBar.tsx';
 
 export const DOCK_LINES = 8;
@@ -71,14 +72,14 @@ export function ChatDock({ dockRef }: { dockRef: RefObject<HTMLElement | null> }
   const lines = useStore(transcriptStore);
   const connection = useStore(connectionStore);
   const state = useStore(agentStateStore);
-  const awaiting = useComposeField('awaitingAck');
-  const inflight = useComposeField('inflight');
+  const front = useStore(frontCardStore);
   const error = useComposeField('error');
   const unconfirmed = useComposeField('unconfirmed');
+  const heldOffline = useComposeField('heldOffline');
   const listRef = useRef<HTMLDivElement>(null);
   const shown = lines.slice(-DOCK_LINES);
   const online = connection.phase === 'connected';
-  const word = online ? (awaiting !== null || inflight !== null ? state.toUpperCase() : 'READY') : LINK_WORD[connection.phase];
+  const word = !online ? LINK_WORD[connection.phase] : state === 'blocked' || front !== null ? 'BLOCKED' : state === 'idle' ? 'READY' : state.toUpperCase();
   useStickToBottom(listRef, `${lines.length}:${shown[shown.length - 1]?.messageId ?? ''}:${unconfirmed?.droppedAt ?? 0}:${connection.phase}`);
   return (
     <section ref={dockRef} className="pnl br chatdock" aria-label="Chat with Tessa">
@@ -95,6 +96,7 @@ export function ChatDock({ dockRef }: { dockRef: RefObject<HTMLElement | null> }
         {unconfirmed ? <UnconfirmedLine u={unconfirmed} /> : null}
       </div>
       {online && error !== null ? <ErrorLine text={error} /> : null}
+      {heldOffline ? <ErrorLine text={heldLine(online)} /> : null}
       <Composer place="dock" />
     </section>
   );

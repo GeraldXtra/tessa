@@ -11,7 +11,7 @@ import {
 } from '../state/store.ts';
 import { tickStore } from '../state/tick.ts';
 import { jobsStore } from '../state/plasma-inputs.ts';
-import { composeStore, useComposeField } from '../state/compose-store.ts';
+import { composeStore, heldLine, useComposeField } from '../state/compose-store.ts';
 import { Bar, ErrorLine, Loading, NoData, OfflineBanner, Sec, Spark, TickScale, Val } from './bits.tsx';
 import { BeatStrip } from './TopBar.tsx';
 import { MACHINE_STALE_MS } from './Band.tsx';
@@ -530,6 +530,7 @@ export function Drawer({ id, dw }: { id: RailId; dw: number }) {
         <div className={offline ? 'stale' : ''}>{id === 'chat' ? <ChatBody scroller={scroller} /> : def.body()}</div>
       </div>
       {id === 'chat' && compose.error ? <ErrorLine text={compose.error} /> : null}
+      {id === 'chat' && compose.heldOffline ? <ErrorLine text={heldLine(linked)} /> : null}
       {id === 'chat' ? <Composer place="drawer" /> : null}
       <div className="df">SOURCE  {def.src}</div>
     </section>

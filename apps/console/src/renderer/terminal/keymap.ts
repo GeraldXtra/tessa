@@ -1,24 +1,3 @@
-/**
- * apps/console/src/renderer/terminal/keymap.ts — which chord means what.
- *
- * The bindings live in `%LOCALAPPDATA%\Tessa\console-settings.json` and are read
- * in MAIN; they are used HERE, in the renderer, because only the terminal knows
- * whether there is a selection. This module is the small amount of logic that
- * sits between the two.
- *
- * ─────────────────────────────────────────────────────────────────────────────
- * WHY THE CHORD IS BUILT FROM `event.code` AND NOT `event.key`
- *
- * `key` is what the character WOULD be after the keyboard layout and modifiers
- * are applied. With Shift held, `Ctrl+Shift+C` arrives with `key === 'C'`
- * (capital), and on some layouts `Ctrl+-` arrives as an entirely different
- * character. Matching on `key` therefore needs a table of exceptions per layout.
- *
- * `code` is the physical key — `KeyC`, `Minus`, `Equal`, `Digit0` — and does not
- * move. It is normalised down to the obvious name so the settings file stays
- * readable: a person writes `ctrl+shift+c`, not `ctrl+shift+KeyC`.
- */
-
 export type KeyAction =
   | 'copy'
   | 'paste'
@@ -41,8 +20,41 @@ export type KeyAction =
   | 'zoomPane'
   | 'toggleTree'
   | 'passThrough'
+  | 'closeTab'
+  | 'toggleSplit'
+  | 'newPowerShell'
+  | 'newGitBash'
+  | 'newCmd'
+  | 'newPwsh'
+  | 'newWsl'
+  | 'goToTab1'
+  | 'goToTab2'
+  | 'goToTab3'
+  | 'goToTab4'
+  | 'goToTab5'
+  | 'goToTab6'
+  | 'goToTab7'
+  | 'goToTab8'
+  | 'goToTab9'
+  | 'prevCommand'
+  | 'nextCommand'
+  | 'palette'
+  | 'settings'
 
-/** `KeyC` -> `c`, `Digit0` -> `0`, `Minus` -> `-`. Unknown codes pass through. */
+export const RETIRED: ReadonlySet<string> = new Set(['zoomPane', 'toggleTree', 'passThrough'])
+
+export const RESERVED_CHORDS: ReadonlySet<string> = new Set([
+  'ctrl+c',
+  'ctrl+l',
+  'ctrl+k',
+  'up',
+  'down',
+  'left',
+  'right',
+  'tab',
+  'shift+tab',
+])
+
 export function keyNameFromCode(code: string, key: string): string {
   if (/^Key[A-Z]$/.test(code)) return code.slice(3).toLowerCase()
   if (/^Digit[0-9]$/.test(code)) return code.slice(5)
@@ -54,6 +66,10 @@ export function keyNameFromCode(code: string, key: string): string {
     case 'Equal':
     case 'NumpadAdd':
       return '='
+    case 'Comma':
+      return ','
+    case 'Period':
+      return '.'
     case 'Insert':
       return 'insert'
     case 'Delete':
@@ -62,9 +78,6 @@ export function keyNameFromCode(code: string, key: string): string {
       return 'home'
     case 'End':
       return 'end'
-    // Arrows get SHORT names, so he writes `alt+left` in the settings file
-    // rather than `alt+arrowleft`. Their `code` is ArrowLeft etc., which would
-    // otherwise fall through to the lower-cased default.
     case 'ArrowLeft':
       return 'left'
     case 'ArrowRight':
@@ -78,6 +91,7 @@ export function keyNameFromCode(code: string, key: string): string {
     case 'Space':
       return 'space'
     case 'Enter':
+    case 'NumpadEnter':
       return 'enter'
     case 'Tab':
       return 'tab'
@@ -86,12 +100,10 @@ export function keyNameFromCode(code: string, key: string): string {
     case 'Slash':
       return '/'
     default:
-      // F-keys and anything else: fall back to the printable key, lower-cased.
       return (code || key || '').toLowerCase()
   }
 }
 
-/** The canonical chord string for an event: modifiers in a fixed order. */
 export function chordOf(e: KeyboardEvent): string {
   const parts: string[] = []
   if (e.ctrlKey) parts.push('ctrl')
@@ -102,65 +114,44 @@ export function chordOf(e: KeyboardEvent): string {
   return parts.join('+')
 }
 
-/**
- * Built-in defaults, used until main answers and if the file is unreadable.
- *
- * KEPT IN STEP WITH `main/settings.ts`. They are duplicated rather than shared
- * because main and the renderer are separate bundles under `sandbox: true` and
- * the renderer cannot read the file itself — so the renderer needs a usable
- * keymap in the milliseconds before the IPC round trip returns, or the very
- * first keystroke after launch would be unbound.
- */
-export const FALLBACK_KEYMAP: Record<string, KeyAction> = {
-  'ctrl+shift+c': 'copy',
-  'ctrl+insert': 'copy',
-  'ctrl+shift+v': 'paste',
-  'ctrl+v': 'paste',
-  'shift+insert': 'paste',
-  'ctrl+a': 'selectAll',
-  'ctrl+shift+a': 'selectAll',
-  'ctrl+=': 'fontIncrease',
-  'ctrl+shift+=': 'fontIncrease',
-  'ctrl+-': 'fontDecrease',
-  'ctrl+0': 'fontReset',
-  'ctrl+shift+d': 'splitRight',
-  'ctrl+shift+e': 'splitDown',
-  'ctrl+shift+w': 'closePane',
-  'alt+left': 'focusLeft',
-  'alt+right': 'focusRight',
-  'alt+up': 'focusUp',
-  'alt+down': 'focusDown',
-  'ctrl+shift+t': 'newTab',
-  'ctrl+tab': 'nextTab',
-  'ctrl+shift+tab': 'prevTab',
-  'ctrl+shift+z': 'zoomPane',
-  'ctrl+shift+b': 'toggleTree',
-}
-
-/**
- * `ctrl+c` IS DELIBERATELY ABSENT FROM EVERY KEYMAP IN THIS FILE.
- *
- * It is not "unbound by oversight" — it is the one chord that must reach the
- * shell untouched, because it is how he stops a hung command. A terminal that
- * loses SIGINT has lost the thing that makes it a terminal, and no amount of
- * clipboard convenience is worth it. His own ruling, and the right one.
- *
- * This is asserted rather than assumed: a keymap that binds it is rejected at
- * load with a named complaint, so it cannot be broken by editing the file.
- */
-export const RESERVED_CHORDS = new Set(['ctrl+c'])
-
-export function sanitiseKeymap(
-  km: Record<string, string>,
-): { keymap: Record<string, KeyAction>; rejected: string[] } {
+export function sanitiseKeymap(km: Record<string, string>): Record<string, KeyAction> {
   const out: Record<string, KeyAction> = {}
-  const rejected: string[] = []
   for (const [chord, action] of Object.entries(km)) {
-    if (RESERVED_CHORDS.has(chord)) {
-      rejected.push(`${chord} is reserved for interrupt (SIGINT) and cannot be rebound`)
-      continue
-    }
+    if (RESERVED_CHORDS.has(chord)) continue
     out[chord] = action as KeyAction
   }
-  return { keymap: out, rejected }
+  return out
+}
+
+const KEY_LABEL: Record<string, string> = {
+  ctrl: 'CTRL',
+  alt: 'ALT',
+  shift: 'SHIFT',
+  meta: 'WIN',
+  '=': '=',
+  '-': 'MINUS',
+  ',': 'COMMA',
+  up: 'UP',
+  down: 'DOWN',
+  left: 'LEFT',
+  right: 'RIGHT',
+  enter: 'ENTER',
+  escape: 'ESC',
+  end: 'END',
+  tab: 'TAB',
+  insert: 'INSERT',
+}
+
+export function chordLabel(chord: string): string {
+  return chord
+    .split('+')
+    .map((p) => KEY_LABEL[p] ?? p.toUpperCase())
+    .join(' ')
+}
+
+export function keyFor(keymap: Record<string, KeyAction>, design: Record<string, string>, action: KeyAction): string {
+  const bound = Object.entries(keymap).filter(([, a]) => a === action).map(([c]) => c)
+  if (!bound.length) return ''
+  const chosen = bound.find((c) => design[c] === action) ?? bound[0]!
+  return chordLabel(chosen)
 }

@@ -3,6 +3,7 @@ import { useEffect, useLayoutEffect, useRef, useState, type RefObject } from 're
 import { useComposeField } from '../state/compose-store.ts';
 import { captionStore } from '../state/plasma-inputs.ts';
 import { agentStateStore, connectionStore, transcriptStore, useStore } from '../state/store.ts';
+import { herCaptionStore, rawStateStore, stopHer, stoppable, turnStore } from '../state/voice.ts';
 import { tickStore } from '../state/tick.ts';
 import { Val } from './bits.tsx';
 import { mmss } from './format.ts';
@@ -49,7 +50,13 @@ export function CaptionLine({ capRef }: { capRef: RefObject<HTMLDivElement | nul
   const state = useStore(agentStateStore);
   const lines = useStore(transcriptStore);
   const caption = useStore(captionStore);
+  const herCap = useStore(herCaptionStore);
+  const connection = useStore(connectionStore);
+  const front = useStore(frontCardStore);
+  useStore(rawStateStore);
+  useStore(turnStore);
   const typing = useComposeField('quickOpen');
+  const clipRef = useRef<HTMLDivElement>(null);
   const lineRef = useRef<HTMLDivElement>(null);
   const [over, setOver] = useState(false);
   const [now, setNow] = useState(() => Date.now());
@@ -64,9 +71,10 @@ export function CaptionLine({ capRef }: { capRef: RefObject<HTMLDivElement | nul
   }
   const hearing = state === 'listening' || state === 'thinking';
   const you = hearing && youIdx >= 0 && youIdx > herIdx ? lines[youIdx] : null;
-  const her = !hearing && herIdx >= 0 ? lines[herIdx] : null;
+  const her = !you && herCap && herCap.phase !== 'wait' ? herCap : null;
   const words = her && caption && caption.messageId === her.messageId && caption.words ? caption.words : null;
   const timed = words !== null && state === 'speaking';
+  const canStop = stoppable(connection.phase === 'connected', front !== null);
 
   useEffect(() => {
     if (!timed) return;
@@ -82,7 +90,7 @@ export function CaptionLine({ capRef }: { capRef: RefObject<HTMLDivElement | nul
   const text = you ? you.text : her ? her.text : '';
 
   useLayoutEffect(() => {
-    const cap = capRef.current;
+    const cap = clipRef.current;
     const line = lineRef.current;
     if (!cap || !line) return;
     const measure = (): void => setOver(line.scrollWidth > cap.clientWidth + 0.5);
@@ -90,12 +98,12 @@ export function CaptionLine({ capRef }: { capRef: RefObject<HTMLDivElement | nul
     const ro = new ResizeObserver(measure);
     ro.observe(cap);
     return () => ro.disconnect();
-  }, [capRef, text, timed]);
+  }, [text, timed, canStop]);
 
   const current = timed && words ? wordAt(words.startedAt, words.words, now) : -1;
 
   useLayoutEffect(() => {
-    const cap = capRef.current;
+    const cap = clipRef.current;
     const line = lineRef.current;
     if (!cap || !line || !timed) return;
     const cw = cap.clientWidth;
@@ -108,26 +116,38 @@ export function CaptionLine({ capRef }: { capRef: RefObject<HTMLDivElement | nul
     const c = el ? el.offsetLeft + el.offsetWidth / 2 : 0;
     const x = Math.min(0, Math.max(cw - lw, cw * 0.62 - c));
     line.style.transform = `translateX(${x.toFixed(1)}px)`;
-  }, [capRef, current, timed]);
+  }, [current, timed]);
 
   return (
-    <div ref={capRef} className={`cap${over ? (timed ? ' over both' : ' over') : ''}${typing ? ' typing' : ''}`} aria-live="off">
-      <div ref={lineRef} className={`line${over ? '' : ' fit'}`}>
-        {you ? (
-          <span className="you">
-            <b>YOU</b>
-            {you.text}
-          </span>
-        ) : timed && words ? (
-          words.words.map((w, i) => (
-            <span key={`${i}-${w.text}`} data-i={i} className={`w${i < current ? ' said' : i === current ? ' now' : ''}`}>
-              {i < words.words.length - 1 ? `${w.text} ` : w.text}
+    <div
+      ref={capRef}
+      className={`cap${over ? (timed ? ' over both' : ' over') : ''}${typing ? ' typing' : ''}${canStop ? ' stopping' : ''}${!you && her?.phase === 'fade' ? ' fading' : ''}`}
+      aria-live="off"
+      data-her={you ? 'you' : her ? her.phase : herCap ? herCap.phase : 'none'}
+    >
+      <div ref={clipRef} className="clip">
+        <div ref={lineRef} className={`line${over ? '' : ' fit'}`}>
+          {you ? (
+            <span className="you">
+              <b>YOU</b>
+              {you.text}
             </span>
-          ))
-        ) : her ? (
-          <span className="her">{her.text}</span>
-        ) : null}
+          ) : timed && words ? (
+            words.words.map((w, i) => (
+              <span key={`${i}-${w.text}`} data-i={i} className={`w${i < current ? ' said' : i === current ? ' now' : ''}`}>
+                {i < words.words.length - 1 ? `${w.text} ` : w.text}
+              </span>
+            ))
+          ) : her ? (
+            <span className="her">{her.text}</span>
+          ) : null}
+        </div>
       </div>
+      {canStop ? (
+        <button type="button" className="stop" onClick={() => stopHer('STOP')}>
+          STOP
+        </button>
+      ) : null}
     </div>
   );
 }

@@ -82,47 +82,10 @@ export function isThemeId(value: unknown): value is ThemeId {
   return typeof value === 'string' && (THEME_IDS as readonly string[]).includes(value);
 }
 
-/**
- * Ctrl+Shift+<letter>. Renderer-local, NOT a `globalShortcut` — these are a
- * personal display preference, and taking six OS-wide chords away from every
- * other application for that would be indefensible.
- *
- * The collision is gone. Amber and ember are retired, so every remaining theme
- * takes its own initial and the arbitrary "ember sorts before emerald so it
- * gets E" rule can be deleted. G was magenta and is now gold, which is the one
- * remapping to be aware of.
- */
-export const THEME_SHORTCUT: Readonly<Record<string, ThemeId>> = {
-  G: 'gold',
-  M: 'magenta',
-  C: 'cyan',
-  V: 'violet',
-  E: 'emerald',
-  R: 'red',
-};
-
-/**
- * Which theme a keydown selects, or null.
- *
- * `code` FIRST, then `key` — and the fallback is not redundant. `code` is
- * derived from the hardware scancode, and synthetic input arrives with scancode
- * 0 and therefore no usable `code`: on-screen keyboards, remote desktop,
- * accessibility tools, and the `keybd_event` injection used to verify this
- * build. This shortcut was written matching `code` alone and was silently dead
- * for every one of them — the first real keystroke test sent Ctrl+Shift+M, took
- * the foreground, and nothing happened.
- *
- * The identical trap is already documented on the Alt+1…6 cycler in App.tsx.
- * Repeating it once is careless; leaving it would make six shortcuts
- * unreachable for anyone not using a physical keyboard.
- *
- * `key` is uppercased because Shift is held: the character arrives as 'M', but
- * a layout or a tool may deliver 'm'.
- */
-export function themeForKey(code: string, key: string): ThemeId | null {
-  const byCode = code.startsWith('Key') ? THEME_SHORTCUT[code.slice(3)] : undefined;
-  if (byCode) return byCode;
-  return THEME_SHORTCUT[key.toUpperCase()] ?? null;
+export function themeForKey(code: string, keyCode = 0): ThemeId | null {
+  const digit = code ? /^Digit([1-9])$/.exec(code)?.[1] : keyCode >= 49 && keyCode <= 54 ? String(keyCode - 48) : undefined;
+  if (!digit) return null;
+  return THEME_IDS[Number.parseInt(digit, 10) - 1] ?? null;
 }
 
 /**

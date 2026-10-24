@@ -82,6 +82,10 @@ export interface FixtureTurn {
   text: string;
   ackMs?: number;
   thinkMs?: number;
+  speakMs?: number;
+  levelHz?: number;
+  gapAtMs?: number;
+  gapMs?: number;
 }
 
 export interface FixtureTyped {
@@ -254,7 +258,7 @@ export interface DaemonConnectionOptions {
   onHealth: (health: DaemonHealth) => void;
   onAgentState: (state: AgentState, detail: AgentDetailIn | null, ts: string) => void;
   onJobEvent: (event: JobEvent) => void;
-  onVoiceLevel: (level: number) => void;
+  onVoiceLevel: (level: number, seq: number | null, ts: string) => void;
   onVoiceWords: (words: VoiceWords) => void;
   onTranscriptPartial: (partial: TranscriptPartial) => void;
   logOutgoing?: boolean;
@@ -391,6 +395,9 @@ export class DaemonConnection {
   private fixture = false;
   private fixtureTyped: FixtureTyped | null = null;
   private fixtureAnswerIdx = 0;
+  private fixtureThink: NodeJS.Timeout | null = null;
+  private fixtureVoice: { timer: NodeJS.Timeout; companionId: string; seq: number } | null = null;
+  private fixtureState = 'idle';
 
   constructor(options: DaemonConnectionOptions) {
     this.opts = options;
@@ -587,19 +594,21 @@ export class DaemonConnection {
    * job is to send the contract's command and report what came back, not to
    * pre-empt the answer.
    */
-  sendAgentCancel(companionId: string, messageId: string): Promise<AgentCancelReply> {
+  sendAgentCancel(companionId: string, messageId: string | null): Promise<AgentCancelReply> {
+    const shown = messageId ?? '';
+    if (this.fixture) return this.fixtureCancel(companionId, messageId);
     if (!this.socket || this.socket.readyState !== WebSocket.OPEN) {
       return Promise.resolve({
-        messageId,
+        messageId: shown,
         ok: false,
         type: 'unavailable',
         message: 'not connected to the daemon',
       });
     }
-    const frame = makeEnvelope('cmd.agent.cancel', { companionId, messageId });
+    const frame = makeEnvelope('cmd.agent.cancel', messageId ? { companionId, messageId } : { companionId });
     if (!isEnvelope(frame)) {
       return Promise.resolve({
-        messageId,
+        messageId: shown,
         ok: false,
         type: 'internal',
         message: 'built an invalid envelope',
@@ -610,16 +619,68 @@ export class DaemonConnection {
       const timer = setTimeout(() => {
         this.pendingCancel.delete(frame.id);
         resolve({
-          messageId,
+          messageId: shown,
           ok: false,
           type: 'timeout',
           message: `no reply to cmd.agent.cancel within ${AGENT_ACK_TIMEOUT_MS} ms`,
         });
       }, AGENT_ACK_TIMEOUT_MS);
-      this.pendingCancel.set(frame.id, { resolve, timer, messageId });
+      this.pendingCancel.set(frame.id, { resolve, timer, messageId: shown });
       this.transmit(socket, frame.type, JSON.stringify(frame));
-      this.opts.log(`CANCEL-OUT id=${frame.id} messageId=${messageId} t=${Date.now()}`);
+      this.opts.log(`CANCEL-OUT id=${frame.id} messageId=${messageId ?? '(none)'} t=${Date.now()}`);
     });
+  }
+
+  devDropLink(): string {
+    if (this.fixture) return this.fixtureDropLink();
+    const socket = this.socket;
+    if (!socket || this.status.phase !== 'connected') return `no link to drop (${this.status.phase})`;
+    this.opts.log(`LINKDROP the socket is terminated by a dev-only hook at t=${Date.now()}; the Orb's own reconnect path takes over`);
+    socket.terminate();
+    return 'terminated';
+  }
+
+  private fixtureEndVoice(final: boolean): boolean {
+    const voice = this.fixtureVoice;
+    if (!voice) return false;
+    clearInterval(voice.timer);
+    this.fixtureVoice = null;
+    if (final) this.ingestFixture('evt.voice.amplitude', { companionId: voice.companionId, level: 0, seq: voice.seq + 1 }, null);
+    return true;
+  }
+
+  private fixtureSetState(companionId: string, state: string): void {
+    this.fixtureState = state;
+    this.ingestFixture('evt.agent.state', { companionId, state }, null);
+  }
+
+  private fixtureCancel(companionId: string, messageId: string | null): Promise<AgentCancelReply> {
+    const sentAt = Date.now();
+    this.opts.log(`CANCEL-OUT id=fixture messageId=${messageId ?? '(none)'} t=${sentAt} FIXTURE: nothing leaves this process`);
+    let cancelled = false;
+    if (this.fixtureThink) {
+      clearTimeout(this.fixtureThink);
+      this.fixtureThink = null;
+      cancelled = true;
+    }
+    if (this.fixtureEndVoice(true)) cancelled = true;
+    const reply: AgentCancelReply = { messageId: messageId ?? '', ok: true, type: 'res.ok', message: 'res.ok', cancelled };
+    this.opts.log(`CANCEL-REPLY for ${messageId ?? '(none)'}: FIXTURE res.ok {"cancelled":${cancelled}} t=${Date.now()}`);
+    if (cancelled) this.fixtureSetState(companionId, 'idle');
+    return Promise.resolve(reply);
+  }
+
+  private fixtureDropLink(): string {
+    if (this.status.phase !== 'connected') return 'fixture link already down';
+    const dropMs = 1500;
+    this.opts.log(`LINKDROP FIXTURE: the fixture link goes down for ${dropMs} ms; frames sent meanwhile are lost, as on a real drop`);
+    this.emit({ phase: 'reconnecting', detail: 'FIXTURE link drop', retryInMs: dropMs });
+    setTimeout(() => {
+      this.emit({ phase: 'connected', daemonVersion: 'fixture', sessionId: 'fixture', detail: 'FIXTURE DATA' });
+      this.opts.log(`LINKDROP FIXTURE: link back at t=${Date.now()}; sending the state on subscribe (${this.fixtureState}) as core does`);
+      this.ingestFixture('evt.agent.state', { companionId: 'tessa', state: this.fixtureState }, null);
+    }, dropMs);
+    return 'fixture drop';
   }
 
   sendPing(): Promise<PingResult> {
@@ -675,10 +736,40 @@ export class DaemonConnection {
         const ackAt = Date.now();
         this.opts.log(`AGENT-ACK id=${id} messageId=${messageId} dt=${ackAt - sentAt}ms t=${ackAt} FIXTURE`);
         resolve({ ok: true, messageId, sentAt, ackAt });
-        setTimeout(() => this.ingestFixture('evt.agent.state', { companionId, state: 'thinking' }, null), 30);
-        setTimeout(() => {
-          this.ingestFixture('evt.transcript.message', { companionId, message: { messageId: ulid(), role: 'assistant', text: turn.text, ts: stamp(), via: 'typed' } }, null);
-          this.ingestFixture('evt.agent.state', { companionId, state: 'idle' }, null);
+        setTimeout(() => this.fixtureSetState(companionId, 'thinking'), 30);
+        this.fixtureThink = setTimeout(() => {
+          this.fixtureThink = null;
+          const line = { companionId, message: { messageId: ulid(), role: 'assistant', text: turn.text, ts: stamp(), via: 'typed' } };
+          const speakMs = turn.speakMs ?? 0;
+          if (speakMs <= 0) {
+            this.ingestFixture('evt.transcript.message', line, null);
+            this.fixtureSetState(companionId, 'idle');
+            return;
+          }
+          const hz = Math.max(1, Math.min(120, turn.levelHz ?? 30));
+          const gapAt = turn.gapAtMs ?? -1;
+          const gapMs = turn.gapMs ?? 0;
+          this.fixtureEndVoice(true);
+          this.fixtureSetState(companionId, 'speaking');
+          this.ingestFixture('evt.transcript.message', line, null);
+          this.opts.log(`FIXTURE VOICE ${hz} Hz for ${speakMs} ms${gapMs > 0 ? `, no levels ${gapAt}-${gapAt + gapMs} ms` : ''} — a synthetic level shape, not her voice`);
+          const started = Date.now() + 200;
+          const voice = { timer: setInterval(() => {
+            const ms = Date.now() - started;
+            if (ms < 0) return;
+            const t = ms / 1000;
+            if (ms >= speakMs) {
+              this.fixtureEndVoice(true);
+              this.fixtureSetState(companionId, 'idle');
+              this.opts.log(`FIXTURE VOICE done: ${voice.seq} levels`);
+              return;
+            }
+            voice.seq += 1;
+            if (ms >= gapAt && ms < gapAt + gapMs) return;
+            const level = Math.min(1, Math.max(0, 0.15 + 0.6 * Math.abs(Math.sin(2 * Math.PI * 2.3 * t)) * (0.6 + 0.4 * Math.sin(2 * Math.PI * 0.7 * t))));
+            this.ingestFixture('evt.voice.amplitude', { companionId, level, seq: voice.seq }, null);
+          }, 1000 / hz), companionId, seq: 0 };
+          this.fixtureVoice = voice;
         }, thinkMs);
       }, ackMs);
     });
@@ -928,13 +1019,14 @@ export class DaemonConnection {
       clearTimeout(pending.timer);
       // Whole, for the same reason the approval reply is: the question this
       // answers is "what does the daemon actually do with a cancel".
-      this.opts.log(`CANCEL-REPLY for ${pending.messageId}: ${scrub(JSON.stringify(parsed))}`);
-      const payload = parsed.payload as { message?: unknown };
+      this.opts.log(`CANCEL-REPLY for ${pending.messageId || '(none)'}: ${scrub(JSON.stringify(parsed))} t=${Date.now()}`);
+      const payload = parsed.payload as { message?: unknown; cancelled?: unknown };
       pending.resolve({
         messageId: pending.messageId,
         ok: parsed.type === 'res.ok',
         type: parsed.type,
         message: typeof payload.message === 'string' ? scrub(payload.message) : parsed.type,
+        ...(typeof payload.cancelled === 'boolean' ? { cancelled: payload.cancelled } : {}),
       });
       return;
     }
@@ -1429,8 +1521,9 @@ export class DaemonConnection {
     }
 
     if (parsed.type === 'evt.voice.amplitude') {
-      const level = finiteOrNull((parsed.payload as Record<string, unknown>)['level']);
-      if (level !== null) this.opts.onVoiceLevel(Math.max(0, Math.min(1, level)));
+      const p = parsed.payload as Record<string, unknown>;
+      const level = finiteOrNull(p['level']);
+      if (level !== null) this.opts.onVoiceLevel(Math.max(0, Math.min(1, level)), finiteOrNull(p['seq']), parsed.ts);
       return;
     }
 

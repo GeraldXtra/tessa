@@ -84,7 +84,12 @@ export type DevAction =
   | 'pclick'
   | 'kclick'
   | 'scroll'
-  | 'until';
+  | 'until'
+  | 'pair'
+  | 'input'
+  | 'tray'
+  | 'mouse'
+  | 'linkdrop';
 
 export interface DevStep {
   action: DevAction;
@@ -110,6 +115,11 @@ const ACTIONS: readonly DevAction[] = [
   'kclick',
   'scroll',
   'until',
+  'pair',
+  'input',
+  'tray',
+  'mouse',
+  'linkdrop',
 ];
 
 /**
@@ -139,21 +149,36 @@ function keyByName(name: string): { key: string; code: string } | null {
       return { key: 'Backspace', code: 'Backspace' };
     case 'tab':
       return { key: 'Tab', code: 'Tab' };
+    case 'up':
+      return { key: 'ArrowUp', code: 'ArrowUp' };
+    case 'down':
+      return { key: 'ArrowDown', code: 'ArrowDown' };
     default:
       return null;
   }
 }
 
 /** `ctrl+shift+space` → the event init a physical chord would produce. */
+const KEY_CODES: Readonly<Record<string, number>> = { Enter: 13, Escape: 27, Backspace: 8, Tab: 9, ' ': 32, '/': 191, '`': 192, ArrowUp: 38, ArrowDown: 40 };
+
+function keyCodeOf(key: string): number {
+  if (/^[a-z]$/i.test(key)) return key.toUpperCase().charCodeAt(0);
+  if (/^[0-9]$/.test(key)) return key.charCodeAt(0);
+  return KEY_CODES[key] ?? 0;
+}
+
 function chordInit(spec: string): KeyboardEventInit | null {
-  const parts = spec.split('+').map((p) => p.trim()).filter(Boolean);
+  const noCode = spec.endsWith('#0');
+  const parts = (noCode ? spec.slice(0, -2) : spec).split('+').map((p) => p.trim()).filter(Boolean);
   const last = parts.pop() ?? '';
   const named = keyByName(last);
   if (!named) return null;
   const mods = parts.map((p) => p.toLowerCase());
+  const shifted = mods.includes('shift') && /^Digit[0-9]$/.test(named.code) ? ')!@#$%^&*('.charAt(Number(named.code.slice(5))) : named.key;
   return {
-    key: named.key,
-    code: named.code,
+    key: shifted,
+    code: noCode ? '' : named.code,
+    keyCode: keyCodeOf(named.key),
     ctrlKey: mods.includes('ctrl'),
     shiftKey: mods.includes('shift'),
     altKey: mods.includes('alt'),
@@ -301,7 +326,7 @@ export async function runDevScript(
       window.dispatchEvent(event);
       report(
         `DEV-DRIVE ${i} key ${step.arg} dispatched at window (defaultPrevented=${event.defaultPrevented}) ` +
-          `active=${describeActive()}`,
+          `active=${describeActive()} t=${performance.now().toFixed(1)} event=${JSON.stringify({ key: event.key, code: event.code, keyCode: event.keyCode, ctrlKey: event.ctrlKey, shiftKey: event.shiftKey, altKey: event.altKey, metaKey: event.metaKey, repeat: event.repeat, isTrusted: event.isTrusted })}`,
       );
       continue;
     }
@@ -340,7 +365,7 @@ export async function runDevScript(
       target.dispatchEvent(new KeyboardEvent('keyup', init));
       report(
         `DEV-DRIVE ${i} press ${chord} on "${selector}" (defaultPrevented=${down.defaultPrevented}) ` +
-          `t=${performance.now().toFixed(1)} active=${describeActive()}`,
+          `t=${performance.now().toFixed(1)} active=${describeActive()} event=${JSON.stringify({ key: down.key, code: down.code, ctrlKey: down.ctrlKey, shiftKey: down.shiftKey })}`,
       );
       continue;
     }
@@ -467,6 +492,68 @@ export async function runDevScript(
     if (step.action === 'capture') {
       report(`CAPTURE ${step.arg.trim()}`);
       report(`DEV-DRIVE ${i} capture ${step.arg.trim()} requested t=${performance.now().toFixed(1)}`);
+      continue;
+    }
+
+    if (step.action === 'tray') {
+      report(`TRAY ${step.arg.trim()}`);
+      report(`DEV-DRIVE ${i} tray ${step.arg.trim()} requested from main (dev-only hook) t=${performance.now().toFixed(1)} hidden=${document.hidden}`);
+      continue;
+    }
+
+    if (step.action === 'mouse') {
+      let node: Element | null = null;
+      try {
+        node = document.querySelector(step.arg);
+      } catch {
+        report(`DEV-DRIVE ${i} mouse "${step.arg}" INVALID SELECTOR`);
+        continue;
+      }
+      if (!node) {
+        report(`DEV-DRIVE ${i} mouse "${step.arg}" NO MATCH t=${performance.now().toFixed(1)}`);
+        continue;
+      }
+      const r = node.getBoundingClientRect();
+      const x = Math.round(r.left + r.width / 2);
+      const y = Math.round(r.top + r.height / 2);
+      report(`SENDMOUSE ${x} ${y}`);
+      report(`DEV-DRIVE ${i} mouse "${step.arg}" click at ${x},${y} requested from main (webContents.sendInputEvent) t=${performance.now().toFixed(1)} wall=${Date.now()}`);
+      continue;
+    }
+
+    if (step.action === 'linkdrop') {
+      report('LINKDROP');
+      report(`DEV-DRIVE ${i} linkdrop requested from main (dev-only hook) t=${performance.now().toFixed(1)} wall=${Date.now()}`);
+      continue;
+    }
+
+    if (step.action === 'input') {
+      report(`SENDINPUT ${step.arg.trim()}`);
+      report(`DEV-DRIVE ${i} input ${step.arg.trim()} requested from main (webContents.sendInputEvent) t=${performance.now().toFixed(1)} hasFocus=${document.hasFocus()}`);
+      continue;
+    }
+
+    if (step.action === 'pair') {
+      const [selA = '', selB = '', everyRaw = '50', forRaw = '1000'] = step.arg.split('~');
+      const every = Math.max(10, Number.parseInt(everyRaw, 10) || 50);
+      const total = Math.min(60_000, Number.parseInt(forRaw, 10) || 1000);
+      const started = performance.now();
+      let n = 0;
+      while (performance.now() - started < total) {
+        let a = '';
+        let b = '';
+        try {
+          a = document.querySelector(selA)?.textContent ?? '(none)';
+          b = document.querySelector(selB)?.textContent ?? '(none)';
+        } catch {
+          report(`DEV-DRIVE ${i} pair INVALID SELECTOR`);
+          break;
+        }
+        report(`PAIR ${i} t=${(performance.now() - started).toFixed(0)} a=${JSON.stringify(a)} b=${JSON.stringify(b)}`);
+        n += 1;
+        await sleep(every);
+      }
+      report(`DEV-DRIVE ${i} pair sampled ${n} times every ${every} ms`);
       continue;
     }
 

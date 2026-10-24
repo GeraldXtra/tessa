@@ -1,10 +1,55 @@
-import { resolve } from 'node:path';
+import { createHash } from 'node:crypto';
+import { readdirSync, readFileSync, statSync } from 'node:fs';
+import { join, relative, resolve } from 'node:path';
 
 import { defineConfig } from 'electron-vite';
 import react from '@vitejs/plugin-react';
 import type { Plugin } from 'vite';
 
 import { PRODUCTION_CSP } from './src/shared/csp.ts';
+
+function sourceStamp(): string {
+  const files: string[] = [];
+  const walk = (dir: string): void => {
+    for (const name of readdirSync(dir)) {
+      const p = join(dir, name);
+      if (statSync(p).isDirectory()) walk(p);
+      else files.push(p);
+    }
+  };
+  walk(resolve(__dirname, 'src'));
+  walk(resolve(__dirname, '../../packages/protocol/src'));
+  walk(resolve(__dirname, '../../packages/tokens/dist'));
+  files.push(resolve(__dirname, '../../packages/tokens/tokens.json'), resolve(__dirname, 'electron.vite.config.ts'), resolve(__dirname, 'package.json'));
+  const hash = createHash('sha256');
+  for (const f of files.sort()) {
+    hash.update(relative(__dirname, f).replace(/\\/g, '/'));
+    hash.update('\0');
+    hash.update(readFileSync(f));
+    hash.update('\0');
+  }
+  return hash.digest('hex').slice(0, 16);
+}
+
+const SOURCE_STAMP = sourceStamp();
+
+function stampPlugin(part: 'main' | 'preload' | 'renderer'): Plugin {
+  return {
+    name: 'tessa-build-stamp',
+    generateBundle() {
+      this.emitFile({
+        type: 'asset',
+        fileName: 'stamp.json',
+        source: JSON.stringify({
+          source: SOURCE_STAMP,
+          part,
+          builtAt: new Date().toISOString(),
+          command: process.env['NODE_ENV_ELECTRON_VITE'] === 'development' ? 'npm run dev' : 'npm run build',
+        }),
+      });
+    },
+  };
+}
 
 /**
  * Injects the production Content-Security-Policy as a <meta> tag.
@@ -61,6 +106,7 @@ function cspMetaPlugin(): Plugin {
  */
 export default defineConfig({
   main: {
+    plugins: [stampPlugin('main')],
     build: {
       externalizeDeps: true,
       // Readable stack traces from the process that owns the token and the
@@ -71,6 +117,7 @@ export default defineConfig({
   },
 
   preload: {
+    plugins: [stampPlugin('preload')],
     build: {
       externalizeDeps: true,
       minify: false,
@@ -89,7 +136,7 @@ export default defineConfig({
   },
 
   renderer: {
-    plugins: [react(), cspMetaPlugin()],
+    plugins: [react(), cspMetaPlugin(), stampPlugin('renderer')],
     build: {
       sourcemap: true,
 

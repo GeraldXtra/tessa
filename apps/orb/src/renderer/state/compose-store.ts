@@ -55,6 +55,7 @@ export interface ComposeState {
   focusPlace: ComposePlace;
   quickOpen: boolean;
   unconfirmed: Unconfirmed | null;
+  heldOffline: boolean;
 }
 
 export const composeStore = createStore<ComposeState>({
@@ -66,7 +67,15 @@ export const composeStore = createStore<ComposeState>({
   focusPlace: 'drawer',
   quickOpen: false,
   unconfirmed: null,
+  heldOffline: false,
 });
+
+export const HELD_OFFLINE = 'Not sent: she is offline. Your words are still here. Press Enter again when she is back.';
+export const HELD_BACK = 'Not sent while she was offline. She is back: press Enter to send it now.';
+
+export function heldLine(online: boolean): string {
+  return online ? HELD_BACK : HELD_OFFLINE;
+}
 
 export function composePatch(patch: Partial<ComposeState>): void {
   composeStore.set({ ...composeStore.get(), ...patch });
@@ -122,6 +131,7 @@ export function composeAccepted(sent: string, messageId: string, ackAt: number):
     error: null,
     quickOpen: s.awaitingAck?.from === 'quick' ? false : s.quickOpen,
     unconfirmed: null,
+    heldOffline: false,
   });
 }
 

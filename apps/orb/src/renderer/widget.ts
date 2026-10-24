@@ -39,7 +39,7 @@ import '@tessa/tokens/css';
 import type { AgentState } from '@tessa/protocol';
 
 import { createPlasmaEngine } from './scene/plasma-engine.ts';
-import { applyTheme, currentTheme } from './theme.ts';
+import { applyTheme, currentTheme, isThemeId } from './theme.ts';
 
 /**
  * States that deserve animation. Everything else freezes.
@@ -68,6 +68,22 @@ const canvas: HTMLCanvasElement = found;
 // The sphere's colours are design tokens read off the document (CONTRACT §9),
 // so the theme has to be applied before the engine samples them.
 applyTheme(currentTheme());
+
+const THEME_SETTLE_MS = 1200;
+let themeSettle = 0;
+
+function followTheme(id: string): void {
+  if (!isThemeId(id) || id === currentTheme()) return;
+  const steps = applyTheme(id);
+  engine.retint();
+  engine.setAnimating(true);
+  window.clearTimeout(themeSettle);
+  themeSettle = window.setTimeout(() => {
+    if (!LIVE_STATES.has(agentState)) engine.setAnimating(false);
+    window.tessa.reportMetrics(`CAPTURE widget-${id}`);
+  }, THEME_SETTLE_MS);
+  window.tessa.reportMetrics(`WIDGET-THEME applied=${id} mid=${steps.mid}`);
+}
 
 /**
  * The widget's own copy of agent state, read by the engine every frame.
@@ -127,6 +143,9 @@ if (forcedState && LIVE_STATES.has(forcedState)) {
 window.tessa.onAgentState(({ state }) => {
   applyState(state as AgentState);
 });
+
+window.tessa.onThemeChanged(followTheme);
+void window.tessa.bootstrap().then((info) => followTheme(info.theme));
 
 /**
  * The heartbeat pulse is NOT subscribed here, deliberately.

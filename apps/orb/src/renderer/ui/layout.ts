@@ -1,3 +1,5 @@
+import { COMPACT_WINDOW } from '../../shared/ipc-contract.ts';
+
 export const TOP = 32;
 export const RAILS = 104;
 export const MARGIN = 16;
@@ -30,6 +32,7 @@ export interface Layout {
   narrow: boolean;
   guarded: boolean;
   stalled: boolean;
+  box: { x: number; y: number; w: number; h: number } | null;
 }
 
 const clamp = (x: number, a: number, b: number): number => Math.min(b, Math.max(a, x));
@@ -109,5 +112,36 @@ export function computeLayout(width: number, height: number, slot: boolean): Lay
     narrow: W < NARROW_W,
     guarded,
     stalled,
+    box: null,
+  };
+}
+
+export const COMPACT_CHIP_BAND = 8 + 22 + 10;
+
+export function computeCompact(width: number, height: number, card: boolean): Layout {
+  const W = Math.max(COMPACT_WINDOW.w, width);
+  const H = Math.max(COMPACT_WINDOW.h, height);
+  const box = { x: W - COMPACT_WINDOW.w, y: H - COMPACT_WINDOW.h, w: COMPACT_WINDOW.w, h: COMPACT_WINDOW.h };
+  const R = COMPACT_WINDOW.r;
+  return {
+    W,
+    H,
+    slot: card,
+    R,
+    cx: box.x + box.w / 2,
+    cy: box.y + COMPACT_WINDOW.head + COMPACT_CHIP_BAND + R,
+    cal: 'hidden',
+    dw: card ? COMPACT_WINDOW.cardSlot : 0,
+    lcW: 0,
+    colTop: TOP + 12,
+    colH: 0,
+    colShown: false,
+    traceShown: false,
+    bandX: 0,
+    bandW: 0,
+    narrow: false,
+    guarded: false,
+    stalled: false,
+    box,
   };
 }

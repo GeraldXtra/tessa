@@ -74,7 +74,7 @@ export class DaemonSupervisor {
    * Never spawns a second daemon: a live runtime.json short-circuits before any
    * spawn, so two Consoles cannot race into two daemons and two tokens.
    */
-  async ensure(): Promise<DaemonMode> {
+  async ensure(allowSpawn: boolean): Promise<DaemonMode> {
     const existing = readRuntimeFile()
     if (existing.ok) {
       this.opts.log(
@@ -84,11 +84,11 @@ export class DaemonSupervisor {
       return { kind: 'attached', pid: existing.info.pid, port: existing.info.port }
     }
 
-    if (!this.opts.isDev) {
+    if (!this.opts.isDev || !allowSpawn) {
       // Never in a packaged build. Production gets a Windows service.
       return {
         kind: 'unavailable',
-        reason: `Tessa Core is not running (${existing.reason}). Start it with: python core/server.py`,
+        reason: `Tessa Core is not running (${existing.reason}). Start her with: tcli daemon start`,
       }
     }
 

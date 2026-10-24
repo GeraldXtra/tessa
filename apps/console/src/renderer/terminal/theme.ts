@@ -1,66 +1,76 @@
-/**
- * apps/console/src/renderer/terminal/theme.ts
- *
- * xterm's ITheme, built from `packages/tokens` — never a hex literal.
- * `scripts/check-contract.mjs` fails the build on any literal under the
- * surface source trees, and it currently scans 37 files.
- *
- * (Note to future editors: do not write the glob for those trees inside a block
- * comment — the star-slash sequence closes it early. That exact mistake cost a
- * build here.)
- *
- * ── Why only five colours are set ────────────────────────────────────────────
- * ITheme also accepts a 16-colour ANSI ramp (black/red/green/... plus their
- * bright variants). **The Tessa token set has no ANSI ramp**, and
- * `packages/tokens` is SHARED — the Console session does not edit it.
- *
- * Verified in `node_modules/@xterm/xterm/typings/xterm.d.ts:343+`: **every
- * ITheme field is optional.** So setting background/foreground/cursor/selection
- * and letting xterm supply its own ANSI defaults is valid, not a workaround —
- * partial themes are a supported shape.
- *
- * If the ANSI ramp should be branded, that is a `packages/tokens` diff to
- * propose to the owner, not something to slip in here.
- */
-
 import type { ITheme } from '@xterm/xterm'
 import tokens from '@tessa/tokens'
 
-const c = (name: string): string => {
+export function tok(name: string): string {
   const entry = (tokens.color as Record<string, { value: string } | undefined>)[name]
   if (!entry) throw new Error(`token color.${name} missing — regenerate with: npm run tokens`)
   return entry.value
 }
 
-export const tessaTerminalTheme: ITheme = {
-  /**
-   * TRANSPARENT, SO THE WATERMARK BEHIND THE STAGE IS VISIBLE.
-   *
-   * This was `bg-void`, and that is why he could not see the mark: xterm paints
-   * its theme background across the whole screen element, opaque, so the mark
-   * sat behind a solid floor. Measured — with one pane the xterm screen covered
-   * 1134x522 of an 1160x558 stage, leaving only a 5px border strip of the mark
-   * showing, which is indistinguishable from nothing.
-   *
-   * The void colour is still painted: `body` carries `--bg-void`, so the
-   * terminal looks identical. It simply no longer has its own floor.
-   *
-   * Written as rgba rather than a hex with an alpha pair because
-   * scripts/check-contract.mjs fails the build on any hex literal in surface
-   * source, and it has already caught two of mine.
-   */
-  background: 'rgba(0,0,0,0)',
-  foreground: c('text'),
-  cursor: c('accent'),
-  /** Foreground of the block cursor — the void colour, so the glyph inverts. */
-  cursorAccent: c('bg-void'),
-  selectionBackground: c('accent-dim'),
-  selectionForeground: c('text'),
+function rgbOf(value: string): { r: number; g: number; b: number; a: number } {
+  const hex = value.match(/^#([0-9a-fA-F]{2})([0-9a-fA-F]{2})([0-9a-fA-F]{2})$/)
+  if (hex) return { r: parseInt(hex[1]!, 16), g: parseInt(hex[2]!, 16), b: parseInt(hex[3]!, 16), a: 1 }
+  const m = value.match(/^rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*(?:,\s*([\d.]+)\s*)?\)$/)
+  if (m) return { r: Number(m[1]), g: Number(m[2]), b: Number(m[3]), a: m[4] === undefined ? 1 : Number(m[4]) }
+  throw new Error(`token value ${value} is not a colour this Console can composite`)
 }
 
-/** Font stack and metrics, also token-sourced. JetBrains Mono is deferred to 1b. */
-export const tessaFont = {
-  fontFamily: (tokens.font as Record<string, { value: string }>)['mono']!.value,
-  fontSize: parseInt((tokens.fontSize as Record<string, { value: string }>)['base']!.value, 10),
-  lineHeight: 1.2,
-} as const
+function hex2(n: number): string {
+  return Math.max(0, Math.min(255, Math.round(n))).toString(16).padStart(2, '0')
+}
+
+export function composite(over: string, under: string): string {
+  const o = rgbOf(over)
+  const u = rgbOf(under)
+  const a = o.a
+  return `#${hex2(o.r * a + u.r * (1 - a))}${hex2(o.g * a + u.g * (1 - a))}${hex2(o.b * a + u.b * (1 - a))}`
+}
+
+const ANSI = ['black', 'red', 'green', 'yellow', 'blue', 'magenta', 'cyan', 'white'] as const
+
+function palette(prefix: 'std' | 'mono'): Partial<ITheme> {
+  const out: Record<string, string> = {}
+  for (const n of ANSI) {
+    out[n] = tok(`console-${prefix}-${n}`)
+    out[`bright${n[0]!.toUpperCase()}${n.slice(1)}`] = tok(`console-${prefix}-bright-${n}`)
+  }
+  return out as Partial<ITheme>
+}
+
+export function terminalTheme(output: 'standard' | 'mono'): ITheme {
+  return {
+    background: 'rgba(0,0,0,0)',
+    foreground: tok('console-t2'),
+    cursor: tok('console-t1'),
+    cursorAccent: tok('console-bg'),
+    selectionBackground: tok('console-select'),
+    selectionInactiveBackground: tok('console-select'),
+    scrollbarSliderBackground: tok('console-line2'),
+    scrollbarSliderHoverBackground: tok('console-t4'),
+    scrollbarSliderActiveBackground: tok('console-t3'),
+    ...palette(output === 'mono' ? 'mono' : 'std'),
+  }
+}
+
+export const MATCH_BG = (): string => composite(tok('console-match'), tok('console-bg'))
+export const CURRENT_BG = (): string => tok('console-t1')
+export const CURRENT_FG = (): string => tok('console-bg')
+export const INPUT_FG = (): string => tok('console-t1')
+
+export function sgrTrue(name: string): string {
+  const c = rgbOf(tok(name))
+  return `\x1b[38;2;${c.r};${c.g};${c.b}m`
+}
+
+export const TERMINAL_FONT = '"Cascadia Mono", "Cascadia Code", Consolas, "Lucida Console", monospace'
+const LINE_HEIGHT = 1.55
+
+export function cellLineHeight(fontSize: number): number {
+  const probe = document.createElement('span')
+  probe.textContent = 'W'
+  probe.style.cssText = `position:absolute;visibility:hidden;display:inline-block;white-space:pre;line-height:normal;font-family:${TERMINAL_FONT};font-size:${fontSize}px`
+  document.body.append(probe)
+  const h = probe.getBoundingClientRect().height
+  probe.remove()
+  return h > 0 ? (fontSize * LINE_HEIGHT) / h : LINE_HEIGHT
+}

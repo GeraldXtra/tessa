@@ -1,21 +1,13 @@
 import { useMemo } from 'react';
 
-import { auditStore, railStore, transcriptStore, useStore, type RailId } from '../state/store.ts';
+import { DRAWER_LIST } from '../../shared/ipc-contract.ts';
+import { auditStore, transcriptStore, useStore, type RailId } from '../state/store.ts';
 import { jobsStore } from '../state/plasma-inputs.ts';
-import { Val } from './bits.tsx';
+import { stagger, Val } from './bits.tsx';
 import { isHerAction } from './format.ts';
 import { auditLoadedStore, debugStore, engineViewStore, jobsSeenStore, machineStore, notesStore, threatStore } from './stores.ts';
 
-export const DRAWERS: readonly { id: RailId; name: string }[] = [
-  { id: 'trace', name: 'TRACE' },
-  { id: 'sentinel', name: 'SENTINEL' },
-  { id: 'pulse', name: 'PULSE' },
-  { id: 'jobs', name: 'JOBS' },
-  { id: 'chat', name: 'CHAT' },
-  { id: 'arsenal', name: 'ARSENAL' },
-  { id: 'recall', name: 'RECALL' },
-  { id: 'signal', name: 'SIGNAL' },
-];
+export const DRAWERS: readonly { id: RailId; name: string }[] = DRAWER_LIST;
 
 const TERMINAL = new Set(['succeeded', 'failed', 'cancelled', 'needsReview']);
 
@@ -52,8 +44,7 @@ function useSubLabels(): Record<RailId, string> {
   };
 }
 
-export function Rails({ cardWaiting, onToggle }: { cardWaiting: boolean; onToggle: (id: RailId) => void }) {
-  const open = useStore(railStore);
+export function Rails({ cardWaiting, lit, onToggle }: { cardWaiting: boolean; lit: RailId | null; onToggle: (id: RailId) => void }) {
   const threat = useStore(threatStore);
   const sub = useSubLabels();
   return (
@@ -64,10 +55,11 @@ export function Rails({ cardWaiting, onToggle }: { cardWaiting: boolean; onToggl
           type="button"
           className={`rail${d.id === 'sentinel' && threat && !threat.seen ? ' threat' : ''}`}
           data-rail-id={d.id}
-          aria-expanded={open === d.id && !cardWaiting}
+          aria-expanded={lit === d.id && !cardWaiting}
           aria-disabled={cardWaiting}
           disabled={cardWaiting}
           title={`Alt+${i + 1}`}
+          style={stagger(i)}
           onClick={() => onToggle(d.id)}
         >
           <b>{d.name}</b>
@@ -84,7 +76,7 @@ function Debug() {
   const view = useStore(engineViewStore);
   if (!on) return null;
   return (
-    <div className="dbg">
+    <div className="dbg" style={stagger(8)}>
       <b>{view && view.fps > 0 ? Math.round(view.fps) : '--'}</b> FPS
       <br />
       <b>{view && view.p95 > 0 ? view.p95.toFixed(1) : '--'}</b> MS P95

@@ -80,6 +80,30 @@ interface SessionRecord {
 
 const sessionHosts = new Map<string, SessionRecord>()
 
+const endingSessions = new Set<string>()
+
+let onSelfExit: ((sessionId: string, code: number) => void) | null = null
+
+export function setSelfExitHandler(fn: (sessionId: string, code: number) => void): void {
+  onSelfExit = fn
+}
+
+export function liveSessions(): { sessionId: string; shellPid?: number; hostPid?: number }[] {
+  return [...sessionHosts.entries()].map(([sessionId, r]) => ({
+    sessionId,
+    ...(r.shellPid === undefined ? {} : { shellPid: r.shellPid }),
+    ...(r.hostPid === undefined ? {} : { hostPid: r.hostPid }),
+  }))
+}
+
+export function isEnding(sessionId: string): boolean {
+  return endingSessions.has(sessionId)
+}
+
+export function shellPidAlive(pid: number): boolean {
+  return pidAlive(pid)
+}
+
 /**
  * Existence test.
  *
@@ -99,6 +123,17 @@ function pidAlive(pid: number): boolean {
   } catch (err) {
     return (err as NodeJS.ErrnoException).code === 'EPERM'
   }
+}
+
+const SURVIVOR_WATCH_MS = 30_000
+
+async function watchSurvivors(pids: number[]): Promise<number | null> {
+  const t0 = Date.now()
+  while (Date.now() - t0 < SURVIVOR_WATCH_MS) {
+    if (pids.every((p) => !pidAlive(p))) return Date.now() - t0
+    await new Promise((r) => setTimeout(r, 500))
+  }
+  return null
 }
 
 /** PIDs from tasklist. ~30 ms per call — spawn and decision points only. */
@@ -150,7 +185,7 @@ function taskkillTree(pid: number): Promise<number[]> {
       { windowsHide: true },
       (_err, stdout) => {
         const claimed = new Set<number>()
-        for (const m of String(stdout ?? '').matchAll(/PID (\d+)/g)) {
+        for (const m of String(stdout ?? '').replace(/\([^)]*\)/g, '').matchAll(/PID (\d+)/g)) {
           if (m[1]) claimed.add(Number(m[1]))
         }
         resolve([...claimed])
@@ -431,10 +466,12 @@ export async function startPty(
     cols: number
     rows: number
     sessionId?: string
+    env?: Record<string, string>
     /** DEV HARNESS ONLY — see pty-ipc.ts. */
     stallSpawnMs?: number
     /** DEV HARNESS ONLY — see pty-ipc.ts. */
     capturePath?: string
+    devProbe?: boolean
   },
 ): Promise<PtyHostResult> {
   const { child, probe } = await forkAndProbe()
@@ -466,8 +503,10 @@ export async function startPty(
     cwd: opts.cwd,
     cols: opts.cols,
     rows: opts.rows,
+    ...(opts.env === undefined ? {} : { env: opts.env }),
     ...(opts.stallSpawnMs === undefined ? {} : { stallSpawnMs: opts.stallSpawnMs }),
     ...(opts.capturePath === undefined ? {} : { capturePath: opts.capturePath }),
+    ...(opts.devProbe ? { devProbe: true } : {}),
   }
   child.postMessage(spawnMsg, [port1])
 
@@ -545,7 +584,30 @@ export async function startPty(
   // 7864 -> 1684), never to the shell. That is exact, costs nothing until a
   // revoke actually happens, and the ladder already awaits that walk.
   if (opts.sessionId) {
-    sessionHosts.set(opts.sessionId, { host: child, hostPid: child.pid, shellPid: pid })
+    const sid = opts.sessionId
+    sessionHosts.set(sid, { host: child, hostPid: child.pid, shellPid: pid })
+    child.on('message', (msg: HostToMain) => {
+      if (msg?.t !== 'exited') return
+      if (endingSessions.has(sid) || !sessionHosts.has(sid)) return
+      endingSessions.add(sid)
+      log(`session ${sid.slice(0, 8)} shell exited by itself (code ${msg.code})`)
+      onSelfExit?.(sid, msg.code)
+      try {
+        child.postMessage({ t: 'shutdown' })
+      } catch {
+        log(`session ${sid.slice(0, 8)} host already gone before shutdown`)
+      }
+      setTimeout(() => {
+        try {
+          child.kill()
+        } catch {
+          log(`session ${sid.slice(0, 8)} host already gone before kill`)
+        }
+        sessionHosts.delete(sid)
+        endingSessions.delete(sid)
+        if (child === activeChild) activeChild = null
+      }, SHUTDOWN_GRACE_MS)
+    })
   }
 
   return {
@@ -558,32 +620,6 @@ export async function startPty(
   }
 }
 
-
-/* ═══════════════════════════════════════════════════ DEV HARNESS (Step 5 only) */
-
-/**
- * Type into the live PTY from main. DEV ONLY — see `DevInput` in pty-ipc.ts.
- *
- * Step 5's exit criterion is that npm, pip, git and claude run in the CONSOLE'S
- * OWN terminal. There is no supported way to drive xterm's keyboard from outside
- * the renderer, so the harness writes to the same `term.write()` those keystrokes
- * reach. The PTY, the grant, the ConPTY and the rendering path are all the real
- * ones; only the origin of the bytes differs.
- */
-export function devType(sessionId: string, text: string): boolean {
-  const rec = sessionHosts.get(sessionId)
-  if (!rec) return false
-  rec.host.postMessage({ t: 'devInput', b64: Buffer.from(text, 'utf8').toString('base64') })
-  return true
-}
-
-/** Resize the live PTY from main. DEV ONLY — for the Step 5 resize check. */
-export function devResize(sessionId: string, cols: number, rows: number): boolean {
-  const rec = sessionHosts.get(sessionId)
-  if (!rec) return false
-  rec.host.postMessage({ t: 'devResize', cols, rows })
-  return true
-}
 
 /* ══════════════════════════════════════════ CONTRACT §6.5 lifecycle reporting */
 
@@ -609,14 +645,38 @@ export function devResize(sessionId: string, cols: number, rows: number): boolea
  * logged instead, because a silent failure here degrades the audit trail
  * invisibly, which is the one outcome worse than a noisy one.
  */
+type HeldReport = { sessionId: string; event: 'exited' | 'killed' | 'startFailed'; detail?: string | number }
+const heldReports: HeldReport[] = []
+const HELD_REPORTS_MAX = 50
+
+function holdReport(r: HeldReport, why: string): void {
+  if (heldReports.some((h) => h.sessionId === r.sessionId)) return
+  if (heldReports.length >= HELD_REPORTS_MAX) {
+    log(`report ${r.event} for ${r.sessionId.slice(0, 8)} dropped — ${why}, and ${HELD_REPORTS_MAX} reports are already held`)
+    return
+  }
+  heldReports.push(r)
+  log(`report ${r.event} for ${r.sessionId.slice(0, 8)} held — ${why}; it is sent when the link returns`)
+}
+
+export async function flushHeldReports(client: { isConnected: boolean; request: (t: never, p: unknown) => Promise<unknown> }): Promise<void> {
+  while (heldReports.length && client.isConnected) {
+    const r = heldReports.shift()!
+    log(`sending held report ${r.event} for ${r.sessionId.slice(0, 8)}`)
+    await reportPty(client, r.sessionId, r.event, r.detail)
+  }
+}
+
 export async function reportPty(
   client: { isConnected: boolean; request: (t: never, p: unknown) => Promise<unknown> },
   sessionId: string,
   event: 'started' | 'exited' | 'cwdChanged' | 'titleChanged' | 'killed' | 'startFailed',
   detail?: string | number,
 ): Promise<void> {
+  const final = event === 'exited' || event === 'killed' || event === 'startFailed'
   if (!client.isConnected) {
-    log(`report ${event} for ${sessionId.slice(0, 8)} dropped — daemon not connected`)
+    if (final) holdReport({ sessionId, event, ...(detail === undefined ? {} : { detail }) }, 'daemon not connected')
+    else log(`report ${event} for ${sessionId.slice(0, 8)} dropped — daemon not connected`)
     return
   }
   try {
@@ -627,6 +687,7 @@ export async function reportPty(
     })
   } catch (err) {
     log(`report ${event} failed for ${sessionId.slice(0, 8)}: ${(err as Error).message}`)
+    if (final && !client.isConnected) holdReport({ sessionId, event, ...(detail === undefined ? {} : { detail }) }, 'the link dropped mid-report')
   }
 }
 
@@ -688,6 +749,7 @@ export async function killPtyObserved(sessionId: string): Promise<KillOutcome> {
 
   const t0 = Date.now()
   const { host, hostPid, shellPid } = rec
+  endingSessions.add(sessionId)
   const deaths = new Map<number, number>()
 
   /**
@@ -697,7 +759,7 @@ export async function killPtyObserved(sessionId: string): Promise<KillOutcome> {
    */
   const targets: number[] = shellPid === undefined ? [] : [shellPid]
   const widen = (pids: number[], source: string): void => {
-    const fresh = pids.filter((p) => p > 0 && p !== hostPid && !targets.includes(p))
+    const fresh = pids.filter((p) => p > 0 && p !== hostPid && p !== process.pid && p !== process.ppid && !targets.includes(p))
     if (fresh.length === 0) return
     targets.push(...fresh)
     rungs.push(`observation set widened by ${source}: +[${fresh.join(', ')}]`)
@@ -725,6 +787,7 @@ export async function killPtyObserved(sessionId: string): Promise<KillOutcome> {
 
   const finish = (survivors: number[]): KillOutcome => {
     sessionHosts.delete(sessionId)
+    endingSessions.delete(sessionId)
     if (host === activeChild) activeChild = null
     if (hostExitMs !== null) rungs.push(`host process exited at ${hostExitMs} ms`)
     const observedDead = survivors.length === 0
@@ -886,6 +949,47 @@ export async function killPty(
         `CONTRACT PtyReportEvent has no value for "ordered to kill, could not comply"; ` +
         `adding one is a breaking change under §7.3 for Gerald to rule on.`,
     )
+    const late = await watchSurvivors(outcome.survivors)
+    if (late === null) {
+      log(`session ${short}: pids [${outcome.survivors.join(', ')}] still alive after ${SURVIVOR_WATCH_MS / 1000} s - NOT reporting killed`)
+      return outcome
+    }
+    log(`session ${short}: the survivors were OBSERVED DEAD ${late} ms later - NOW reporting killed`)
+    await reportPty(client, sessionId, 'killed', reason)
+    return { ...outcome, observedDead: true, survivors: [] }
+  }
+  return outcome
+}
+
+export async function closePty(
+  client: { isConnected: boolean; request: (t: never, p: unknown) => Promise<unknown> },
+  sessionId: string,
+  why: string,
+): Promise<KillOutcome> {
+  const short = sessionId.slice(0, 8)
+  if (endingSessions.has(sessionId)) {
+    log(`close for ${short}: already ending - nothing more to do`)
+    return { observedDead: false, unknownSession: true, observed: [], deaths: {}, survivors: [], rungs: ['already ending'] }
+  }
+  const outcome = await killPtyObserved(sessionId)
+  for (const r of outcome.rungs) log(`  ${r}`)
+  if (outcome.unknownSession) {
+    log(`close for ${short} names no PTY this Console owns - reporting nothing`)
+    return outcome
+  }
+  if (outcome.observedDead) {
+    log(`session ${short} closed (${why}) and OBSERVED DEAD after ${outcome.msToDeath ?? 0} ms - reporting exited`)
+    await reportPty(client, sessionId, 'exited', why)
+  } else {
+    log(`!! CLOSE NOT SATISFIED for session ${short}: pids [${outcome.survivors.join(', ')}] survived - watching them for ${SURVIVOR_WATCH_MS / 1000} s`)
+    const late = await watchSurvivors(outcome.survivors)
+    if (late === null) {
+      log(`session ${short}: pids [${outcome.survivors.join(', ')}] still alive after ${SURVIVOR_WATCH_MS / 1000} s - NOT reporting exited`)
+      return outcome
+    }
+    log(`session ${short}: the survivors were OBSERVED DEAD ${late} ms later - reporting exited`)
+    await reportPty(client, sessionId, 'exited', why)
+    return { ...outcome, observedDead: true, survivors: [] }
   }
   return outcome
 }

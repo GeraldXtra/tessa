@@ -37,15 +37,6 @@ REM Intel's OpenMP runtime (loaded with Whisper) must not install its console
 REM handler. The daemon also sets this itself, first thing. Both, on purpose.
 set "FOR_DISABLE_CONSOLE_CTRL_HANDLER=1"
 
-if /i "%~1"=="--now" goto :launch
-REM -- WAIT FOR THE AUDIO STACK ------------------------------------------
-REM At sign-in the shortcut fires before the audio endpoints have finished
-REM enumerating; with --voice that means opening a microphone that is not
-REM there yet. This minimised window waits 20 s and then closes itself.
-title Tessa - starting in 20 seconds
-timeout /t 20 /nobreak > nul
-
-:launch
 if not exist "%LOGDIR%" mkdir "%LOGDIR%"
 for /f "tokens=1-3 delims=/-. " %%a in ("%DATE%") do set "STAMP=%%c-%%b-%%a"
 echo. >> "%LOGDIR%\daemon-%STAMP%.log"

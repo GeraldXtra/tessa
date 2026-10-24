@@ -152,15 +152,6 @@ REM Intel's OpenMP runtime (loaded with Whisper) must not install its console
 REM handler. The daemon also sets this itself, first thing. Both, on purpose.
 set "FOR_DISABLE_CONSOLE_CTRL_HANDLER=1"
 
-if /i "%~1"=="--now" goto :launch
-REM -- WAIT FOR THE AUDIO STACK ------------------------------------------
-REM At sign-in the shortcut fires before the audio endpoints have finished
-REM enumerating; with --voice that means opening a microphone that is not
-REM there yet. This minimised window waits {delay} s and then closes itself.
-title Tessa - starting in {delay} seconds
-timeout /t {delay} /nobreak > nul
-
-:launch
 if not exist "%LOGDIR%" mkdir "%LOGDIR%"
 for /f "tokens=1-3 delims=/-. " %%a in ("%DATE%") do set "STAMP=%%c-%%b-%%a"
 echo. >> "%LOGDIR%\\daemon-%STAMP%.log"
@@ -258,7 +249,7 @@ def install(voice: bool, stt_model: str, delay: int = 20) -> int:
     print(f"  launcher : {launcher}")
     print(f"  logs     : {LOG_DIR}")
     print(f"  voice    : {'ON - the microphone opens at login' if voice else 'off'}")
-    print(f"  delay    : {delay}s after logon, so the audio stack is ready")
+    print("  delay    : none, the launcher starts her as soon as Windows runs the shortcut")
     print()
     print("To turn it off, either:")
     print("  python scripts/autostart.py --remove")
@@ -323,7 +314,7 @@ if __name__ == "__main__":
                     help="open the microphone at login (opt-in, not the default)")
     ap.add_argument("--stt-model", default="base")
     ap.add_argument("--delay", type=int, default=20,
-                    help="seconds to wait after logon before starting (audio readiness)")
+                    help="ignored: the launcher no longer waits after logon")
     a = ap.parse_args()
 
     if a.check:

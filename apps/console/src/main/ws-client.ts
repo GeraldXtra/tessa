@@ -59,19 +59,9 @@ import { readRuntimeFile, type RuntimeInfo } from './token.ts'
  *   permission.* — resolution of a pending spawn request
  *   daemon.*     — health, and shutdown so the UI can show a reconnect state
  *
- *   transcript.* — evt.transcript.message, the ONE thread she and he share
- *   agent.*      — evt.agent.state, so the chat pane can show her thinking
- *
- * transcript and agent were deliberately NOT subscribed until the chat pane
- * existed, because decoding JSON only to drop it costs frames on two cores.
- * They are subscribed now for a specific reason: a SPOKEN turn broadcasts on
- * exactly the same event, so a Console listening here sees her voice answers
- * too and the conversation is genuinely one thread rather than two that happen
- * to share memory.
- *
  * Still not subscribed: job, companion. Nothing renders them.
  */
-const TOPICS = ['pty.*', 'permission.*', 'daemon.*', 'transcript.*', 'agent.*'] as const
+const TOPICS = ['pty.*', 'permission.*', 'daemon.*', 'sentinel.*'] as const
 
 const ORIGIN: AllowedOrigin = 'tessa://console'
 const SURFACE: Surface = 'console'
@@ -119,11 +109,10 @@ export interface DaemonClientOptions {
   onStatus?: (status: ConnStatus) => void
   /** Daemon ordered a session killed. The Console MUST comply and report back. */
   onRevoke?: (sessionId: string, reason: string) => void
-  /** One message of the shared thread — typed OR spoken. */
-  onTranscript?: (m: { messageId: string; role: string; text: string; via: string }) => void
-  /** idle | listening | thinking | working | speaking. */
-  onAgentState?: (state: string) => void
-  onHealth?: (payload: Record<string, unknown>) => void
+  onPermissionRequest?: (payload: Record<string, unknown>) => void
+  onPermissionResolved?: (payload: Record<string, unknown>) => void
+  onSentinelAlert?: (payload: Record<string, unknown>) => void
+  onPtySessions?: (sessions: unknown[]) => void
 }
 
 /** Resolved response to a cmd.* — either the res.* or the err.* payload. */
@@ -144,7 +133,15 @@ export class DaemonClient {
   private backoffMs = BACKOFF_MIN_MS
   private helloId: string | null = null
   private stopped = false
+  private holdUntil = 0
   private rejectedCredential: string | null = null
+
+  readonly sentTypes = new Map<string, number>()
+
+  private noteSent(type: string): void {
+    this.sentTypes.set(type, (this.sentTypes.get(type) ?? 0) + 1)
+    this.opts.log(`sent ${type}`)
+  }
 
   /** In-flight cmd.* awaiting res./err. by correlation id. */
   private pending = new Map<string, { resolve: (r: Reply) => void; timer: NodeJS.Timeout }>()
@@ -203,14 +200,33 @@ export class DaemonClient {
         reject(new Error(`no reply to ${type} within ${REQUEST_TIMEOUT_MS} ms`))
       }, REQUEST_TIMEOUT_MS)
       this.pending.set(frame.id, { resolve, timer })
+      this.noteSent(type)
       this.socket.send(JSON.stringify(frame))
     })
   }
 
   /* ───────────────────────────────────────────────────────────── connection */
 
+  suspendFor(ms: number): void {
+    this.holdUntil = Date.now() + ms
+    this.opts.log(`link held closed for ${ms} ms by the dev harness`)
+    if (this.socket) this.socket.close(1000, 'console dev link drop')
+    else this.attempt()
+  }
+
+  devDeliver(type: string, payload: Record<string, unknown>): void {
+    const env = makeEnvelope(type as Parameters<typeof makeEnvelope>[0], payload as never)
+    this.opts.log(`dev harness delivering ${type} through the message handler`)
+    this.onMessage(Buffer.from(JSON.stringify(env), 'utf8'))
+  }
+
   private attempt(): void {
     if (this.stopped || this.socket) return
+    if (Date.now() < this.holdUntil) {
+      this.emit({ phase: 'offline', detail: 'link held closed by the dev harness' })
+      this.schedule(this.holdUntil - Date.now())
+      return
+    }
 
     // CONTRACT §1: re-read on every attempt. The token rotates per daemon launch.
     const result = readRuntimeFile()
@@ -266,6 +282,7 @@ export class DaemonClient {
       protocolVersion: PROTOCOL_VERSION,
     })
     this.helloId = frame.id
+    this.noteSent('cmd.hello')
     this.socket?.send(JSON.stringify(frame))
 
     // Mirror the daemon's 3 s deadline client-side, so a daemon that accepts the
@@ -321,28 +338,30 @@ export class DaemonClient {
       return
     }
 
-    if (env.type === 'evt.transcript.message') {
-      const p = env.payload as { message?: { role?: unknown; text?: unknown; messageId?: unknown; via?: unknown } }
-      const m = p.message
-      if (m && typeof m.text === 'string') {
-        this.opts.onTranscript?.({
-          messageId: String(m.messageId ?? ''),
-          role: String(m.role ?? 'assistant'),
-          text: m.text,
-          via: typeof m.via === 'string' ? m.via : 'voice',
-        })
-      }
+    if (env.type === 'res.subscribe') {
+      const p = env.payload as { topics?: unknown }
+      this.opts.log(`subscribed: daemon accepted ${JSON.stringify(p.topics)}`)
       return
     }
 
-    if (env.type === 'evt.agent.state') {
-      const p = env.payload as { state?: unknown }
-      if (typeof p.state === 'string') this.opts.onAgentState?.(p.state)
+    if (env.type === 'evt.permission.request') {
+      this.opts.onPermissionRequest?.(env.payload as Record<string, unknown>)
       return
     }
 
-    if (env.type === 'evt.daemon.health') {
-      this.opts.onHealth?.(env.payload as Record<string, unknown>)
+    if (env.type === 'evt.permission.resolved') {
+      this.opts.onPermissionResolved?.(env.payload as Record<string, unknown>)
+      return
+    }
+
+    if (env.type === 'evt.sentinel.alert') {
+      this.opts.onSentinelAlert?.(env.payload as Record<string, unknown>)
+      return
+    }
+
+    if (env.type === 'evt.pty.sessions') {
+      const p = env.payload as { sessions?: unknown }
+      if (Array.isArray(p.sessions)) this.opts.onPtySessions?.(p.sessions)
       return
     }
 
@@ -367,6 +386,7 @@ export class DaemonClient {
     // re-sent on every reconnect — and only after a successful hello, since a
     // cmd.* before that earns err.auth.required.
     const frame = makeEnvelope('cmd.subscribe', { topics: [...TOPICS] })
+    this.noteSent('cmd.subscribe')
     this.socket?.send(JSON.stringify(frame))
   }
 

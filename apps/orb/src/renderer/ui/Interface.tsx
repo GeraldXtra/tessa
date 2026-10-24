@@ -4,19 +4,25 @@ import type { BootstrapInfo } from '../../shared/ipc-contract.ts';
 import type { PlasmaEngine } from '../scene/plasma-engine.ts';
 import { approvalsStore } from '../state/approval-store.ts';
 import { closeQuick, composeStore, requestComposeFocus } from '../state/compose-store.ts';
-import { connectionStore, railStore, useStore } from '../state/store.ts';
+import { agentStateStore, connectionStore, RAIL_IDS, railStore, useStore } from '../state/store.ts';
+import { rawStateStore, stopHer, stoppable, turnStore } from '../state/voice.ts';
 import { Band } from './Band.tsx';
+import { Boot } from './Boot.tsx';
 import { CalendarPanel } from './CalendarPanel.tsx';
 import { Card, liveEntries } from './Card.tsx';
 import { QuickLine } from './Chat.tsx';
 import { Drawer } from './Drawers.tsx';
 import { CaptionLine, Chip } from './Followers.tsx';
-import { installKeys, toggleRail } from './keys.ts';
-import { computeLayout, MARGIN, TOP } from './layout.ts';
+import { installKeys, openRail, toggleRail } from './keys.ts';
+import { computeCompact, computeLayout, MARGIN, TOP } from './layout.ts';
 import { Notes, TraceStack } from './LeftColumn.tsx';
+import { closePalette, modeStore, paletteStore, setMode } from './modes.ts';
+import { Palette } from './Palette.tsx';
 import { Rails } from './Rails.tsx';
-import { dockShownStore, engineViewStore } from './stores.ts';
+import { bootStore, dockShownStore, engineViewStore, pushNote, themeStampStore } from './stores.ts';
 import { TopBar } from './TopBar.tsx';
+
+export const COMPACT_SETTLE_MS = 1200;
 
 function useViewport(): { w: number; h: number } {
   const [v, setV] = useState(() => ({ w: window.innerWidth, h: window.innerHeight }));
@@ -40,9 +46,22 @@ export function Interface({ bootstrap, engine, sphere }: { bootstrap: BootstrapI
   const rail = useStore(railStore);
   const entries = useStore(approvalsStore);
   const connection = useStore(connectionStore);
+  const mode = useStore(modeStore);
+  const palette = useStore(paletteStore);
+  const state = useStore(agentStateStore);
+  const themeStamp = useStore(themeStampStore);
+  const boot = useStore(bootStore);
+  useStore(rawStateStore);
+  useStore(turnStore);
   const cardUp = liveEntries(entries).length > 0;
-  const slot = rail !== null || cardUp;
-  const layout = useMemo(() => computeLayout(viewport.w, viewport.h, slot), [viewport, slot]);
+  const compact = mode === 'compact';
+  const paletteShown = palette.open && !cardUp && !compact;
+  const drawerShown = rail !== null && !cardUp && !paletteShown && mode === 'full';
+  const slot = drawerShown || cardUp || paletteShown;
+  const layout = useMemo(
+    () => (compact ? computeCompact(viewport.w, viewport.h, cardUp) : computeLayout(viewport.w, viewport.h, slot)),
+    [viewport, slot, compact, cardUp],
+  );
   const chipRef = useRef<HTMLDivElement>(null);
   const capRef = useRef<HTMLDivElement>(null);
   const quickRef = useRef<HTMLDivElement>(null);
@@ -50,16 +69,97 @@ export function Interface({ bootstrap, engine, sphere }: { bootstrap: BootstrapI
   const hadCard = useRef(false);
   const focusCard = useRef(false);
   const placeAtRender = useRef<string | null>(null);
+  const placedCompact = useRef(compact);
   placeAtRender.current = focusedPlace();
-  const dockShown = layout.bandW > 0;
+  const dockShown = mode === 'full' && layout.bandW > 0;
 
   useEffect(() => {
-    engine?.setPlacement(layout.cx, layout.cy, layout.R);
-  }, [engine, layout]);
+    engine?.setCompact(compact);
+  }, [engine, compact]);
+
+  useEffect(() => {
+    if (!engine) return;
+    const snap = placedCompact.current !== compact;
+    placedCompact.current = compact;
+    engine.setPlacement(layout.cx, layout.cy, layout.R, snap);
+  }, [engine, layout, compact]);
 
   useEffect(() => {
     engine?.setFollowers({ chip: chipRef.current, caption: capRef.current, quick: quickRef.current });
   }, [engine]);
+
+  const canStop = stoppable(connection.phase === 'connected', cardUp);
+  useEffect(() => {
+    window.tessa.setWindowMode(mode, compact && cardUp, cardUp, canStop);
+  }, [mode, compact, cardUp, canStop]);
+
+  useEffect(
+    () =>
+      window.tessa.onTrayCommand((command) => {
+        if (command.kind === 'mode') {
+          setMode(command.mode, report, 'tray');
+          return;
+        }
+        if (command.kind === 'rail') {
+          const id = RAIL_IDS.find((r) => r === command.id);
+          if (!id) {
+            report(`TRAY open refused: "${command.id}" is not a rail`);
+            return;
+          }
+          if (!openRail(id, report, `tray:${id}`)) pushNote('ORB', 'Answer the approval first.', 'wait');
+          return;
+        }
+        if (command.kind === 'stop') {
+          if (stoppable(connectionStore.get().phase === 'connected', liveEntries(approvalsStore.get()).length > 0)) stopHer('tray');
+          else report('TRAY stop: nothing to stop now (she is not speaking, or thinking on a message you sent), nothing sent');
+          return;
+        }
+        report(`CLOSE refused (${command.via}): an approval card is waiting, the Orb stays open`);
+        pushNote('ORB', 'Answer the approval first.', 'wait');
+      }),
+    [],
+  );
+
+  useEffect(() => {
+    if (!bootstrap.isDev || !engine) return;
+    let raf = 0;
+    const onVisibility = (): void => {
+      cancelAnimationFrame(raf);
+      if (document.hidden) {
+        report(`VIS hidden wall=${Date.now()} frames=${engine.stats().framesDrawn}`);
+        return;
+      }
+      const t0 = performance.now();
+      const f0 = engine.stats().framesDrawn;
+      report(`VIS visible wall=${Date.now()} frames=${f0}`);
+      const poll = (): void => {
+        const f = engine.stats().framesDrawn;
+        if (f > f0) {
+          report(`VIS first frame drawn ${(performance.now() - t0).toFixed(1)} ms after visible, wall=${Date.now()} frames=${f}`);
+          return;
+        }
+        if (performance.now() - t0 < 5000) raf = requestAnimationFrame(poll);
+        else report('VIS no frame drawn within 5 s of visible');
+      };
+      raf = requestAnimationFrame(poll);
+    };
+    document.addEventListener('visibilitychange', onVisibility);
+    return () => {
+      cancelAnimationFrame(raf);
+      document.removeEventListener('visibilitychange', onVisibility);
+    };
+  }, [bootstrap.isDev, engine]);
+
+  useEffect(() => {
+    if (!engine) return;
+    engine.setAnimating(true);
+    if (!compact || cardUp || state !== 'idle') return;
+    const id = window.setTimeout(() => {
+      engine.setAnimating(false);
+      report(`COMPACT idle: the sphere freezes, no animation frames t=${performance.now().toFixed(1)}`);
+    }, COMPACT_SETTLE_MS);
+    return () => window.clearTimeout(id);
+  }, [engine, compact, cardUp, state, themeStamp, layout, connection.phase]);
 
   useLayoutEffect(() => {
     dockShownStore.set(dockShown);
@@ -73,26 +173,35 @@ export function Interface({ bootstrap, engine, sphere }: { bootstrap: BootstrapI
   useEffect(() => {
     if (!bootstrap.isDev) return;
     report(
-      `LAYOUT window=${layout.W}x${layout.H} slot=${layout.slot} R=${layout.R.toFixed(1)} diameter=${(2 * layout.R).toFixed(1)} ` +
+      `LAYOUT mode=${mode} window=${layout.W}x${layout.H} slot=${layout.slot} R=${layout.R.toFixed(1)} diameter=${(2 * layout.R).toFixed(1)} ` +
         `cx=${layout.cx.toFixed(1)} cy=${layout.cy.toFixed(1)} cal=${layout.cal} dw=${layout.dw} lcW=${layout.lcW.toFixed(1)} ` +
         `colH=${layout.colH} trace=${layout.traceShown} bandX=${layout.bandX.toFixed(1)} bandW=${layout.bandW.toFixed(1)} ` +
-        `narrow=${layout.narrow} guarded=${layout.guarded} stalled=${layout.stalled}`,
+        `narrow=${layout.narrow} guarded=${layout.guarded} stalled=${layout.stalled}` +
+        `${layout.box ? ` box=${layout.box.x},${layout.box.y} ${layout.box.w}x${layout.box.h}` : ''}`,
     );
-  }, [bootstrap.isDev, layout]);
+  }, [bootstrap.isDev, layout, mode]);
 
   useLayoutEffect(() => {
     if (cardUp && !hadCard.current) {
       const was = placeAtRender.current;
       const inQuick = was === 'quick' || focusedPlace() === 'quick';
+      const paletteWasOpen = paletteStore.get().open;
+      if (paletteWasOpen) {
+        closePalette(report, 'card');
+        focusCard.current = !inQuick;
+        report('CARD closed the palette; it stays closed');
+      }
       if (railStore.get() !== null) {
+        const hidden = modeStore.get() !== 'full' || paletteWasOpen;
         railStore.set(null);
         focusCard.current = !inQuick;
-        report('CARD closed the open drawer; it stays closed');
+        report(`CARD closed the ${hidden ? 'drawer hidden under the palette or the mode' : 'open drawer'}; it stays closed`);
       } else if (was === 'dock') {
         focusCard.current = true;
         report(`CARD hid the chat dock while he was typing in it; the draft is kept (${composeStore.get().draft.length} chars)`);
       }
       if (inQuick) report('CARD arrived while the quick line has focus; it keeps its focus and text and cannot answer the card');
+      report(`CARD arrived mode=${modeStore.get()} hasFocus=${document.hasFocus()}`);
     }
     hadCard.current = cardUp;
   }, [cardUp]);
@@ -125,23 +234,33 @@ export function Interface({ bootstrap, engine, sphere }: { bootstrap: BootstrapI
 
   const offline = connection.phase !== 'connected';
   return (
-    <div className={`orb${layout.narrow ? ' narrow' : ''}${offline ? ' offline' : ''}`}>
+    <div className={`orb${layout.narrow ? ' narrow' : ''}${offline ? ' offline' : ''}${mode === 'full' ? '' : ` ${mode}`}${boot === 'log' ? ' boot' : ''}`}>
       {sphere}
-      <TopBar narrow={layout.narrow} fixture={bootstrap.fixture} />
+      {compact && layout.box ? (
+        <div className="cwin" style={{ left: layout.box.x, top: layout.box.y, width: layout.box.w, height: layout.box.h }}>
+          <div className="ch">
+            TESSA<span>F TO EXPAND</span>
+          </div>
+        </div>
+      ) : (
+        <TopBar narrow={layout.narrow} fixture={bootstrap.fixture} />
+      )}
       <Chip chipRef={chipRef} />
       <CaptionLine capRef={capRef} />
       <QuickLine quickRef={quickRef} />
-      {layout.colShown ? (
+      {!compact && layout.colShown ? (
         <div className="col" style={{ left: MARGIN, top: layout.colTop, width: Math.round(layout.lcW), height: layout.colH }}>
           <Notes />
           {layout.traceShown ? <TraceStack /> : null}
         </div>
       ) : null}
-      <Band x={layout.bandX} w={layout.bandW} top={TOP + 12} h={layout.H - TOP - 24} />
-      <CalendarPanel mode={layout.cal} />
-      <Rails cardWaiting={cardUp} onToggle={(id) => toggleRail(id, report, `click:${id}`)} />
-      {!cardUp && rail ? <Drawer key={rail} id={rail} dw={layout.dw} /> : null}
+      {compact ? null : <Band x={layout.bandX} w={layout.bandW} top={TOP + 12} h={layout.H - TOP - 24} />}
+      {compact ? null : <CalendarPanel mode={layout.cal} />}
+      {compact ? null : <Rails cardWaiting={cardUp} lit={drawerShown ? rail : null} onToggle={(id) => toggleRail(id, report, `click:${id}`)} />}
+      {drawerShown && rail ? <Drawer key={rail} id={rail} dw={layout.dw} /> : null}
+      {paletteShown ? <Palette width={layout.dw || 372} /> : null}
       <Card ref={cardRef} width={layout.dw || 372} />
+      <Boot engine={engine} R={layout.R} cx={layout.cx} cy={layout.cy} cardUp={cardUp} />
     </div>
   );
 }

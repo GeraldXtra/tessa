@@ -127,8 +127,13 @@ export function loadWindowState(): LoadResult {
 export function saveWindowState(state: SavedWindowState): void {
   try {
     const path = statePath();
-    mkdirSync(dirname(path), { recursive: true });
-    writeFileSync(path, JSON.stringify(state, null, 2), 'utf8');
+    const text = JSON.stringify(state, null, 2);
+    try {
+      if (readFileSync(path, 'utf8') === text) return;
+    } catch {
+      mkdirSync(dirname(path), { recursive: true });
+    }
+    writeFileSync(path, text, 'utf8');
   } catch (err) {
     // Never fatal. Failing to remember a window position is not worth crashing
     // an always-on surface over.

@@ -6,7 +6,7 @@ import { useStore } from '../state/store.ts';
 import { tickStore } from '../state/tick.ts';
 import { Bar, Loading, NoData, Spark, Val } from './bits.tsx';
 import { ChatDock, DOCK_MIN_PX } from './Chat.tsx';
-import { diskStore, jobsSeenStore, machineStore } from './stores.ts';
+import { diskStore, jobsSeenStore, machineStore, pinsStore, runPinned } from './stores.ts';
 
 export const MACHINE_STALE_MS = 3000;
 
@@ -106,14 +106,28 @@ export function WaitingPanel() {
   );
 }
 
+const report = (line: string): void => window.tessa.reportMetrics(line);
+
 export function PinnedPanel() {
+  const pins = useStore(pinsStore);
   return (
     <section className="pnl br pinbox">
       <div className="ph">
         <span className="lab">PINNED</span>
-        <span className="lab" />
+        <span className="lab">{pins.length > 0 ? 'CTRL K FOR MORE' : ''}</span>
       </div>
-      <NoData why="Pinned commands are not built yet." />
+      {pins.length === 0 ? (
+        <NoData why="Pinned commands are not built yet." />
+      ) : (
+        <div className="pins">
+          {pins.map((p, i) => (
+            <button key={`${i}-${p}`} type="button" className="pin" data-pin={i} onClick={() => runPinned(p, report, `click:${i + 1}`)}>
+              <span className="dim">{i + 1}</span>
+              <span>{p}</span>
+            </button>
+          ))}
+        </div>
+      )}
     </section>
   );
 }
