@@ -1,4 +1,5 @@
 # TESSA_CORE — Canonical Repository Structure
+
 ### v2.2 · Phase 0 complete · generated-output ruling corrected
 
 > Companion to `docs/TESSA_CORE-spec.md` (v3.2). Replaces spec §3.
@@ -9,18 +10,18 @@
 
 ## Phase 0 status ✅
 
-| Check | Result |
-|---|---|
-| Protocol tests | **28/28** — envelope, closed enums, deep-link safety, forward compatibility |
-| Core sync tests | **21/21** — `core/` cannot drift from the generated contract |
-| Auth tests | **22/22** — live boundary against a running daemon |
-| Freshness check | **5 checks** — build fails if any generated output is stale |
-| **Total** | **71 passing, 0 failing** |
-| Audit chain | Verifies; tamper test names the exact altered entry |
-| Token file ACL | `SYSTEM` + owner only — no Users, no Everyone |
-| Redaction | Confirmed against `sk-ant-…`, Bearer JWTs, AWS secrets, `postgres://user:pass@…` |
-| Guard | Human gets a shell in `C:\dev`; agent does not — needs approval, again inside OneDrive |
-| Port walk | A stray daemon held 47600; the walk correctly landed on 47601 |
+| Check           | Result                                                                                 |
+| --------------- | -------------------------------------------------------------------------------------- |
+| Protocol tests  | **28/28** — envelope, closed enums, deep-link safety, forward compatibility            |
+| Core sync tests | **21/21** — `core/` cannot drift from the generated contract                           |
+| Auth tests      | **22/22** — live boundary against a running daemon                                     |
+| Freshness check | **5 checks** — build fails if any generated output is stale                            |
+| **Total**       | **71 passing, 0 failing**                                                              |
+| Audit chain     | Verifies; tamper test names the exact altered entry                                    |
+| Token file ACL  | `SYSTEM` + owner only — no Users, no Everyone                                          |
+| Redaction       | Confirmed against `sk-ant-…`, Bearer JWTs, AWS secrets, `postgres://user:pass@…`       |
+| Guard           | Human gets a shell in `C:\dev`; agent does not — needs approval, again inside OneDrive |
+| Port walk       | A stray daemon held 47600; the walk correctly landed on 47601                          |
 
 ---
 
@@ -39,15 +40,15 @@ Ignoring them would make "clone the repo and run the daemon" depend on running a
 
 ## Status legend
 
-| Mark | Meaning |
-|---|---|
-| ✅ | Built and verified |
-| ⬜ | Not yet created |
-| **P0–P8** | Phase it appears in |
-| 🔒 | Shared — propose to Gerald, never edit |
-| ⚙️ | Generated output, never hand-edited |
-| 🚫 | Gitignored |
-| 📦 | Generated **and committed** |
+| Mark      | Meaning                                |
+| --------- | -------------------------------------- |
+| ✅        | Built and verified                     |
+| ⬜        | Not yet created                        |
+| **P0–P8** | Phase it appears in                    |
+| 🔒        | Shared — propose to Gerald, never edit |
+| ⚙️        | Generated output, never hand-edited    |
+| 🚫        | Gitignored                             |
+| 📦        | Generated **and committed**            |
 
 **Ownership:**
 **Console session** owns `core/` and `apps/console`.
@@ -249,15 +250,17 @@ C:\dev\tessa\
 
 Down from eight to five.
 
-| # | Gap | Why it matters |
-|---|---|---|
-| **1** | **README `## License` section** | Gerald's step didn't land. `COPYRIGHT.md` exists and is correct; the README pointer doesn't. |
-| **2** | **`docs/decisions/`** | Six reversals have real reasoning behind them. Without records they get re-litigated by the next session. |
-| **3** | **`.github/workflows/ci.yml`** | `check-contract.mjs` exists but nothing runs it automatically. |
-| **4** | **`scripts/bootstrap.ps1`** | `npm run bootstrap` covers Node; nothing sets up the Python venv in one command. |
-| **5** | **`core/test_auth.py` location** | Still at `core/` root; `core/tests/` now exists. |
+| #     | Gap                              | Why it matters                                                                                            |
+| ----- | -------------------------------- | --------------------------------------------------------------------------------------------------------- |
+| **1** | **README `## License` section**  | Gerald's step didn't land. `COPYRIGHT.md` exists and is correct; the README pointer doesn't.              |
+| **2** | **`docs/decisions/`**            | Six reversals have real reasoning behind them. Without records they get re-litigated by the next session. |
+| **3** | **`.github/workflows/ci.yml`**   | `check-contract.mjs` exists but nothing runs it automatically.                                            |
+| **4** | **`scripts/bootstrap.ps1`**      | `npm run bootstrap` covers Node; nothing sets up the Python venv in one command.                          |
+| **5** | **`core/test_auth.py` location** | Still at `core/` root; `core/tests/` now exists.                                                          |
 
 ---
+
+docs/orb_ultron_reference.html: the new Ultron Orb design. It replaces orb_reference.html and orb_interface_reference.html. Where they disagree, this file wins.
 
 ## npm scripts
 
