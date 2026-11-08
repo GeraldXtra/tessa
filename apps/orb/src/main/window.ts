@@ -366,6 +366,7 @@ function showAndDecide(window: BrowserWindow, start: StartDecision): void {
   const seen: string[] = [];
   const hooked = [WM_ACTIVATE, WM_SETFOCUS, WM_ACTIVATEAPP, WM_NCACTIVATE];
   let done = false;
+  let flashStopped = false;
   let timer: NodeJS.Timeout | null = null;
   const finish = (granted: boolean, why: string): void => {
     if (done) return;
@@ -386,7 +387,17 @@ function showAndDecide(window: BrowserWindow, start: StartDecision): void {
   window.hookWindowMessage(WM_NCACTIVATE, (w) => {
     const v = low(w);
     seen.push(`NCACTIVATE(${v}) +${ms()}`);
-    if (v !== 0) finish(true, 'WM_NCACTIVATE TRUE');
+    if (v !== 0) {
+      finish(true, 'WM_NCACTIVATE TRUE');
+      return;
+    }
+    if (flashStopped) return;
+    flashStopped = true;
+    setImmediate(() => {
+      if (done || window.isDestroyed()) return;
+      window.flashFrame(false);
+      seen.push(`flash stopped +${ms()}`);
+    });
   });
   window.hookWindowMessage(WM_ACTIVATE, (w) => {
     seen.push(`ACTIVATE(${low(w) & 0xffff}) +${ms()}`);

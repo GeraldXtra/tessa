@@ -89,7 +89,8 @@ export type DevAction =
   | 'input'
   | 'tray'
   | 'mouse'
-  | 'linkdrop';
+  | 'linkdrop'
+  | 'chord';
 
 export interface DevStep {
   action: DevAction;
@@ -120,6 +121,7 @@ const ACTIONS: readonly DevAction[] = [
   'tray',
   'mouse',
   'linkdrop',
+  'chord',
 ];
 
 /**
@@ -518,6 +520,12 @@ export async function runDevScript(
       const y = Math.round(r.top + r.height / 2);
       report(`SENDMOUSE ${x} ${y}`);
       report(`DEV-DRIVE ${i} mouse "${step.arg}" click at ${x},${y} requested from main (webContents.sendInputEvent) t=${performance.now().toFixed(1)} wall=${Date.now()}`);
+      continue;
+    }
+
+    if (step.action === 'chord') {
+      report(`CHORD ${step.arg.trim()}`);
+      report(`DEV-DRIVE ${i} chord ${step.arg.trim()} requested from main (dev-only hook, the callbacks Windows sends for it) t=${performance.now().toFixed(1)} wall=${Date.now()}`);
       continue;
     }
 

@@ -902,7 +902,11 @@ if (!instrumentedDevLaunch && !app.requestSingleInstanceLock()) {
         jobTable.apply(event, Date.now());
         publishJobs();
       },
-      onVoiceLevel: (level, seq, ts) => broadcast(IPC.voiceLevel, { level, seq, ts, mainAt: Date.now() }),
+      onVoiceLevel: (level, seq, ts) => {
+        const mainAt = Date.now();
+        if (seq === 1 || level === 0) log(`voice level ${level === 0 ? 'FINAL 0' : 'FIRST'} seq=${seq ?? 'none'} ts=${ts} main wall=${mainAt}`);
+        broadcast(IPC.voiceLevel, { level, seq, ts, mainAt });
+      },
       onVoiceWords: (words) => {
         log(`voice words: ${words.words.length} for ${words.messageId || '(no id)'}`);
         broadcast(IPC.voiceWords, words);
@@ -1011,6 +1015,7 @@ if (!instrumentedDevLaunch && !app.requestSingleInstanceLock()) {
         const n = detail ? Object.values(detail).filter(Boolean).length : 0;
         log(`agent state: ${state}${n ? ` (+${n} detail field${n === 1 ? '' : 's'})` : ''}`);
         broadcast(IPC.agentStateChanged, { state, detail: detail ?? null, ts, arrivedAt: Date.now() });
+        ptt.herState(state);
         lastAgentState = state;
         refreshTray();
       },
@@ -1494,6 +1499,26 @@ if (!instrumentedDevLaunch && !app.requestSingleInstanceLock()) {
                 : 'no tray yet';
           log(`TRAY-HOOK ${id} at wall=${Date.now()}: ${what} (a dev-only hook calling the handler the tray calls; the real tray is Windows')`);
         }
+        const chordHook = /^CHORD (tap|hold (\d{2,5}))$/.exec(String(line));
+        if (chordHook && instrumented) {
+          const holdMs = chordHook[2] ? Number(chordHook[2]) : 0;
+          const at = Date.now();
+          log(`CHORD-HOOK ${holdMs ? `hold ${holdMs} ms` : 'tap'} at wall=${at}: runs the chord callback Windows would run, then its repeats every 34 ms from 511 ms while held (dev-only; the real chord is Windows')`);
+          ptt.chordPressed();
+          if (holdMs > 511) {
+            setTimeout(() => {
+              ptt.chordPressed();
+              const repeat = setInterval(() => {
+                if (Date.now() - at >= holdMs) {
+                  clearInterval(repeat);
+                  log(`CHORD-HOOK released at wall=${Date.now()} (no more repeats)`);
+                  return;
+                }
+                ptt.chordPressed();
+              }, 34);
+            }, 511);
+          }
+        }
         const m = /^CAPTURE ([A-Za-z0-9_-]{1,40})$/.exec(String(line));
         const dir = process.env['TESSA_CAPTURE_DIR'];
         if (m && dir) {
@@ -1712,6 +1737,7 @@ if (!instrumentedDevLaunch && !app.requestSingleInstanceLock()) {
     orbTray = new OrbTray(trayActions, log, screen.getPrimaryDisplay().scaleFactor);
     const trayClose = !instrumented || process.argv.includes('--dev-tray-close');
     let sessionEndAt = 0;
+    let closeNoted = false;
 
     function prepareOrbWindow(win: BrowserWindow): void {
       if (orbTray) win.setIcon(orbTray.windowIcon(trayView()));
@@ -1744,6 +1770,7 @@ if (!instrumentedDevLaunch && !app.requestSingleInstanceLock()) {
         }
         win.hide();
         log(`CLOSE -> hidden to the tray at wall=${Date.now()}; Quit in the tray ends the Orb`);
+        if (!closeNoted && orbTray?.note('Tessa is still running in the tray. Quit is in the tray menu.')) closeNoted = true;
       });
       win.on('query-session-end', (event) => {
         sessionEndAt = Date.now();

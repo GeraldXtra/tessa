@@ -120,6 +120,9 @@ export class OrbTray {
   create(view: TrayView, windows: () => BrowserWindow[]): void {
     this.tray = new Tray(this.imagesFor(trayColourToken(view)).tray);
     this.tray.on('click', () => this.actions.click());
+    this.tray.on('balloon-show', () => this.log(`TRAY note shown by Windows at wall=${Date.now()}`));
+    this.tray.on('balloon-closed', () => this.log(`TRAY note closed by Windows at wall=${Date.now()}`));
+    this.tray.on('balloon-click', () => this.log(`TRAY note clicked at wall=${Date.now()}`));
     this.colourKey = '';
     this.menuKey = '';
     this.update(view, windows);
@@ -166,6 +169,13 @@ export class OrbTray {
       { id: 'restart', label: 'Restart', click: () => a.restart() },
       { id: 'quit', label: 'Quit', click: () => a.quit() },
     ];
+  }
+
+  note(text: string): boolean {
+    if (!this.tray || this.tray.isDestroyed()) return false;
+    this.tray.displayBalloon({ title: '', content: text, iconType: 'none', noSound: true });
+    this.log(`TRAY note asked of Windows at wall=${Date.now()}: "${text}"`);
+    return true;
   }
 
   hook(id: string): string {

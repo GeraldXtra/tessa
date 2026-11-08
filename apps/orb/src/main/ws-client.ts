@@ -398,6 +398,7 @@ export class DaemonConnection {
   private fixtureThink: NodeJS.Timeout | null = null;
   private fixtureVoice: { timer: NodeJS.Timeout; companionId: string; seq: number } | null = null;
   private fixtureState = 'idle';
+  private fixtureListening = false;
 
   constructor(options: DaemonConnectionOptions) {
     this.opts = options;
@@ -438,6 +439,7 @@ export class DaemonConnection {
    * connected" instead of showing a claim that was never sent.
    */
   sendPushToTalk(action: 'start' | 'stop'): boolean {
+    if (this.fixture) return this.fixturePushToTalk(action);
     if (!this.socket || this.socket.readyState !== WebSocket.OPEN) {
       this.opts.onVoiceRefused(action, 'not connected to the daemon');
       return false;
@@ -739,40 +741,86 @@ export class DaemonConnection {
         setTimeout(() => this.fixtureSetState(companionId, 'thinking'), 30);
         this.fixtureThink = setTimeout(() => {
           this.fixtureThink = null;
-          const line = { companionId, message: { messageId: ulid(), role: 'assistant', text: turn.text, ts: stamp(), via: 'typed' } };
-          const speakMs = turn.speakMs ?? 0;
-          if (speakMs <= 0) {
-            this.ingestFixture('evt.transcript.message', line, null);
-            this.fixtureSetState(companionId, 'idle');
-            return;
-          }
-          const hz = Math.max(1, Math.min(120, turn.levelHz ?? 30));
-          const gapAt = turn.gapAtMs ?? -1;
-          const gapMs = turn.gapMs ?? 0;
-          this.fixtureEndVoice(true);
-          this.fixtureSetState(companionId, 'speaking');
-          this.ingestFixture('evt.transcript.message', line, null);
-          this.opts.log(`FIXTURE VOICE ${hz} Hz for ${speakMs} ms${gapMs > 0 ? `, no levels ${gapAt}-${gapAt + gapMs} ms` : ''} — a synthetic level shape, not her voice`);
-          const started = Date.now() + 200;
-          const voice = { timer: setInterval(() => {
-            const ms = Date.now() - started;
-            if (ms < 0) return;
-            const t = ms / 1000;
-            if (ms >= speakMs) {
-              this.fixtureEndVoice(true);
-              this.fixtureSetState(companionId, 'idle');
-              this.opts.log(`FIXTURE VOICE done: ${voice.seq} levels`);
-              return;
-            }
-            voice.seq += 1;
-            if (ms >= gapAt && ms < gapAt + gapMs) return;
-            const level = Math.min(1, Math.max(0, 0.15 + 0.6 * Math.abs(Math.sin(2 * Math.PI * 2.3 * t)) * (0.6 + 0.4 * Math.sin(2 * Math.PI * 0.7 * t))));
-            this.ingestFixture('evt.voice.amplitude', { companionId, level, seq: voice.seq }, null);
-          }, 1000 / hz), companionId, seq: 0 };
-          this.fixtureVoice = voice;
+          this.fixtureSpeak(companionId, turn, 'typed');
         }, thinkMs);
       }, ackMs);
     });
+  }
+
+  private fixturePushToTalk(action: 'start' | 'stop'): boolean {
+    if (this.status.phase !== 'connected') {
+      this.opts.onVoiceRefused(action, 'not connected to the daemon');
+      return false;
+    }
+    const companionId = 'tessa';
+    const stamp = (): string => new Date().toISOString().replace(/(\.\d{3})\d*Z$/, '$1Z');
+    this.opts.log(`VOICE-OUT ${action} t=${Date.now()} FIXTURE: nothing leaves this process`);
+    const was = this.fixtureListening;
+    if (action === 'start') {
+      if (this.fixtureThink) {
+        clearTimeout(this.fixtureThink);
+        this.fixtureThink = null;
+      }
+      if (this.fixtureEndVoice(true)) this.opts.log(`FIXTURE barge-in: the synthetic voice is cut, final level 0 sent t=${Date.now()}`);
+      this.fixtureListening = true;
+      this.fixtureSetState(companionId, 'listening');
+    } else if (was) {
+      this.fixtureListening = false;
+      this.fixtureSetState(companionId, 'thinking');
+      const typed = this.fixtureTyped;
+      const turn = typed && typed.answers.length > 0 ? typed.answers[this.fixtureAnswerIdx % typed.answers.length] : undefined;
+      this.fixtureAnswerIdx += 1;
+      this.fixtureThink = setTimeout(() => {
+        this.fixtureThink = null;
+        if (!turn) {
+          this.fixtureSetState(companionId, 'idle');
+          return;
+        }
+        this.ingestFixture('evt.transcript.message', { companionId, message: { messageId: ulid(), role: 'user', text: 'FIXTURE TEXT, not his words.', ts: stamp(), via: 'voice' } }, null);
+        this.fixtureSpeak(companionId, turn, null);
+      }, turn?.thinkMs ?? typed?.thinkMs ?? 900);
+    }
+    const active = this.fixtureListening;
+    setTimeout(() => {
+      this.opts.log(`voice.pushToTalk ${action} → mic ${active ? 'CLAIMED' : 'released'}${was === active ? ' (no change)' : ''} FIXTURE`);
+      this.opts.onVoiceAck(action, active);
+    }, 3);
+    return true;
+  }
+
+  private fixtureSpeak(companionId: string, turn: FixtureTurn, via: string | null): void {
+    const stamp = (): string => new Date().toISOString().replace(/(\.\d{3})\d*Z$/, '$1Z');
+    const line = { companionId, message: { messageId: ulid(), role: 'assistant', text: turn.text, ts: stamp(), ...(via ? { via } : {}) } };
+    const speakMs = turn.speakMs ?? 0;
+    if (speakMs <= 0) {
+      this.ingestFixture('evt.transcript.message', line, null);
+      this.fixtureSetState(companionId, 'idle');
+      return;
+    }
+    const hz = Math.max(1, Math.min(120, turn.levelHz ?? 30));
+    const gapAt = turn.gapAtMs ?? -1;
+    const gapMs = turn.gapMs ?? 0;
+    this.fixtureEndVoice(true);
+    this.fixtureSetState(companionId, 'speaking');
+    this.ingestFixture('evt.transcript.message', line, null);
+    this.opts.log(`FIXTURE VOICE ${hz} Hz for ${speakMs} ms${gapMs > 0 ? `, no levels ${gapAt}-${gapAt + gapMs} ms` : ''} — a synthetic level shape, not her voice`);
+    const started = Date.now() + 200;
+    const voice = { timer: setInterval(() => {
+      const ms = Date.now() - started;
+      if (ms < 0) return;
+      const t = ms / 1000;
+      if (ms >= speakMs) {
+        this.fixtureEndVoice(true);
+        this.fixtureSetState(companionId, 'idle');
+        this.opts.log(`FIXTURE VOICE done: ${voice.seq} levels`);
+        return;
+      }
+      voice.seq += 1;
+      if (ms >= gapAt && ms < gapAt + gapMs) return;
+      const level = Math.min(1, Math.max(0, 0.15 + 0.6 * Math.abs(Math.sin(2 * Math.PI * 2.3 * t)) * (0.6 + 0.4 * Math.sin(2 * Math.PI * 0.7 * t))));
+      this.ingestFixture('evt.voice.amplitude', { companionId, level, seq: voice.seq }, null);
+    }, 1000 / hz), companionId, seq: 0 };
+    this.fixtureVoice = voice;
   }
 
   startFixture(daemonVersion: string, typed: FixtureTyped | null = null): void {

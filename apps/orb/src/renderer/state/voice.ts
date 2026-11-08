@@ -70,6 +70,7 @@ function reveal(why: string): void {
 }
 
 export function noteRawState(state: string): void {
+  const prev = rawStateStore.get();
   rawStateStore.set(state);
   const turn = turnStore.get();
   if (turn) {
@@ -82,6 +83,12 @@ export function noteRawState(state: string): void {
   if (state === 'speaking') return;
   const cap = herCaptionStore.get();
   if (!cap) return;
+  if (prev === 'speaking' && state === 'listening') {
+    clearTimers();
+    herCaptionStore.set(null);
+    report(`CAPTION cleared: she went from speaking straight to listening (cut off to listen to him) messageId=${cap.messageId} wall=${Date.now()}`);
+    return;
+  }
   if (cap.phase === 'wait') reveal(`she left speaking (${state}) before a level arrived`);
   else scheduleFade();
 }

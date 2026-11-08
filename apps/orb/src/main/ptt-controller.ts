@@ -60,6 +60,12 @@ import type { MicState, OrbNotification, PttMode } from '../shared/ipc-contract.
  */
 export const CLAIM_MAX_MS = 90_000;
 
+export const REPEAT_WAIT_MS = 1200;
+
+export const RELEASE_GAP_MS = 150;
+
+type ChordPhase = 'idle' | 'pressed' | 'holding' | 'open' | 'ending';
+
 export interface PttControllerOptions {
   /** Returns false if there is no socket; the daemon's reply arrives later. */
   send: (action: 'start' | 'stop') => boolean;
@@ -87,6 +93,14 @@ export class PttController {
 
   private capTimer: NodeJS.Timeout | null = null;
   private noteSeq = 0;
+
+  private phase: ChordPhase = 'idle';
+  private stopInFlight = false;
+  private callbacks = 0;
+  private chordAt = 0;
+  private lastChordAt = 0;
+  private tapTimer: NodeJS.Timeout | null = null;
+  private gapTimer: NodeJS.Timeout | null = null;
 
   constructor(options: PttControllerOptions) {
     this.opts = options;
@@ -117,6 +131,9 @@ export class PttController {
     if (this.claimed || this.startInFlight) this.request('stop');
     this.mode = mode;
     this.keyDown = false;
+    this.clearTap();
+    this.clearGap();
+    this.phase = 'idle';
     this.opts.log(`ptt mode → ${mode}`);
     this.publish();
   }
@@ -126,7 +143,92 @@ export class PttController {
   /** The global chord fired. globalShortcut gives a press and nothing else. */
   chordPressed(): void {
     if (this.mode === 'hold') return; // the chord is not registered in hold mode
-    this.toggle();
+    const now = Date.now();
+    this.callbacks += 1;
+    const sinceLast = this.lastChordAt ? now - this.lastChordAt : -1;
+    this.lastChordAt = now;
+    this.opts.log(`PTT chord callback #${this.callbacks} phase=${this.phase} sinceLast=${sinceLast} ms wall=${now}`);
+    if (this.phase === 'open' && !this.claimed && !this.startInFlight) this.phase = 'idle';
+    switch (this.phase) {
+      case 'idle':
+        this.phase = 'pressed';
+        this.chordAt = now;
+        this.request('start');
+        this.armTap();
+        return;
+      case 'pressed':
+        this.clearTap();
+        this.phase = 'holding';
+        this.opts.log(`PTT held: Windows repeated the chord ${now - this.chordAt} ms after the press; letting go ends his turn`);
+        this.armGap();
+        return;
+      case 'holding':
+      case 'ending':
+        this.armGap();
+        return;
+      case 'open':
+        this.phase = 'ending';
+        this.opts.log('PTT pressed again after a tap: his turn ends now');
+        this.request('stop');
+        this.armGap();
+        return;
+    }
+  }
+
+  herState(state: string): void {
+    if (!this.claimed || this.startInFlight || this.stopInFlight || state === 'listening') return;
+    this.claimed = false;
+    this.since = null;
+    this.clearCap();
+    if (this.phase === 'pressed' || this.phase === 'open') {
+      this.clearTap();
+      this.phase = 'idle';
+    }
+    this.opts.log(`PTT segment closed by her (state ${state}); the Orb's claim ends here and sends no stop wall=${Date.now()}`);
+    this.publish();
+  }
+
+  private armTap(): void {
+    this.clearTap();
+    this.tapTimer = setTimeout(() => {
+      this.tapTimer = null;
+      if (this.phase !== 'pressed') return;
+      this.phase = 'open';
+      this.opts.log(`PTT tap: no repeat within ${REPEAT_WAIT_MS} ms of the press; her silence detector ends his turn, or a second press does`);
+      this.publish();
+    }, REPEAT_WAIT_MS);
+  }
+
+  private clearTap(): void {
+    if (this.tapTimer) {
+      clearTimeout(this.tapTimer);
+      this.tapTimer = null;
+    }
+  }
+
+  private armGap(): void {
+    this.clearGap();
+    this.gapTimer = setTimeout(() => this.onGap(), RELEASE_GAP_MS);
+  }
+
+  private clearGap(): void {
+    if (this.gapTimer) {
+      clearTimeout(this.gapTimer);
+      this.gapTimer = null;
+    }
+  }
+
+  private onGap(): void {
+    this.gapTimer = null;
+    const was = this.phase;
+    this.phase = 'idle';
+    if (was === 'holding') {
+      const now = Date.now();
+      this.opts.log(`PTT released: no repeat for ${RELEASE_GAP_MS} ms after the last one at wall=${this.lastChordAt}; held about ${this.lastChordAt - this.chordAt} ms; seen wall=${now}`);
+      if (this.claimed || this.startInFlight) this.request('stop');
+      else this.opts.log('PTT released after her own segment had closed: nothing to stop');
+    }
+    this.publish();
   }
 
   /** Renderer keydown/keyup. Only meaningful in hold mode. */
@@ -163,6 +265,8 @@ export class PttController {
   /** App is quitting. Best effort: a claim must not outlive the surface. */
   shutdown(): void {
     this.clearCap();
+    this.clearTap();
+    this.clearGap();
     if (this.claimed || this.startInFlight) this.opts.send('stop');
   }
 
@@ -178,12 +282,15 @@ export class PttController {
 
   private request(action: 'start' | 'stop'): void {
     if (action === 'start') this.startInFlight = true;
-    this.opts.send(action);
+    else this.stopInFlight = true;
+    const sent = this.opts.send(action);
+    this.opts.log(`PTT ${action} ${sent ? 'sent' : 'NOT sent'} wall=${Date.now()}`);
     this.publish();
   }
 
   onAck(action: 'start' | 'stop', active: boolean): void {
     this.startInFlight = false;
+    if (action === 'stop') this.stopInFlight = false;
     this.lastError = null;
     const was = this.claimed;
     this.claimed = active;
@@ -201,6 +308,7 @@ export class PttController {
 
   onRefused(action: 'start' | 'stop', detail: string): void {
     this.startInFlight = false;
+    if (action === 'stop') this.stopInFlight = false;
     this.lastError = detail;
 
     // Fail closed on BOTH actions. A refused `start` never claimed anything; a
