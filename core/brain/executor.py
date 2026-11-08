@@ -214,7 +214,11 @@ class Executor:
             # clears the flag.
             self._log("REFUSED", call.name, str(refusal), self._tier_of(call.name),
                       actor=self._actor_of(call.origin))
-            sources = ", ".join(getattr(self.session, "sources", []) or []) or "a web page"
+            listed = list(getattr(self.session, "sources", []) or [])
+            if listed and all(s == "program output" for s in listed):
+                return ("No, Emperor. What the program printed is still in front of me, and that was not a "
+                        "read-only action. Say forget that output and ask me again.")
+            sources = ", ".join(listed) or "a web page"
             tried = ""
             if self.last_injection:
                 tried = (f" That page also carried "
@@ -1544,8 +1548,13 @@ class Executor:
         except InjectionRefusal as refusal:
             self._log("REFUSED", tool, f"the follow-up was held back by the fence: {refusal}", self._tier_of(tool),
                       actor=origin)
-            sources = ", ".join(getattr(self.session, "sources", []) or []) or "content from outside"
-            return (f"I have not put it on the card, Emperor: I have {sources} in front of me, and the fence wins. "
+            listed = list(getattr(self.session, "sources", []) or [])
+            if listed and all(s == "program output" for s in listed):
+                return ("I have not put it on the card, Emperor: what the program printed is still in front of me, "
+                        "and I never raise a card while it is. Say forget that output, then say run the program "
+                        "you wrote.")
+            sources = ", ".join(listed) or "content from outside"
+            return (f"I have not put it on the card, Emperor: I have {sources} in front of me, so I held it back. "
                     f"Say forget the page, then say run the program you wrote.")
 
     #: The tool names that predate `core/tools/REGISTRY` and are still served by

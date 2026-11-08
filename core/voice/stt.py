@@ -46,8 +46,8 @@ CPU_THREADS = 4
 #: verbatim without it.
 #: UPDATED FROM HIS ACTUAL TRANSCRIPTS. The old list was proper nouns from an
 #: earlier sprint and had gone stale — meanwhile the words he says every day
-#: were mangled: "documents" -> "Taluts", "tweet that I'm building an AI
-#: assistant" -> a plural noun and a comma. Priming is measured as a 2x
+#: were mangled: "documents" -> "Taluts", and a spoken request to post on X
+#: came back as a plural noun and a comma. Priming is measured as a 2x
 #: SPEED SAVING as well as an accuracy fix, so a longer, RELEVANT list costs
 #: nothing and is exactly its job.
 #:
@@ -62,21 +62,21 @@ CPU_THREADS = 4
 #: them, the apps he actually opens, and the domain words that keep coming back
 #: concatenated.
 #: FULL PHRASES, NOT JUST NOUNS. The noun list fixed folder names and did
-#: nothing for connected speech: "tweet that I'm building an AI assistant" came
+#: nothing for connected speech: a spoken request to post on X came
 #: back as a plural noun and a cut-off word. `initial_prompt` is
 #: decoder CONDITIONING — it biases the language model toward the shapes it
 #: contains, so a list of isolated nouns primes isolated nouns. Sentences prime
 #: sentences.
 VOCABULARY_PRIME = (
-    "Tessa, open my downloads. Tessa, open my documents, desktop, pictures, "
-    "videos or music. Tessa, what is the weather? Tessa, what is a closure in "
+    "Tessa, open the budget spreadsheet. Tessa, open my documents, desktop, pictures, "
+    "videos or music. Tessa, how much battery is left? Tessa, which languages can you run, Python or "
     "JavaScript? Open Chrome, Google, WhatsApp, VS Code or Explorer. "
-    "Tweet that I am building an AI assistant. Post this to X. Repost that. "
+    "Tweet that my AI assistant can now run code. Post this to X. Repost that. "
     "Reply to post two. Read my timeline. Check my notifications. "
     "Forget that, start fresh. Yes, please. Go on. "
     # ── THE CONTROL PHRASES ──────────────────────────────────────────────────
     #
-    # His transcripts show "stop listening" coming back as two different garbles
+    # His transcripts show one short control phrase coming back as two different garbles
     # for the same three syllables, on clips whose own enrolment
     # RMS was 328-944 — so this is the decoder, not his microphone.
     #
@@ -87,7 +87,7 @@ VOCABULARY_PRIME = (
     # phrases primes isolated phrases, which is the mistake the comment above
     # records having already made once.
     "Hey Tessa. Hey Tessa, are you there? Stop listening. Tessa, stop listening. "
-    "Go to sleep. Stop the wake word. Go back to sleep, Tessa. "
+    "That is everything. Stop the wake word. That will be all, Tessa. "
     "Stop. Be quiet. Cancel that. "
     "google.com, x.com, web.whatsapp.com, github.com. "
     # ── THE MACHINE-CONTROL NOUNS, AND WHY THEY ARE NOUNS ────────────────────

@@ -73,7 +73,7 @@ _FILES = [
     ),
     _spec(
         name="fs.open", tier="green", capability="fs.open", handler=files.open_path,
-        phrasings=("open my downloads", "open that file", "downloads"),
+        phrasings=("open the budget spreadsheet", "open that file", "downloads"),
         success="Open, Emperor.",
         audit="open {path}",
     ),
@@ -901,7 +901,7 @@ _CODE = [
              "protected folder; a file she wrote goes to code.run_mine.",
     ),
     _spec(
-        name="code.write", tier="green", capability="code.write", handler=coding.write_program,
+        name="code.write", tier="amber", capability="code.write", handler=coding.write_program,
         phrasings=("write a python program that prints the first ten primes", "write a c++ program that adds two numbers"),
         success="{said}",
         failure="I did not write it, sir. {reason} {alternative}",
@@ -913,7 +913,7 @@ _CODE = [
         name="code.run_mine", tier="red", capability="code.run_own", handler=coding.run_mine, holds=True,
         resolve=coding.resolve_mine, describe=coding.describe_mine, card_provenance="agent",
         frozen=("path", "language", "file", "code", "sha256", "runs_in", "time_limit", "timeout_s", "lines",
-                "runs_as", "name", "which"),
+                "runs_as", "name", "which", "argv", "arguments", "goes_online"),
         phrasings=("run the program you wrote", "run primes.py from your code folder"),
         success="{said}",
         failure="I did not run it, sir. {reason} {alternative}",

@@ -130,6 +130,7 @@ class AudioBus:
         self._on_level = on_level
         self._on_done = on_done
         self._play: Playback | None = None
+        self.last_audio_end: float | None = None
 
     # ── state ────────────────────────────────────────────────────────────────
 
@@ -165,6 +166,12 @@ class AudioBus:
     @property
     def playing(self) -> Playback | None:
         return self._play if self.is_speaking else None
+
+    def spoke_within(self, seconds: float) -> bool:
+        if self.is_speaking:
+            return True
+        end = self.last_audio_end
+        return end is not None and time.perf_counter() - end <= seconds
 
     # ── playback ─────────────────────────────────────────────────────────────
 
@@ -236,6 +243,7 @@ class AudioBus:
                 return
             play.final_sent = True
             play.t_end = time.perf_counter()
+            self.last_audio_end = play.t_end
             if not play.announced:
                 play.held = []
                 return

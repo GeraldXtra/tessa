@@ -923,6 +923,14 @@ def _code_argv(text: str) -> list[str]:
     return out
 
 
+def _code_with(rest: str) -> tuple[list[str], str]:
+    mw = re.search(r"\s*,?\s*\b(?:with|passing|using)\s+(?:the\s+)?(?:arguments?|args?|inputs?|numbers?|values?|"
+                   r"words?)?\s*(?P<a>.+)$", rest, re.I)
+    if not mw:
+        return [], rest
+    return _code_argv(mw.group("a")), rest[:mw.start()]
+
+
 def _code_language(raw: str | None) -> str | None:
     from core.tools import langs
 
@@ -980,9 +988,12 @@ def _fix_args(m: "re.Match[str]") -> dict[str, Any]:
 
 
 def _run_mine_args(m: "re.Match[str]") -> dict[str, Any]:
-    limit, _rest = _code_limit(str(m.groupdict().get("rest") or ""))
+    limit, rest = _code_limit(str(m.groupdict().get("rest") or ""))
+    argv, _rest = _code_with(rest)
     gd = m.groupdict()
     out: dict[str, Any] = {"name": gd["name"]} if gd.get("name") else {"which": "last"}
+    if argv:
+        out["argv"] = argv
     if limit:
         out["timeout_s"] = limit
     return out
@@ -995,12 +1006,7 @@ def _keep_running(m: "re.Match[str]") -> dict[str, Any]:
 def _run_file_args(m: "re.Match[str]") -> dict[str, Any]:
     limit, rest = _code_limit(str(m["rest"] or ""))
     what = str(m["what"]).strip().strip('"')
-    argv: list[str] = []
-    mw = re.search(r"\s*,?\s*\b(?:with|passing|using)\s+(?:the\s+)?(?:arguments?|args?|inputs?|numbers?|values?|"
-                   r"words?)?\s*(?P<a>.+)$", rest, re.I)
-    if mw:
-        argv = _code_argv(mw.group("a"))
-        rest = rest[:mw.start()]
+    argv, rest = _code_with(rest)
     phrase = f"{what} {rest}".strip()
     if re.match(r"^[a-z]:[\\/]", what, re.I):
         path, how = what, "named"
@@ -1019,7 +1025,8 @@ def _run_file_args(m: "re.Match[str]") -> dict[str, Any]:
 
 
 def _run_it_args(m: "re.Match[str]") -> dict[str, Any]:
-    limit, _rest = _code_limit(str(m["rest"] or ""))
+    limit, rest = _code_limit(str(m["rest"] or ""))
+    argv, _rest = _code_with(rest)
     from core.tools import coding
 
     mine = {os.path.normcase(p) for _t, p in coding.recent_written()}
@@ -1027,10 +1034,14 @@ def _run_it_args(m: "re.Match[str]") -> dict[str, Any]:
         if r.kind == "file" and re.search(rf"\.{_CODE_EXT}$", r.value, re.I):
             if os.path.normcase(r.value) in mine:
                 out: dict[str, Any] = {"path": r.value}
+                if argv:
+                    out["argv"] = argv
                 if limit:
                     out["timeout_s"] = limit
                 return {"_tool": "code.run_mine", **out}
             out = {"path": r.value, "how": "it"}
+            if argv:
+                out["argv"] = argv
             if limit:
                 out["timeout_s"] = limit
             return out
@@ -1425,7 +1436,8 @@ _RULES: list[tuple[re.Pattern[str], str, Builder, str]] = [
      "Checking what I noted."),
 
     (re.compile(r"\b(?:forget|clear|drop)\b.*\b(?:page|site|article|what you read|"
-                r"what you just read)\b", re.I),
+                r"what you just read)\b|^\s*(?:please\s+)?(?:forget|clear|drop)\s+(?:that|the|this)\s+"
+                r"(?:program\s+)?output\s*[.!]*$", re.I),
      "context.forget", lambda m: {},
      "Forgetting it."),
 

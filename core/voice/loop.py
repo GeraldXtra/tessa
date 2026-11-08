@@ -54,6 +54,10 @@ from core.tools import runner as _runner
 #: own rule about opinions: say it once, never nag.
 EMPTY_TURNS_BEFORE_SPEAKING = 3
 
+NO_SPEECH_S = 8.0
+RECENT_SPEECH_S = 0.5
+ANSWER_HINT = "I have stopped listening, so press the talk key to answer me."
+
 #: What she says to a private message the router could not place (X direct
 #: messages, round 4, 2026-09-12). LOCAL, ALWAYS: "direct message ada bob
 #: saying …" is not a DM rule's shape and the classifier would have handed it
@@ -154,6 +158,8 @@ class Turn:
     #: dispatched all looked identical in the log — which is why the tool path
     #: being dead took three of Gerald's attempts to become visible.
     tools: list = field(default_factory=list)
+    dropped: str = ""
+    heard_sent: bool = False
 
 
 class VoiceLoop:
@@ -176,6 +182,7 @@ class VoiceLoop:
         on_message: Callable[[str, str], None] | None = None,
         on_stage: Callable[[str, float], None] | None = None,
         on_turn_timing: Callable[[dict], None] | None = None,
+        on_heard: Callable[[str], None] | None = None,
         dump_segments: bool = False,
         session=None,        # core.brain.provenance.SessionContext — the fence
         audit=None,          # core.security.audit.AuditLog
@@ -194,9 +201,16 @@ class VoiceLoop:
         self.bus = bus
         self._on_state = on_state
         self._on_message = on_message
+        self._on_heard = on_heard
         self._armed = False
         self._arm_lock = threading.Lock()
         self._closing = False
+        self._gen = 0
+        self._drop_reason = ""
+        self._turn_local = threading.local()
+        self._hint_given = False
+        self.last_barge = None
+        self.last_clean: tuple[int, int] | None = None
         # The fence and the audit log are INJECTED, not constructed here. The
         # daemon owns one of each; a voice loop that made its own would give the
         # microphone path a second, empty injection flag and a second, unchained
@@ -254,7 +268,41 @@ class VoiceLoop:
         everything through it means one source of truth rather than two that
         agree most of the time.
         """
+        gen = getattr(self._turn_local, "gen", None)
+        if gen is not None and gen != self._gen:
+            return
         self.bus.set_state(s, detail)
+
+    def _current(self, gen: int) -> bool:
+        return gen == self._gen
+
+    def abandon(self, reason: str) -> None:
+        with self._arm_lock:
+            self._gen += 1
+            self._drop_reason = reason
+
+    def _speak(self, gen: int, syn) -> bool:
+        with self._arm_lock:
+            if gen != self._gen:
+                return False
+            self._state(AgentState.SPEAKING)
+            self.bus.speak(syn.samples, syn.sample_rate)
+        return True
+
+    def _dropped(self, where: str, heard: str, t0: float, audio_s: float,
+                 intent: Intent = Intent.UNROUTED) -> Turn:
+        reason = self._drop_reason or "it was replaced"
+        self._stage(f"turn.dropped {where}: {reason} - nothing of it is said or shown", t0)
+        return Turn(heard=heard, said="", intent=intent, timing=TurnTiming(audio_s=audio_s), dropped=reason)
+
+    def _tell_heard(self, gen: int, heard: str) -> None:
+        if self._on_heard is None or not heard or not self._current(gen):
+            return
+        try:
+            self._on_heard(heard)
+            self._turn_local.heard_sent = True
+        except Exception:
+            pass
 
     def _ask_brain(self, question: str, t0: float) -> str:
         """
@@ -279,6 +327,10 @@ class VoiceLoop:
         """
         from core.brain.llm import QUALITY_ROUTINE, LLMUnavailable, Message
         from core.brain.repair import strip_wake_name
+
+        gen = getattr(self._turn_local, "gen", None)
+        if gen is not None and not self._current(gen):
+            return ""
 
         # HER NAME COMES OFF BEFORE THE MODEL SEES IT.
         #
@@ -343,6 +395,9 @@ class VoiceLoop:
         if not _human.clean:
             self._stage(f"brain.humanness {humanness.describe(_human)}", t0)
         self._stage(f"brain.returned {len(text)}ch", t0)
+        if gen is not None and not self._current(gen):
+            self._stage("brain.returned after its turn was dropped - not remembered", t0)
+            return ""
 
         # RECORD THE EXCHANGE — the model path only.
         #
@@ -396,8 +451,25 @@ class VoiceLoop:
         22.06 s segment contained 2.5 s of speech and 17 s of room, and Whisper
         was billed for all of it.
         """
-        self.bus.stop("barge-in: owner pressed push-to-talk")
-        self.mic.arm()
+        with self._arm_lock:
+            self._gen += 1
+            self._drop_reason = "a new press replaced it"
+        speaking = self.bus.is_speaking
+        spoke = getattr(self.bus, "spoke_within", None)
+        recent = speaking or (callable(spoke) and spoke(float(getattr(self.mic, "pre_roll_s", 1.0)) + RECENT_SPEECH_S))
+        cut = self.bus.stop("barge-in: owner pressed push-to-talk")
+        self.last_barge = cut if speaking else None
+        self.last_clean = None
+        if recent:
+            clean = getattr(self.mic, "arm_clean", None)
+            if callable(clean):
+                self.last_clean = clean()
+            else:
+                ring = self.mic.flush_ring() if hasattr(self.mic, "flush_ring") else 0
+                self.mic.arm()
+                self.last_clean = (int(ring), 0)
+        else:
+            self.mic.arm()
         with self._arm_lock:
             self._armed = True
             self._closing = False
@@ -413,7 +485,14 @@ class VoiceLoop:
                     if not self._armed or self._closing:
                         return
                     self._closing = True
+                    if reason == "no-speech":
+                        self._armed = False
                 self._stage_note(f"vad.closed reason={reason}")
+                if reason == "no-speech":
+                    self.mic.disarm()
+                    with self._arm_lock:
+                        self._closing = False
+                    self._state(AgentState.IDLE)
                 on_auto_stop(reason)
 
             self.mic.watch_for_silence(
@@ -421,6 +500,7 @@ class VoiceLoop:
                 silence_ms=int(cfg.get("vad_silence_ms", 1200)),
                 floor_rms=float(cfg.get("vad_floor_rms", 150)),
                 hard_cap_s=float(cfg.get("vad_hard_cap_s", 20)),
+                start_timeout_s=float(cfg.get("vad_start_timeout_s", NO_SPEECH_S)),
             )
 
     def _stage_note(self, msg: str) -> None:
@@ -431,9 +511,21 @@ class VoiceLoop:
         """Key UP. Everything from here to first audio is the §4 budget."""
         with self._arm_lock:
             armed, self._armed, self._closing = self._armed, False, False
+            gen = self._gen
         if not armed:
             self._state(AgentState.IDLE)
             return None
+        self._turn_local.gen = gen
+        self._turn_local.heard_sent = False
+        try:
+            turn = self._turn(gen)
+            turn.heard_sent = bool(getattr(self._turn_local, "heard_sent", False))
+            return turn
+        finally:
+            self._turn_local.gen = None
+            self._turn_local.heard_sent = False
+
+    def _turn(self, gen: int) -> Turn:
         # A second press must end the segment INSTANTLY — his only escape hatch,
         # and he used it tonight. Cancelling first means the watcher cannot fire
         # a second turn behind this one.
@@ -527,6 +619,8 @@ class VoiceLoop:
             if is_private_utterance(tr.text) else f"transcribe.returned {tr.text[:40]!r}", t0)
 
         heard = tr.text.strip()
+        if not self._current(gen):
+            return self._dropped("after he was heard", heard, t0, cap.duration_s)
         # An empty transcript (silence, or a prime echo) must still land on a
         # state. Any path that returns without one leaves the sphere hanging,
         # which is the same bug as the missing `idle` after speaking.
@@ -587,8 +681,8 @@ class VoiceLoop:
             self._empty_turns = 0
             said = _pick(_TOO_QUIET) if getattr(tr, "too_quiet", False) else _pick(_SILENCE)
             syn = self.tts.synthesise(said)
-            self._state(AgentState.SPEAKING)
-            self.bus.speak(syn.samples, syn.sample_rate)
+            if not self._speak(gen, syn):
+                return self._dropped("before her microphone line", "", t0, cap.duration_s)
             if self._on_message is not None:
                 self._on_message("assistant", said)
             # STILL no memory entry: she is reporting a microphone fault, not
@@ -597,6 +691,7 @@ class VoiceLoop:
                         timing=TurnTiming(stt_s=t_stt - t0, audio_s=cap.duration_s))
 
         self._empty_turns = 0
+        self._tell_heard(gen, heard)
 
         # ── WHY THE REJECTION ABOVE IS SILENT ────────────────────────────────
         #
@@ -628,8 +723,8 @@ class VoiceLoop:
             if self._on_message is not None:
                 self._on_message("user", heard)
             syn = self.tts.synthesise(said)
-            self._state(AgentState.SPEAKING)
-            self.bus.speak(syn.samples, syn.sample_rate)
+            if not self._speak(gen, syn):
+                return self._dropped("before her forget line", heard, t0, cap.duration_s, Intent.TOOL)
             if self._on_message is not None:
                 self._on_message("assistant", said)
             return Turn(heard=heard, said=said, intent=Intent.TOOL,
@@ -651,8 +746,8 @@ class VoiceLoop:
             if self._on_message is not None:
                 self._on_message("user", heard)
             syn = self.tts.synthesise(answered)
-            self._state(AgentState.SPEAKING)
-            self.bus.speak(syn.samples, syn.sample_rate)
+            if not self._speak(gen, syn):
+                return self._dropped("before her answer to the hold", heard, t0, cap.duration_s, Intent.TOOL)
             if self._on_message is not None:
                 self._on_message("assistant", answered)
             return Turn(heard=heard, said=answered, intent=Intent.TOOL,
@@ -689,6 +784,8 @@ class VoiceLoop:
         routed = self.router.route(heard, **history_kwargs(self.router, self.conversation))
         t_route = self._stage(f"route.returned intent={routed.intent.value} calls={len(routed.calls)}"
                               + (f" doubt={routed.doubt!r}" if routed.doubt else ""), t0)
+        if not self._current(gen):
+            return self._dropped("after routing", heard, t0, cap.duration_s, routed.intent)
 
         # ── A DOUBTED FAST-PATH RESULT GETS A SECOND OPINION ─────────────────
         #
@@ -751,6 +848,8 @@ class VoiceLoop:
                 # model has said it is NOT one ("chat"). "Open My Taluts"
                 # resolves to a folder tool or to a clarifying question, not to
                 # a paragraph about opening Taluts.
+                if not self._current(gen):
+                    return self._dropped("before the intent model", heard, t0, cap.duration_s)
                 self._stage("intent.entered", t0)
                 res = intent_model.resolve(heard, self.brain,
                                            log=lambda m: self._stage(m, t0))
@@ -810,9 +909,13 @@ class VoiceLoop:
         # EVERY TOOL PATH SPEAKS, always, success or failure. A tool that runs
         # silently is indistinguishable from one that failed, which is why
         # Gerald pressed the chord three times — he had no way to tell.
+        ledger = getattr(self.executor, "ledger", None)
+        hold_before = ledger.pending if ledger is not None else None
         tool_results: list[str] = []
         if routed.calls or routed.plan:
             for call in routed.calls:
+                if not self._current(gen):
+                    return self._dropped(f"before {call.name} ran", heard, t0, cap.duration_s, routed.intent)
                 try:
                     self._stage(f"execute.entered {call.name}", t0)
                     tool_results.append(self.executor.run(call))
@@ -825,6 +928,8 @@ class VoiceLoop:
                         f"{type(exc).__name__}: {exc}", "Say it again and I will retry."))
                     self.tool_outcomes.append((call.name, False, f"{type(exc).__name__}: {exc}"))
             if routed.plan:
+                if not self._current(gen):
+                    return self._dropped("before the plan started", heard, t0, cap.duration_s, routed.intent)
                 try:
                     self._stage(f"plan.entered {[s.call.name for s in routed.plan]}", t0)
                     line, ran = self.executor.start_plan(routed.plan)
@@ -847,6 +952,8 @@ class VoiceLoop:
         # silent because of it.
         if not routed.speech:
             routed.speech = "Done, Emperor."
+        if not self._current(gen):
+            return self._dropped("before she answered", heard, t0, cap.duration_s, routed.intent)
 
         # ── "I'M DONE FOR NOW" / "STOP LISTENING" — LOCAL, NO MODEL CALL ─────
         #
@@ -883,13 +990,23 @@ class VoiceLoop:
             )
             return Turn(heard=heard, said="", intent=routed.intent, timing=timing)
 
+        hold_after = ledger.pending if ledger is not None else None
+        asks = ((hold_after is not None and hold_after is not hold_before)
+                or routed.speech.rstrip().endswith("?")
+                or (routed.intent is Intent.TOOL and not routed.calls and not routed.plan and "?" in routed.speech))
+        hinted = asks and not ends_session and not self._hint_given
+        if hinted:
+            routed.speech = f"{routed.speech} {ANSWER_HINT}"
+
         self._stage(f"synthesise.entered {len(routed.speech)}ch", t0)
         syn = self.tts.synthesise(" ".join(_FENCED.sub(" ", routed.speech).split()) or "Done, Emperor.")
         t_tts = self._stage(f"synthesise.returned {syn.duration_s:.2f}s", t0)
 
-        self._state(AgentState.SPEAKING)
         self._stage("playback.entered", t0)
-        self.bus.speak(syn.samples, syn.sample_rate)
+        if not self._speak(gen, syn):
+            return self._dropped("before she spoke", heard, t0, cap.duration_s, routed.intent)
+        if hinted:
+            self._hint_given = True
         t_play = self._stage("playback.returned", t0)
 
         if self._on_message is not None:

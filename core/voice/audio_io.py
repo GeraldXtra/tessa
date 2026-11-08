@@ -43,6 +43,7 @@ import sounddevice as sd
 SAMPLE_RATE = 16_000
 CHANNELS = 1
 DTYPE = "int16"
+DEFAULT_INPUT_LATENCY_S = 0.2
 
 
 def _resync_stderr() -> None:
@@ -242,6 +243,7 @@ class ArmedMicrophone:
         self._captured: list[np.ndarray] | None = None
         self._armed_at: float | None = None
         self._first_after_arm: float | None = None
+        self._drop = 0
         self.heard_speech = False
 
     @property
@@ -264,6 +266,12 @@ class ArmedMicrophone:
         if self._captured is not None:
             if self._first_after_arm is None:
                 self._first_after_arm = time.perf_counter()
+            if self._drop > 0:
+                cut = min(self._drop, len(block))
+                self._drop -= cut
+                block = block[cut:]
+                if not len(block):
+                    return
             self._captured.append(block.copy())
             return
         n = len(block)
@@ -335,6 +343,20 @@ class ArmedMicrophone:
         self._filled = 0
         return n
 
+    def input_latency_s(self) -> float:
+        try:
+            latency = float(self._stream.latency) if self._stream is not None else 0.0
+        except Exception:
+            latency = 0.0
+        return latency if latency > 0.0 else DEFAULT_INPUT_LATENCY_S
+
+    def arm_clean(self) -> tuple[int, int]:
+        dropped = self.flush_ring()
+        lead = int(round(self.input_latency_s() * SAMPLE_RATE))
+        self._drop = lead
+        self.arm()
+        return dropped, lead
+
     def _snapshot_ring(self) -> np.ndarray:
         """The ring in chronological order — this is the pre-roll."""
         size = len(self._ring)
@@ -354,6 +376,7 @@ class ArmedMicrophone:
         relative_ratio: float = 0.08,
         hard_cap_s: float = 20.0,
         poll_ms: int = 50,
+        start_timeout_s: float | None = None,
     ) -> threading.Thread:
         """
         Close the segment when HE stops talking — as a BACKGROUND WATCHER.
@@ -410,7 +433,7 @@ class ArmedMicrophone:
             reason = self._silence_loop(
                 silence_ms=silence_ms, floor_rms=floor_rms,
                 relative_ratio=relative_ratio, hard_cap_s=hard_cap_s,
-                poll_ms=poll_ms, stop_evt=stop_evt,
+                poll_ms=poll_ms, stop_evt=stop_evt, start_timeout_s=start_timeout_s,
             )
             if reason != "cancelled":
                 on_close(reason)
@@ -428,6 +451,7 @@ class ArmedMicrophone:
     def _silence_loop(
         self, *, silence_ms: int, floor_rms: float, relative_ratio: float,
         hard_cap_s: float, poll_ms: int, stop_evt: threading.Event,
+        start_timeout_s: float | None = None,
     ) -> str:
         t0 = time.perf_counter()
         last_speech = t0
@@ -440,6 +464,8 @@ class ArmedMicrophone:
             now = time.perf_counter()
             if now - t0 >= hard_cap_s:
                 return "hard-cap"
+            if start_timeout_s is not None and not heard_any and now - t0 >= start_timeout_s:
+                return "no-speech"
             chunks = self._captured
             if chunks is not None and len(chunks) > seen:
                 for blk in chunks[seen:]:
@@ -482,6 +508,7 @@ class ArmedMicrophone:
         """Stop claiming. Returns pre-roll + everything captured while armed."""
         post = self._captured or []
         self._captured = None
+        self._drop = 0
         tail = np.concatenate(post) if post else np.zeros(0, dtype=np.int16)
         samples = np.concatenate([self._pre_roll, tail]).astype(np.int16)
         latency = (

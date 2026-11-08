@@ -455,8 +455,8 @@ REFUSAL = ("I am not sure that is you, Emperor. "
 # of the feature that has to be handed over rather than delivered finished.
 
 ENROL_PROMPTS = [
-    "Tessa, open my downloads folder and show me what changed last night.",
-    "What is the weather like today, and how much of my budget is left?",
+    "Tessa, look inside the garden photos folder and show me what changed last night.",
+    "Will it be cold in Abuja tomorrow, and how much of my budget is left?",
     "Kill process four two four two, then tell me the time.",
     "I want you to search for the LedgerWatch repository and read me the summary.",
     "Good evening Tessa. Status report, please — memory, uptime, everything.",

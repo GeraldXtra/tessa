@@ -62,6 +62,7 @@ socket.create_connection = _fenced_create
 import core.bus as BUS
 import core.server as SRV
 from core.brain import intent_model, memory
+from core.brain import router as ROUTER
 from core.brain.approvals import APPROVAL_WINDOW_S
 from core.brain.claims import ClaimStore
 from core.brain.conversation import Conversation
@@ -91,6 +92,16 @@ def check(name: str, cond: bool, detail: str = "") -> None:
 
 def pc() -> float:
     return time.perf_counter()
+
+
+REAL_DATETIME = ROUTER.datetime
+FIXED_DAY = REAL_DATETIME(2026, 3, 14, 10, 30)
+
+
+class FixedDay(REAL_DATETIME):
+    @classmethod
+    def now(cls, tz: Any = None) -> Any:
+        return FIXED_DAY
 
 
 def pct(values: list[float], q: float) -> float:
@@ -677,6 +688,7 @@ async def t7_sessions() -> None:
     check("the empty segment was released, not turned into a turn",
           rig.mic.disarms == 1 and any("released an empty segment" in x for x in LOG)
           and not any(r.get("tool", "").startswith("voice.turn") for r in d.audit))
+    await until(lambda: rig.mic.arms >= 2 and rig.orb.states()[-1:] == ["listening"], 5.0)
     check("afterwards the conversation is still open and listening again",
           d.convo.open and d.voice.armed and d.ptt_active and rig.mic.arms == 2)
     st = rig.orb.states()
@@ -693,6 +705,7 @@ async def t7_sessions() -> None:
     Dev.probe = lambda t: during.append(bool(rig.mic.armed or d.voice.armed))
     before = len(Dev.streams)
     Dev.max_live = 0
+    ROUTER.datetime = FixedDay
     try:
         await say_typed(rig, "what time is it")
         await asyncio.sleep(0.6)
@@ -702,10 +715,11 @@ async def t7_sessions() -> None:
         await quiet(rig, 20.0)
     finally:
         Dev.probe = None
+        ROUTER.datetime = REAL_DATETIME
     s1, s2 = (Dev.streams[before], Dev.streams[before + 1]) if len(Dev.streams) >= before + 2 else (None, None)
     order = [rig.tts.text_of(s1), rig.tts.text_of(s2)] if s1 is not None else []
     check("his spoken turn is answered first, then the typed one (device order)",
-          len(order) == 2 and "October" in order[0] and ":" in order[1]
+          len(order) == 2 and FIXED_DAY.strftime("%B") in order[0] and ":" in order[1]
           and s1.ended_at is not None and s2.started_at is not None and s1.ended_at <= s2.started_at, str(order))
     check("never two answers playing at once", Dev.max_live == 1, str(Dev.max_live))
     check("his words were kept (his line is on the thread)",
@@ -717,7 +731,7 @@ async def t7_sessions() -> None:
              and fr["payload"]["message"]["text"] == "what day is it"]
     check("4c: his spoken line carries via voice", vline and vline[0].get("via") == "voice", str(vline))
     hline = [fr["payload"]["message"] for _t, fr, _n in rig.orb.frames if fr["type"] == "evt.transcript.message"
-             and fr["payload"]["message"]["role"] == "assistant" and "October" in fr["payload"]["message"]["text"]]
+             and fr["payload"]["message"]["role"] == "assistant" and FIXED_DAY.strftime("%B") in fr["payload"]["message"]["text"]]
     check("4c: her spoken-turn line keeps no via, as today", hline and "via" not in hline[0], str(hline))
     rig = await build()
     d = rig.d
@@ -730,7 +744,7 @@ async def t7_sessions() -> None:
     rig.mic.on_close("hard-cap")
     await quiet(rig, 20.0)
     check("once his segment ends she answers", len(Dev.streams) == before + 1 and rig.tts.said)
-    check("...and the conversation the chord opened keeps listening", d.convo.open and d.voice.armed)
+    check("...and then she stops listening: one question per press", not d.convo.open and not d.voice.armed)
 
 
 async def t8_interrupt() -> None:
@@ -865,8 +879,8 @@ async def t9_cancel() -> None:
     await quiet(rig)
     check("a cancel with no messageId stops a spoken (voice) answer too",
           s is not None and s.aborted_at is not None and reply["payload"].get("cancelled") is True)
-    check("...and the conversation the chord opened keeps listening afterwards", rig.d.convo.open and rig.d.voice.armed
-          and rig.orb.states()[-1] == "listening", str(rig.orb.states()[-3:]))
+    check("...and afterwards she is not listening: one question per press", not rig.d.convo.open
+          and not rig.d.voice.armed and rig.orb.states()[-1] != "listening", str(rig.orb.states()[-3:]))
     rig = await build()
     before = len(Dev.streams)
     await say_typed(rig, "what day is it")

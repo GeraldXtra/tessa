@@ -221,7 +221,7 @@ from core.voice.loop import VoiceLoop  # noqa: E402
 import inspect  # noqa: E402
 params = inspect.signature(VoiceLoop.__init__).parameters
 check("VoiceLoop accepts a speaker verifier", "speaker" in params)
-src = inspect.getsource(VoiceLoop.stop)
+src = inspect.getsource(VoiceLoop.stop) + inspect.getsource(VoiceLoop._turn)
 check("...and the turn actually CALLS verify() — not merely imports it",
       "self.speaker.verify(" in src)
 check("...and a rejection returns a SILENT turn (no `said`)",
@@ -250,13 +250,12 @@ check("...so the next pre-roll carries none of her voice",
       pre.size == 0 or float(np.abs(pre).max()) == 0.0,
       f"peak={float(np.abs(pre).max()) if pre.size else 0}")
 
-# ── 7. BOTH ENTRY PATHS OPEN THE SAME SESSION ────────────────────────────────
-print("\n7. both entry paths, and they are the same session")
+print("\n7. the chord asks one question per press; the wake phrase opens a session")
 server_src = (Path(__file__).resolve().parents[1] / "server.py").read_text(
     encoding="utf-8")
 
-check("the CHORD path opens a session",
-      'self.open_session("chord")' in server_src)
+check("the CHORD path opens no session: one question per press",
+      'open_session("chord")' not in server_src)
 check("the WAKE path opens a session",
       'daemon.open_session("wake")' in server_src)
 check("...both call the SAME method, so there is one lifecycle",

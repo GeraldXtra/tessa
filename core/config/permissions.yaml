@@ -123,7 +123,6 @@ tiers:
                            # one the owner is most likely to want to withdraw.
                            # Security is NOT readable — it needs elevation.
     - code.inspect
-    - code.write
 
   # ── AMBER — unattended ONLY inside a job the owner explicitly authorised ──
   amber:
@@ -211,6 +210,7 @@ tiers:
                            # inherits the click's caution rather than handing him
                            # coordinates he has no way to check.
     - code.run
+    - code.write
     - git.local
 
   # ── RED — ALWAYS requires explicit approval, no exceptions ────────────────

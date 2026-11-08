@@ -313,7 +313,7 @@ def _simple(key: str, exe_name: str, args: list[str], her: list[str], his: list[
         f = Found(key, spec.name, False, note="not installed")
         if other:
             f.only_his_terminal = True
-            f.note = f"on his PATH ({other}) but not on mine; restart me to see it"
+            f.note = f"on your PATH ({other}) but not on mine; restart me to see it"
         return f
     line, ms = _check(exe, args)
     return Found(key, spec.name, True, exe=exe, where=f"PATH: {exe}", version=line, version_from="one quick check",
@@ -435,7 +435,7 @@ def look() -> list[Found]:
         pass
     out.append(Found("powershell", "PowerShell", ps.is_file(), exe=str(ps) if ps.is_file() else "",
                      where=f"installed folder: {ps.parent}" if ps.is_file() else "", version=psver,
-                     version_from="registry", note="his execution policy decides; I never get round it"))
+                     version_from="registry", note="your execution policy decides; I never get round it"))
     cmd = os.environ.get("ComSpec") or str(Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32" / "cmd.exe")
     out.append(Found("batch", "batch", Path(cmd).is_file(), exe=cmd, where=f"Windows: {cmd}", version="cmd.exe",
                      version_from="Windows", note="a batch file takes no arguments in this step"))

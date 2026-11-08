@@ -397,8 +397,9 @@ check("only the error goes to the model, fenced as data, with secrets taken out"
       "UNTRUSTED EXTERNAL CONTENT" in prompt and "ZeroDivisionError" in prompt
       and "q7Zx9-plain-value-of-hers-31" not in prompt and SHAPED not in prompt, prompt[-200:])
 check("the fix is saved as a new file", coding.written()[-1]["path"] != str(bad) and coding.written()[-1]["fix_of"] == str(bad))
-check("the fence wins: the fix's card is held back while the error sits in her context",
-      not ex.approvals.pending and "the fence wins" in said, said[-200:])
+check("the fix's card is held back while the error sits in her context, said in plain words",
+      not ex.approvals.pending and "what the program printed is still in front of me" in said
+      and "forget that output" in said, said[-200:])
 coding.bind_brain(fake)
 ex = executor()
 said = new_turn(ex).run(ToolCall("code.write", {"language": "python", "task": "prints three lines", "run": True}, origin="human"))

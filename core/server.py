@@ -573,6 +573,8 @@ class TessaDaemon:
         self.ptt_active = False
         self.mic_stream_open = False
         self.mic_opened_at: float | None = None
+        self._voice_heard_id: str | None = None
+        self._segment_open_sent: bool | None = None
 
         # A THIRD FACT, and it is not either of the two above.
         #
@@ -949,6 +951,8 @@ class TessaDaemon:
                 }))
         if topic_matches(state["subs"], "evt.agent.state"):
             await self._send_state_snapshot(ws)
+        if topic_matches(state["subs"], "evt.voice.state"):
+            await ws.send(envelope("evt.voice.state", self._voice_state_payload()))
 
     async def _send_state_snapshot(self, ws: Any) -> None:
         for _ in range(3):
@@ -1213,11 +1217,15 @@ class TessaDaemon:
             turn = await asyncio.wait_for(
                 asyncio.to_thread(self.voice.stop), timeout=VOICE_TURN_STALL_S)
         except asyncio.TimeoutError:
+            abandon = getattr(self.voice, "abandon", None)
+            if callable(abandon):
+                abandon(f"it stalled for {VOICE_TURN_STALL_S:.0f} s")
             stages = getattr(self.voice, "stages", [])
             last = stages[-1][0] if stages else "no stage reached"
             trail = " -> ".join(f"{n}@{ms:.0f}ms" for n, ms in stages) or "none"
             log(f"!! VOICE TURN STALLED after {VOICE_TURN_STALL_S:.0f}s | last stage: {last}")
             log(f"   stages: {trail}")
+            log("   its answer is dropped: if it ever arrives it is neither spoken nor shown")
             self.audit.append(
                 actor="system", tool="voice.turn.stalled", tier="red",
                 summary=(f"voice turn did not complete within {VOICE_TURN_STALL_S:.0f}s; "
@@ -1240,6 +1248,20 @@ class TessaDaemon:
             self._voice_turns -= 1
         if turn is None:
             await self.broadcast("evt.agent.state", {"companionId": DEFAULT_COMPANION_ID, "state": "idle"})
+            return
+        if getattr(turn, "dropped", ""):
+            _withheld = (f"<withheld: {len(turn.heard)} chars, a private-message turn>"
+                         if self._private_turn(turn.tools, turn.heard) else turn.heard)
+            log(f"TURN dropped ({turn.dropped}): heard={_withheld!r} - her answer was never spoken or shown")
+            self.audit.append(
+                actor="human", tool="voice.turn.dropped", tier="green",
+                summary=f"voice turn dropped before her answer: {turn.dropped}",
+                detail={"heard": _withheld, "reason": turn.dropped},
+                provenance="human",
+            )
+            return
+        if not turn.heard and not turn.said:
+            log(f"TURN empty: nothing heard in {turn.timing.audio_s:.1f} s of audio - no turn, no model call")
             return
 
         # An empty segment in an open session is the room being quiet, not a
@@ -1276,7 +1298,7 @@ class TessaDaemon:
         # `messageId` is a real ULID, not a placeholder: Session 2's reassembler
         # keys on it and so does their React list, so a duplicate or a missing id
         # is a rendering bug rather than a cosmetic one.
-        if turn.heard:
+        if turn.heard and not getattr(turn, "heard_sent", False):
             await self.broadcast("evt.transcript.message", {
                 "companionId": DEFAULT_COMPANION_ID,
                 "message": {
@@ -1373,6 +1395,7 @@ class TessaDaemon:
             asyncio.run_coroutine_threadsafe(
                 daemon.broadcast("evt.agent.state", payload), loop_ref
             )
+            asyncio.run_coroutine_threadsafe(daemon._voice_state_check(), loop_ref)
 
             # ── THE RE-ARM, AND `idle` IS THE ONLY SAFE MOMENT ──────────────
             #
@@ -1399,6 +1422,7 @@ class TessaDaemon:
                 daemon.broadcast("evt.turn.timing",
                                  {"companionId": DEFAULT_COMPANION_ID, **payload}),
                 loop_ref),
+            on_heard=lambda heard: asyncio.run_coroutine_threadsafe(daemon._heard_line(heard), loop_ref),
             dump_segments=dump_segments,
             session=daemon.session, audit=daemon.audit, brain=daemon.brain,
             conversation=daemon.conversation, speaker=speaker, claims=daemon.claims,
@@ -1415,6 +1439,25 @@ class TessaDaemon:
         )
         daemon.voice.vad_config = daemon.settings.get("voice", {}) or {}
         return bus
+
+    async def _heard_line(self, heard: str) -> None:
+        message_id = ulid()
+        self._voice_heard_id = message_id
+        await self.broadcast("evt.transcript.message", {
+            "companionId": DEFAULT_COMPANION_ID,
+            "message": {"messageId": message_id, "role": "user", "text": heard, "ts": now_iso(), "via": "voice"},
+        })
+
+    def _voice_state_payload(self) -> dict[str, Any]:
+        armed = bool(getattr(self.voice, "armed", False)) if self.voice is not None else False
+        return {"companionId": DEFAULT_COMPANION_ID, "muted": False, "segmentOpen": armed}
+
+    async def _voice_state_check(self) -> None:
+        payload = self._voice_state_payload()
+        if payload["segmentOpen"] == self._segment_open_sent:
+            return
+        self._segment_open_sent = payload["segmentOpen"]
+        await self.broadcast("evt.voice.state", payload)
 
     async def rearm_for_session(self) -> None:
         """
@@ -1978,6 +2021,7 @@ class TessaDaemon:
                     self.ptt_active = False
                     log("  [session] released an empty segment (no speech heard) so she can "
                         "answer; it re-arms after she has spoken")
+                    await self._voice_state_check()
                     busy = False
             if not busy:
                 return True
@@ -2057,6 +2101,12 @@ class TessaDaemon:
             if playing is not None and (wanted is None or (job is not None and job.play is playing)):
                 stopped_ms = self._cut_speech("cmd.agent.cancel", arrived)
                 cancelled = cancelled or stopped_ms is not None
+        voice_turn = (self.voice is not None and self._voice_turns > 0 and hasattr(self.voice, "abandon")
+                      and (wanted is None or wanted == self._voice_heard_id))
+        if voice_turn:
+            self.voice.abandon("cancelled")
+            cancelled = True
+            log("cancel: the voice turn in flight is dropped - its answer is never spoken or shown")
         await ws.send(envelope("res.ok", {"cancelled": cancelled}, corr=corr))
         if stopped_ms is not None:
             await self._rest(job)
@@ -2066,6 +2116,8 @@ class TessaDaemon:
             current = (self.agent_states.get(DEFAULT_COMPANION_ID) or {}).get("state")
             if current != "working":
                 await self._rest(job)
+        elif voice_turn:
+            await self._rest()
         log(f"cancel {wanted[:8] if wanted else '(no messageId)'}: "
             + (f"told {programs} running program(s) to stop; " if programs else "")
             + ("nothing in flight" if not cancelled else
@@ -2176,37 +2228,52 @@ class TessaDaemon:
             }, corr=corr))
             return
 
+        arrived = time.perf_counter()
         was = self.ptt_active
         if action == "start":
+            if self.voice is not None and getattr(self.voice, "armed", False):
+                log("PTT start while she is already listening - nothing changes")
+                await ws.send(envelope("res.ok", {"action": action, "active": True, "changed": False}, corr=corr))
+                return
             self.ptt_active = True
             self._segment_by = "chord"
-            # ITEM 2f: A SESSION STARTED BY KEYPRESS IS THE SAME SESSION.
-            # One object, one lifecycle, one set of audit events — the entry
-            # path is recorded in `openedBy` and changes nothing else. The
-            # alternative, two kinds of session, is how two code paths drift.
-            self.open_session("chord")
             if self.voice is not None:
                 # NO explicit state broadcast here. `voice.start()` sets it on
                 # the bus, and the bus is the single owner of the broadcast —
                 # emitting it here as well is precisely what produced 2-3
                 # `listening` frames per press on Session 2's wire.
                 loop_now = asyncio.get_running_loop()
+                in_flight = self._voice_turns > 0
+                self._drop_typed_for_press()
 
                 def _auto_stop(reason: str) -> None:
                     # VAD closed the segment. Run the SAME turn path a manual
                     # second press would, so there is one code path and not two.
-                    log(f"  [turn] VAD closed the segment ({reason})")
                     self.ptt_active = False
+                    if reason == "no-speech":
+                        from core.voice.loop import NO_SPEECH_S
+
+                        waited = float((getattr(self.voice, "vad_config", None) or {}).get(
+                            "vad_start_timeout_s", NO_SPEECH_S))
+                        log(f"  [turn] nothing said in {waited:.0f} s after the press - no turn, no model call")
+                        asyncio.run_coroutine_threadsafe(self._voice_state_check(), loop_now)
+                        return
+                    log(f"  [turn] VAD closed the segment ({reason}) "
+                        f"{(time.perf_counter() - arrived) * 1000.0:.0f} ms after his press reached her")
                     asyncio.run_coroutine_threadsafe(self._run_voice_turn(), loop_now)
 
                 await asyncio.to_thread(lambda: self.voice.start(on_auto_stop=_auto_stop))
+                self._log_press(arrived, in_flight)
         else:
+            armed = bool(getattr(self.voice, "armed", False)) if self.voice is not None else False
             self.ptt_active = False
-            if self.voice is not None:
+            if self.voice is not None and armed:
                 # The whole turn runs off the event loop: STT is seconds of
                 # blocking CPU and would otherwise stall every other client,
                 # including the Orb's health stream and Session 2's sphere.
                 asyncio.create_task(self._run_voice_turn())
+            elif self.voice is not None:
+                log("PTT stop with nothing recording - no turn")
 
         # Audited at amber: the owner's microphone opening and closing is a
         # privacy-relevant event and belongs in the same tamper-evident record
@@ -2229,6 +2296,29 @@ class TessaDaemon:
             "active": self.ptt_active,
             "changed": was != self.ptt_active,
         }, corr=corr))
+
+    def _drop_typed_for_press(self) -> int:
+        dropped = 0
+        for job in list(self._typed_jobs.values()):
+            if not job.cancelled:
+                job.cancelled = True
+                dropped += 1
+        if dropped:
+            log(f"typed: {dropped} unfinished answer(s) dropped - his press of the talk key replaced them")
+        return dropped
+
+    def _log_press(self, arrived: float, in_flight: bool) -> None:
+        barge = getattr(self.voice, "last_barge", None)
+        if barge is not None:
+            log(f"speech: stopped her for push-to-talk in {(barge.stopped_at - arrived) * 1000.0:.1f} ms "
+                f"(his press reaching her -> the device abort returned; the abort itself {barge.latency_ms:.1f} ms)")
+        clean = getattr(self.voice, "last_clean", None)
+        if clean is not None:
+            ring, lead = clean
+            log(f"voice: she was speaking at or just before his press, so {ring / 16000.0:.2f} s of pre-roll and "
+                f"the first {lead / 16.0:.0f} ms after the press are kept out of his question")
+        if in_flight:
+            log("voice: his press came while she was thinking - that turn's answer is dropped")
 
     def _private_turn(self, tools: Any, heard: str = "") -> bool:
         """
@@ -3144,6 +3234,8 @@ async def main() -> None:
         restarting = lifecycle.STOPPER.restarting
         log(f"shutdown: {reason} - stopping cleanly"
             f"{' (a restart follows)' if restarting else ''}")
+        if daemon.voice is not None and hasattr(daemon.voice, "abandon"):
+            daemon.voice.abandon("she is shutting down")
         # CONTRACT §4 `evt.daemon.shutdown`, sent while the sockets are still
         # open, so a surface shows "reconnecting" rather than a dead link.
         try:

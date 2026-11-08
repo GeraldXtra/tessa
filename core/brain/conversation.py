@@ -244,7 +244,7 @@ class Conversation:
 # say it had forgotten while forgetting nothing.
 _CLEAR_RE = __import__("re").compile(
     r"^\s*(?:tessa[\s,]*)?(?:"
-    r"forget (?:that|this|it|what i said|the last (?:thing|bit)|everything)|"
+    r"forget (?:(?:that|this|it)(?!\s+(?:program\s+)?output\b)|what i said|the last (?:thing|bit)|everything)|"
     r"start (?:fresh|over|again)|"
     r"clear (?:your |the )?(?:memory|context|history|conversation)|"
     r"new (?:conversation|topic)|"

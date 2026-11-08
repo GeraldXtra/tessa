@@ -41,6 +41,34 @@ _INPUT_WAIT = re.compile(r"EOFError|EOF when reading a line|NoSuchElementExcepti
 _PS_POLICY = re.compile(r"running scripts is disabled on this system|is not digitally signed|"
                         r"cannot be loaded because|UnauthorizedAccess", re.I)
 _UNSPEAKABLE = re.compile(r"[A-Za-z]:[\\/]|\\\\|[A-Za-z0-9]_[A-Za-z0-9]|https?://|www\.|[{}<>`|]")
+_PLAIN = re.compile(r"^[^\W_]+(?:[ ,.!?:;'%-]+[^\W_]+)*[ ,.!?:;'%-]*$")
+_ARGS_USE = {
+    "python": r"\bsys\.argv\b|\bargparse\b",
+    "javascript": r"\bprocess\.argv\b",
+    "typescript": r"\bprocess\.argv\b",
+    "java": r"\bargs\s*\[|\bargs\.length\b",
+    "c": r"\bargv\s*\[|\bargc\b",
+    "cpp": r"\bargv\s*\[|\bargc\b",
+    "csharp": r"\bargs\s*\[|\bargs\.Length\b|GetCommandLineArgs",
+    "fortran": r"get_command_argument|command_argument_count",
+    "rust": r"env::args",
+    "go": r"\bos\.Args\b|\bflag\.",
+    "powershell": r"\$args\b|\bparam\s*\(",
+    "batch": r"%[1-9*]",
+    "bash": r"\$[1-9@#*]|\$\{[1-9]",
+    "perl": r"@ARGV|\$ARGV\[",
+}
+_WINDOW_USE = re.compile(r"\b(?:tkinter|turtle|pygame|PyQt\d?|PySide\d?|wx|matplotlib|kivy|webbrowser|javax\.swing|"
+                         r"java\.awt|JFrame|javafx|System\.Windows\.Forms|System\.Windows\.MessageBox|MessageBox[AW]?|"
+                         r"CreateWindow(?:Ex)?[AW]?|WinMain|Out-GridView|Show-Command|fyne|winit|eframe|egui|gtk|"
+                         r"os\.startfile|Start-Process)\b", re.I)
+_ONLINE_USE = re.compile(r"https?://|\b(?:urllib|http\.client|requests|httpx|aiohttp|socket|ftplib|smtplib|poplib|"
+                         r"imaplib|xmlrpc|webbrowser|fetch|XMLHttpRequest|WebSocket|java\.net|HttpClient|WebClient|"
+                         r"HttpWebRequest|System\.Net|winsock2?|WinHttp\w*|wininet|libcurl|curl_easy_\w+|net/http|"
+                         r"reqwest|std::net|TcpStream|UdpSocket|Invoke-WebRequest|Invoke-RestMethod|Net\.WebClient|"
+                         r"Start-BitsTransfer|Test-NetConnection|Resolve-DnsName|iwr|irm|curl|wget|LWP|IO::Socket|"
+                         r"HTTP::Tiny|Net::\w+)\b|\brequire\(\s*['\"](?:node:)?(?:https?|net|dgram|tls)['\"]|"
+                         r"\bfrom\s+['\"](?:node:)?(?:https?|net|dgram|tls)['\"]", re.I)
 _CRASHES = {0xC0000135: "Windows could not find a library it needs",
             0xC0000139: "Windows found a library it needs, but not the version it was built for",
             0xC000007B: "it or a library it needs is built for a different kind of Windows",
@@ -282,7 +310,14 @@ def limit_words(timeout_s: int) -> str:
 
 
 def _speakable(line: str) -> bool:
-    return bool(line) and len(line) <= 90 and not _UNSPEAKABLE.search(line)
+    return bool(line) and len(line) <= 90 and not _UNSPEAKABLE.search(line) and bool(_PLAIN.match(line))
+
+
+def program_traits(key: str, code: str) -> dict[str, bool]:
+    text = str(code or "")
+    args = _ARGS_USE.get(str(key or ""), r"\bargv\b|\bargs\b")
+    return {"args": bool(re.search(args, text)), "window": bool(_WINDOW_USE.search(text)),
+            "online": bool(_ONLINE_USE.search(text))}
 
 
 def _ended(line: str) -> str:
@@ -525,7 +560,7 @@ def run_file(path: str, argv: Any = (), timeout_s: int = DEFAULT_TIMEOUT_S, how:
     args = _argv(argv)
     t = _timeout(timeout_s)
     if hers(path=p) or hers(sha=sha256_of(p)):
-        raise ToolRedirect("code.run_mine", {"path": str(p), "timeout_s": t},
+        raise ToolRedirect("code.run_mine", {"path": str(p), "timeout_s": t, **({"argv": args} if args else {})},
                            "a program she wrote runs only from the card")
     found = langs.find(spec.key)
     if found is None or not found.installed:
@@ -557,10 +592,11 @@ def list_languages(language: str = "", look_again: Any = False) -> dict[str, Any
 
 
 SYSTEM = ("You write one complete program file in {lang} for the owner of a Windows laptop. Write clean, readable "
-          "code with clear names. Use only what {lang} itself provides, unless the request names a package. The "
-          "program must not read from the keyboard, must not open windows, must not use the network, must not "
-          "create, change or delete files outside its own folder, and must finish on its own. Reply with the code "
-          "only, inside one fenced code block.")
+          "code with clear names. Use only what {lang} itself provides, unless the request names a package. Write "
+          "what the request asks for: when it asks the program to read or change the owner's files, open a window "
+          "or use the internet, the program does that. The program runs with no keyboard, so it takes every input "
+          "it needs as command-line arguments and never waits for typing. Unless it opens a window, it finishes on "
+          "its own. Reply with the code only, inside one fenced code block.")
 
 
 def extract_code(text: str) -> str:
@@ -688,15 +724,24 @@ def write_program(language: str = "", task: str = "", run: Any = False, fix: str
         spoken = f"I wrote a fixed version of {speak_name(fix_of)} as {speak_name(path.name)}, {lines} lines, in {where}, Emperor."
     else:
         spoken = f"I wrote a {lang} program called {speak_name(path.name)}, {lines} lines, in {where}, Emperor."
+    traits = program_traits(key, code)
     if not runnable:
         spoken += f" I cannot run {lang} on this laptop."
-    elif not run:
-        spoken += " Say run it, and I will put it on the card."
+    else:
+        if traits["args"]:
+            spoken += " It takes its inputs as arguments: say run it with, then the values."
+        if traits["window"]:
+            spoken += f" It opens a window, and the window closes at the time limit of {limit_words(DEFAULT_TIMEOUT_S)}."
+        if traits["online"]:
+            spoken += " It goes online when it runs."
+        if not run:
+            spoken += " Say run it, and I will put it on the card."
     fence = {"cpp": "cpp", "csharp": "csharp", "javascript": "javascript", "typescript": "typescript",
              "powershell": "powershell", "batch": "bat"}.get(key, key)
     said = (f"{spoken}\n```text\nSaved as {path}\nsha256 {sha}\n```\n```{fence}\n{code.rstrip()}\n```")
     out: dict[str, Any] = {"spoken": spoken, "said": said, "path": str(path), "sha256": sha, "lines": lines,
-                           "language": lang}
+                           "language": lang, "takes_args": traits["args"], "opens_window": traits["window"],
+                           "goes_online": traits["online"]}
     if fixing is not None:
         out["external_text"] = fixing[1][:FENCE_CHARS]
         out["external_source"] = "program output"
@@ -735,21 +780,39 @@ def resolve_mine(args: dict[str, Any]) -> dict[str, Any]:
         raise ToolError(f"I cannot run {langs.display(row.get('language', '')) or p.suffix} here: it is not installed",
                         "I can still show you the code.")
     code = raw.decode("utf-8", errors="replace")
-    return {"path": str(p), "language": f"{found.name} ({found.version})", "file": p.name, "code": code,
-            "sha256": hashlib.sha256(raw).hexdigest(), "runs_in": str(p.parent), "time_limit": f"{t} s",
-            "timeout_s": t, "lines": len(code.splitlines()), "runs_as": RUNS_AS}
+    out = {"path": str(p), "language": f"{found.name} ({found.version})", "file": p.name, "code": code,
+           "sha256": hashlib.sha256(raw).hexdigest(), "runs_in": str(p.parent), "time_limit": f"{t} s",
+           "timeout_s": t, "lines": len(code.splitlines()), "runs_as": RUNS_AS}
+    argv = _argv(args.get("argv"))
+    if argv:
+        out["argv"] = argv
+        out["arguments"] = " ".join(argv)
+    if program_traits(spec.key, code)["online"]:
+        out["goes_online"] = "Yes. This program uses the internet when it runs."
+    return out
 
 
 def describe_mine(args: dict[str, Any]) -> str:
     lang = str(args.get("language") or "").split(" (")[0] or "program"
     n = int(args.get("lines") or 0)
-    return (f"run the {lang} program I wrote, {speak_name(args.get('file') or args.get('path') or '')}, "
-            f"{n} line{'s' if n != 1 else ''} of code, for up to {limit_words(int(args.get('timeout_s') or 60))}")
+    argv = _argv(args.get("argv"))
+    traits = program_traits(langs.canonical(lang) or "", str(args.get("code") or ""))
+    line = (f"run the {lang} program I wrote, {speak_name(args.get('file') or args.get('path') or '')}, "
+            f"{n} line{'s' if n != 1 else ''} of code")
+    if argv:
+        line += f", with {len(argv)} argument{'s' if len(argv) != 1 else ''}"
+    line += f", for up to {limit_words(int(args.get('timeout_s') or 60))}"
+    if traits["window"]:
+        line += ", and its window closes at that limit"
+    if traits["online"] or args.get("goes_online"):
+        line += ", and it goes online"
+    return line
 
 
 def run_mine(path: str = "", language: str = "", file: str = "", code: str = "", sha256: str = "", runs_in: str = "",
              time_limit: str = "", timeout_s: int = DEFAULT_TIMEOUT_S, lines: int = 0, runs_as: str = "",
-             name: str = "", which: str = "", *, _approved_by_surface: bool = False) -> dict[str, Any]:
+             name: str = "", which: str = "", argv: Any = (), arguments: str = "", goes_online: str = "", *,
+             _approved_by_surface: bool = False) -> dict[str, Any]:
     if not _approved_by_surface:
         raise ToolError("a program I wrote runs only from the approval card", "Approve it on the card and I will run it.")
     p, spec = _source(path)
@@ -757,4 +820,4 @@ def run_mine(path: str = "", language: str = "", file: str = "", code: str = "",
     if not sha256 or now != sha256:
         raise ToolError(f"{p.name} changed after the card was raised, so nothing ran",
                         "Ask me to run it again and read the new card.")
-    return run_source(p, spec, [], _timeout(timeout_s), mine=True)
+    return run_source(p, spec, _argv(argv), _timeout(timeout_s), mine=True)

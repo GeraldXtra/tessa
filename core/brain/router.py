@@ -181,7 +181,9 @@ _SPECS = (
     IntentSpec(Intent.DATE, ("date", "what day", "day is it", "what is today", "today's date"),
                veto=("time is it",)),
     IntentSpec(Intent.STATUS, ("how are you", "status", "how are things",
-                               "running", "how is it going", "doing"),
+                               "running", "doing"),
+               boost=("cpu", "memory", "uptime", "system", "yourself")),
+    IntentSpec(Intent.STATUS, ("it going",), veto=("going to",),
                boost=("cpu", "memory", "uptime", "system", "yourself")),
     # "can you hear" was unreachable: `normalise` peels "can you" as a filler,
     # so the text reaching the scorer was "hear me" and never matched. Keeping
