@@ -27,6 +27,8 @@ from __future__ import annotations
 import getpass
 import os
 import subprocess
+
+from core.security import gate
 from pathlib import Path
 
 #: SIDs that mean "not a human user". S-1-5-18 is LocalSystem; 19 and 20 are
@@ -53,8 +55,8 @@ def current_sid() -> str | None:
     which callers treat as "cannot verify", not as "verified safe".
     """
     try:
-        result = subprocess.run(
-            ["whoami", "/user", "/fo", "csv", "/nh"],
+        result = gate.run(
+            ["whoami", "/user", "/fo", "csv", "/nh"], why="the owner's account id",
             capture_output=True, text=True, check=False, timeout=10,
         )
     except (OSError, subprocess.SubprocessError):

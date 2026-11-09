@@ -69,6 +69,8 @@ import json
 import os
 import re
 import subprocess
+
+from core.security import gate
 import time
 from dataclasses import dataclass, field
 from typing import Any, Callable
@@ -344,8 +346,8 @@ def _run_sc(argv: list[str], timeout: int) -> subprocess.CompletedProcess:
     """
     if not _shape_ok(argv):
         raise Refused("that sc command is not one I run", "start, stop, or config start= only, one service.")
-    cp = subprocess.run(argv, shell=False, capture_output=True, timeout=timeout,
-                        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    cp = gate.run(argv, why="sc.exe control", shell=False, capture_output=True, timeout=timeout,
+                  creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
     out = (cp.stdout or b"").decode("utf-8", errors="replace")
     err = (cp.stderr or b"").decode("utf-8", errors="replace")
     return subprocess.CompletedProcess(argv, cp.returncode, out, err)
@@ -354,8 +356,8 @@ def _run_sc(argv: list[str], timeout: int) -> subprocess.CompletedProcess:
 def _query_state(name: str) -> str:
     """Live state word for ONE service, read-only (`sc query <name>`)."""
     try:
-        cp = subprocess.run([SC_EXE, "query", name], shell=False, capture_output=True, timeout=30,
-                            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        cp = gate.run([SC_EXE, "query", name], why="sc.exe query", shell=False, capture_output=True, timeout=30,
+                      creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
     except (subprocess.TimeoutExpired, OSError):
         return "unknown"
     for raw in (cp.stdout or b"").decode("utf-8", errors="replace").splitlines():

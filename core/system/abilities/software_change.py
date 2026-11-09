@@ -59,6 +59,8 @@ import os
 import re
 import shutil
 import subprocess
+
+from core.security import gate
 import sys
 from dataclasses import dataclass, field
 from typing import Any, Callable
@@ -274,8 +276,8 @@ def _run_winget(argv: list[str], timeout: int) -> subprocess.CompletedProcess:
     """
     if len(argv) < 2 or argv[1] not in _VERBS or any(a in _NEVER_FLAGS for a in argv[1:]):
         raise Refused("that winget command is not one I run", "search, list, install, uninstall only.")
-    cp = subprocess.run(argv, shell=False, capture_output=True, timeout=timeout,
-                        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    cp = gate.run(argv, why="winget catalog", shell=False, capture_output=True, timeout=timeout,
+                  creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
     out = (cp.stdout or b"").decode("utf-8", errors="replace")
     err = (cp.stderr or b"").decode("utf-8", errors="replace")
     return subprocess.CompletedProcess(argv, cp.returncode, out, err)

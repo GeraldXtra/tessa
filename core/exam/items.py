@@ -72,6 +72,9 @@ ITEMS: list[dict[str, Any]] = [
 
     _r("system.app.launch", "apps", "launch notepad", ["app.open"], args={"*": {"app": {"contains": "notepad"}}}),
     _r("app.open", "apps", "open the calculator", ["system.app.launch"], args={"*": {"app": {"contains": "calc"}}}),
+    _r("app.launch_checked", "apps", "open the drawing tool i installed in my own folder",
+       ["system.app.launch", "app.open"],
+       why="an app outside the program folders opens from its card first, then that exact set opens by name"),
     _r("app.open_vscode", "apps", "open vs code", ["system.code.open", "app.open", "system.app.launch"]),
     _r("system.code.open", "apps", "open the tessa project in vs code", ["app.open_vscode"],
        args={"*": {"path": {"contains": "tessa"}}}),

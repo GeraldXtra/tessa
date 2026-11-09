@@ -5,6 +5,8 @@ import os
 import re
 import shutil
 import subprocess
+
+from core.security import gate
 import tempfile
 import threading
 import time
@@ -13,9 +15,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from core.security import secrets as secret_store
+
 CREATE_NO_WINDOW = 0x08000000
 CHECK_TIMEOUT_S = 10.0
-SECRET_NAME = re.compile(r"(API[_-]?KEY|_KEY$|^KEY_|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|PRIVATE)", re.I)
+SECRET_NAME = secret_store.SECRET_NAME
 HER_ONLY = ("FOR_DISABLE_CONSOLE_CTRL_HANDLER",)
 OFFLINE = {"GOTOOLCHAIN": "local", "GOPROXY": "off", "GOSUMDB": "off",
            "DOTNET_CLI_TELEMETRY_OPTOUT": "1", "CARGO_NET_OFFLINE": "true", "RUSTUP_AUTO_INSTALL": "0",
@@ -165,6 +169,7 @@ def file_version(path: str) -> str:
 
 def secret_names() -> set[str]:
     names = {n for n in os.environ if SECRET_NAME.search(n) or n.upper().startswith("TESSA_")}
+    names.update(secret_store.held_names())
     names.update(n for n in HER_ONLY if n in os.environ)
     try:
         import yaml
@@ -175,7 +180,7 @@ def secret_names() -> set[str]:
                 names.add(str(v["api_key_env"]))
     except Exception:
         pass
-    return {n for n in names if n in os.environ}
+    return {n for n in names if n in os.environ or n in secret_store.held_names()}
 
 
 def child_env(extra: dict[str, str] | None = None) -> tuple[dict[str, str], list[str]]:
@@ -190,9 +195,9 @@ def _check(exe: str, args: list[str], env_extra: dict[str, str] | None = None) -
     env, _removed = child_env(env_extra)
     t0 = time.perf_counter()
     try:
-        proc = subprocess.run([exe, *args], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                              stderr=subprocess.STDOUT, timeout=CHECK_TIMEOUT_S, creationflags=CREATE_NO_WINDOW,
-                              env=env, cwd=tempfile.gettempdir())
+        proc = gate.run([exe, *args], why="language version check", stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                        stderr=subprocess.STDOUT, timeout=CHECK_TIMEOUT_S, creationflags=CREATE_NO_WINDOW,
+                        env=env, cwd=tempfile.gettempdir())
     except (OSError, subprocess.SubprocessError):
         return "", None
     ms = (time.perf_counter() - t0) * 1000.0

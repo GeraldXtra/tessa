@@ -31,11 +31,14 @@ held at the last mile.
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
+from core.security import gate
 from core.system.capability import Capability, Param
 
 
@@ -69,9 +72,9 @@ def argv_for(path: str) -> list[str]:
         raise ToolError("VS Code is not installed on this machine, or not on PATH",
                         "I can open it in Explorer instead.")
     launcher, _how = found
+    if not str(path or "").strip():
+        return [launcher]
     target = Path(os.path.expandvars(str(path or "").strip().strip('"'))).expanduser()
-    if not str(target).strip():
-        raise ToolError("no path came through", "Name the folder or file.")
     if not target.exists():
         raise ToolError(f"{target} is not there", "Give me a path that exists.")
     # `--` FIRST. A file called `-r` or `--wait` would otherwise be read by VS
@@ -79,13 +82,34 @@ def argv_for(path: str) -> list[str]:
     return [launcher, "--", str(target.resolve())]
 
 
-def open_in_code(path: str) -> dict[str, Any]:
+def checked_argv(path: str) -> list[str]:
     from core.tools.base import ToolError
 
     argv = argv_for(path)
-    target = Path(argv[-1])
+    if len(argv) > 1:
+        target = Path(argv[-1])
+        if Path(argv[0]).suffix.lower() in (".cmd", ".bat") and re.search(r'[%^&|<>!"]', str(target)):
+            raise ToolError("that path has characters the VS Code launcher would read as commands",
+                            "Rename the folder, or open it from VS Code yourself.")
+        tasks = gate.vscode_tasks_on_open(target)
+        if tasks:
+            raise ToolError(f"{tasks} sets a task to run as soon as the folder opens",
+                            "Open that folder in VS Code yourself, after reading the task.")
+    return argv
+
+
+def open_in_code(path: str) -> dict[str, Any]:
+    from core.tools.base import ToolError, ToolRedirect
+
+    argv = checked_argv(path)
+    target = Path(argv[-1]) if len(argv) > 1 else Path(argv[0])
+    entry = SimpleNamespace(kind="exe", name="Visual Studio Code", launch=argv[0])
+    if gate.app_needs_card(entry) is not None:
+        raise ToolRedirect("app.launch_checked", {"app": "Visual Studio Code", "launch": argv[0],
+                                                  "open": argv[-1] if len(argv) > 1 else ""},
+                           "VS Code is not in the program folders, so it opens only from the card")
     try:
-        subprocess.Popen(argv, shell=False, close_fds=True)
+        gate.start(gate.Start(kind=gate.APP, why="open in VS Code", entry=entry, argv=argv))
     except OSError as exc:
         raise ToolError(f"VS Code would not start ({exc.strerror or exc})",
                         "I can open it in Explorer instead.") from None

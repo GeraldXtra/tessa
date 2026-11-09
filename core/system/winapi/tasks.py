@@ -26,6 +26,8 @@ from __future__ import annotations
 
 import csv
 import subprocess
+
+from core.security import gate
 from typing import Any
 
 from ._cache import TTLValue
@@ -45,8 +47,8 @@ class TasksUnavailable(RuntimeError):
 
 def _query() -> list[dict[str, Any]]:
     try:
-        result = subprocess.run(["schtasks", "/query", "/fo", "csv", "/nh"],
-                                capture_output=True, text=True, timeout=120, shell=False)
+        result = gate.run(["schtasks", "/query", "/fo", "csv", "/nh"], why="list scheduled tasks",
+                          capture_output=True, text=True, timeout=120, shell=False)
     except subprocess.TimeoutExpired:
         raise TasksUnavailable("Task Scheduler did not answer in time") from None
     except OSError as exc:

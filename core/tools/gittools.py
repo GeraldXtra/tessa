@@ -7,6 +7,8 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
+from core.security import gate
+
 from . import langs, runner
 from .base import ToolError, ToolHold
 
@@ -22,6 +24,26 @@ SECRET_FILE = re.compile(r"(?:^|[\\/])(?:\.env(?:\..*)?|.*\.(?:pem|key|p12|pfx|k
                          r"api_key|api-key).*)$", re.I)
 BRANCH = re.compile(r"^(?!-)(?!.*\.\.)(?!.*@\{)(?!.*[\\~^:?*\[\s])(?!.*\.lock$)(?!.*/$)(?!.*\.$)[A-Za-z0-9._/-]{1,100}$")
 PERMISSIONS = Path(__file__).resolve().parents[1] / "config" / "permissions.yaml"
+NO_HOOKS: Path | None = None
+SAFE_CONFIG = re.compile(
+    r"^(?:core\.(?:repositoryformatversion|filemode|bare|logallrefupdates|symlinks|ignorecase|autocrlf|eol|safecrlf|"
+    r"longpaths|precomposeunicode|quotepath|compression|loosecompression|whitespace|checkstat|trustctime|"
+    r"untrackedcache|splitindex|preloadindex|fscache|abbrev|warnambiguousrefs|sharedrepository|protectntfs|"
+    r"protecthfs|commitgraph|multipackindex)"
+    r"|remote\..+\.(?:url|pushurl|fetch|push|tagopt|prune|prunetags|mirror|skipdefaultupdate|skipfetchall|"
+    r"promisor|partialclonefilter)"
+    r"|branch\..+\.(?:remote|merge|rebase|pushremote|description)"
+    r"|user\.(?:name|email)|pull\.(?:rebase|ff)|push\.(?:default|autosetupremote|followtags)"
+    r"|fetch\.(?:prune|prunetags|writecommitgraph)|init\.defaultbranch"
+    r"|extensions\.(?:worktreeconfig|objectformat|refstorage|preciousobjects|partialclone)"
+    r"|gc\.(?:auto|autopacklimit|autodetach|reflogexpire|reflogexpireunreachable|pruneexpire)"
+    r"|index\.(?:version|threads)|status\.(?:showuntrackedfiles|branch|short)|color\.[^.]+(?:\.[^.]+)?"
+    r"|log\.(?:date|decorate|follow|abbrevcommit|mailmap)"
+    r"|diff\.(?:renames|algorithm|mnemonicprefix|noprefix|context|statgraphwidth|indentheuristic|colormoved)"
+    r"|merge\.(?:ff|conflictstyle|log|renamelimit|verbosity|autostash)"
+    r"|rebase\.(?:autostash|autosquash|updaterefs|stat)"
+    r"|submodule\..+\.(?:url|active|branch|ignore|shallow)"
+    r"|lfs\.repositoryformatversion|i18n\.(?:commitencoding|logoutputencoding)|gui\.[^.]+)$")
 
 
 def git_exe() -> str:
@@ -39,8 +61,8 @@ def _run_git(argv: list[str], cwd: str, timeout: float) -> tuple[int, str]:
     env, _removed = langs.child_env({"GIT_TERMINAL_PROMPT": "0", "GCM_INTERACTIVE": "never", "GIT_OPTIONAL_LOCKS": "0",
                                      "GIT_PAGER": "cat", "PAGER": "cat", "LC_ALL": "C"})
     try:
-        proc = subprocess.run(argv, cwd=cwd, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                              stderr=subprocess.STDOUT, timeout=timeout, creationflags=runner.CREATE_NO_WINDOW)
+        proc = gate.run(argv, why="git", cwd=cwd, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                        stderr=subprocess.STDOUT, timeout=timeout, creationflags=runner.CREATE_NO_WINDOW)
     except subprocess.TimeoutExpired:
         raise ToolError(f"git took longer than {int(timeout)} seconds, so I stopped waiting", "Try it in your terminal.") from None
     except OSError as exc:
@@ -48,9 +70,108 @@ def _run_git(argv: list[str], cwd: str, timeout: float) -> tuple[int, str]:
     return proc.returncode, runner.decode(proc.stdout)
 
 
+def _continues(line: str) -> bool:
+    tail = len(line) - len(line.rstrip("\\"))
+    return tail % 2 == 1
+
+
+def config_keys(text: str) -> list[str]:
+    keys: list[str] = []
+    section: str | None = None
+    cont = False
+    for raw in text.splitlines():
+        line = raw.strip()
+        if cont:
+            cont = _continues(line)
+            continue
+        if not line or line[0] in "#;":
+            continue
+        if line.startswith("["):
+            m = re.match(r'^\[\s*([A-Za-z0-9.-]+)(?:\s+"((?:[^"\\]|\\.)*)")?\s*\](.*)$', line)
+            if not m:
+                raise ValueError(f"a section line I cannot read: {line[:60]!r}")
+            name, sub, rest = m.groups()
+            section = name.lower() + ("." + sub.lower() if sub is not None else "")
+            line = rest.strip()
+            if not line or line[0] in "#;":
+                continue
+        if section is None:
+            raise ValueError("a setting outside any section")
+        m = re.match(r"^([A-Za-z][A-Za-z0-9-]*)\s*(?:=|$|[#;])", line)
+        if not m:
+            raise ValueError(f"a setting line I cannot read: {line[:60]!r}")
+        keys.append(section + "." + m.group(1).lower())
+        cont = _continues(line)
+    return keys
+
+
+def config_files(root: Path) -> list[Path]:
+    dot = root / ".git"
+    if dot.is_dir():
+        gitdir = dot
+    else:
+        try:
+            text = dot.read_text(encoding="utf-8", errors="replace").strip()
+        except OSError:
+            raise ToolError(f"I could not read {dot}", "Run git there yourself.") from None
+        if not text.lower().startswith("gitdir:"):
+            raise ToolError(f"{dot} is not a git link I can read", "Run git there yourself.")
+        gitdir = Path(text[7:].strip())
+        if not gitdir.is_absolute():
+            gitdir = (root / gitdir).resolve()
+    base = gitdir
+    common = gitdir / "commondir"
+    if common.is_file():
+        base = (gitdir / common.read_text(encoding="utf-8", errors="replace").strip()).resolve()
+    out: list[Path] = []
+    for p in (base / "config", base / "config.worktree", gitdir / "config", gitdir / "config.worktree"):
+        if p.is_file() and not any(gate.norm(p) == gate.norm(q) for q in out):
+            out.append(p)
+    return out
+
+
+def check_config(root: Path) -> None:
+    for f in config_files(root):
+        try:
+            keys = config_keys(f.read_text(encoding="utf-8", errors="replace"))
+        except (OSError, ValueError) as exc:
+            raise ToolError(f"I could not read this repository's settings in {f} ({exc}), so I did not run git",
+                            "Run git there yourself.") from None
+        odd = sorted({k for k in keys if not SAFE_CONFIG.match(k)})
+        if odd:
+            raise ToolError(f"this repository's own settings ({f}) include {', '.join(odd[:6])}, which I do not run "
+                            f"git with, because settings like these can make git start a program",
+                            "Run git there yourself, or take that setting out of the repository.")
+
+
+def no_hooks_dir() -> Path:
+    hooks = NO_HOOKS or gate.store_paths()[0].parent / "git-no-hooks"
+    hooks.mkdir(parents=True, exist_ok=True)
+    if any(hooks.iterdir()):
+        raise ToolError(f"{hooks} should be empty and is not, so I did not run git",
+                        "Empty that folder, then ask me again.")
+    return hooks
+
+
 def git(root: Path, *args: str, timeout: float = GIT_TIMEOUT_S) -> tuple[int, str]:
-    argv = [git_exe(), "-C", str(root), "--no-pager", "-c", "color.ui=false", "-c", "core.quotepath=false", *args]
+    check_config(root)
+    hooks = no_hooks_dir()
+    argv = [git_exe(), "-C", str(root), "--no-pager", "-c", f"core.hooksPath={hooks}", "-c", "core.fsmonitor=false",
+            "-c", "color.ui=false", "-c", "core.quotepath=false", *args]
     return _run_git(argv, str(root), timeout)
+
+
+def record_switched(root: Path, old: str) -> None:
+    if not re.match(r"^[0-9a-f]{40,64}$", old):
+        gate.record(root, "switch", "git.repo")
+        return
+    code, out = git(root, "diff", "--name-only", "-z", old, "HEAD")
+    if code != 0:
+        gate.record(root, "switch", "git.repo")
+        return
+    for rel in out.split("\0"):
+        if rel.strip() and (root / rel).is_file():
+            gate.record(root / rel, "switch", "git.repo")
 
 
 def repo_root(folder: Any) -> Path:
@@ -197,9 +318,12 @@ def git_repo(action: str, folder: str, name: str = "", files: Any = (), message:
         if reasons and not confirmed:
             verb = "makes the branch" if act == "branch" else "switches to the branch"
             raise ToolHold(f"That {verb} {name} in {repo}: {', and '.join(reasons)}")
+        old = git(root, "rev-parse", "HEAD")[1].strip() if act == "switch" else ""
         code, out = git(root, "branch", name) if act == "branch" else git(root, "switch", name)
         if code != 0:
             raise ToolError(f"git {act} failed: {out.strip()[:160]}", "Check the branch name and try again.")
+        if act == "switch":
+            record_switched(root, old)
         spoken = (f"Made the branch {name} in {repo}, Emperor." if act == "branch"
                   else f"Switched {repo} to {name}, Emperor.")
     elif act == "add":

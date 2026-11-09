@@ -31,7 +31,7 @@ from typing import Any
 
 import yaml
 
-from . import (browser, claims_tools, clip, coding, files, gittools, procs, shell,
+from . import (browser, checked, claims_tools, clip, coding, files, gittools, procs, shell,
                sysctl, websearch, winman, x_tools)
 from .base import TIERS, ToolError, ToolHold, ToolResult, ToolSpec
 
@@ -359,7 +359,8 @@ _SHELL = [
         # that costs him five seconds and is the only safe answer. `cwd` and
         # `timeout_s` are frozen for the same reason — cwd decides what a
         # relative command resolves against, which is part of what it DOES.
-        frozen=("command", "cwd", "timeout_s"),
+        frozen=("command", "cwd", "timeout_s", "files", "views", "unchecked"),
+        resolve=shell.resolve_command, private_args=("views",),
         note="provenance must be 'human'. A model- or page-authored command is refused "
              "unconditionally — no tier, approval or confirmation reaches past it. "
              "⚠ EVERY argument is frozen through approval: what he read on the card is "
@@ -913,13 +914,16 @@ _CODE = [
         name="code.run_mine", tier="red", capability="code.run_own", handler=coding.run_mine, holds=True,
         resolve=coding.resolve_mine, describe=coding.describe_mine, card_provenance="agent",
         frozen=("path", "language", "file", "code", "sha256", "runs_in", "time_limit", "timeout_s", "lines",
-                "runs_as", "name", "which", "argv", "arguments", "goes_online"),
+                "runs_as", "name", "which", "argv", "arguments", "goes_online", "files", "views", "set_sha256",
+                "unchecked", "whose", "downloaded"),
+        private_args=("views",),
         phrasings=("run the program you wrote", "run primes.py from your code folder"),
         success="{said}",
         failure="I did not run it, sir. {reason} {alternative}",
         audit="RUN HER PROGRAM {path} sha256 {sha256} limit {timeout_s} s",
-        note="A program she wrote: the card every time, showing the exact code and its sha256; runs once, only if "
-             "the file still matches the card.",
+        note="A program she wrote, or one he named that he has not approved before: the card shows every file of it "
+             "that can run, each with its sha256; it runs once, only if every file still matches the card, and "
+             "that exact set then runs again with no card until one byte of it changes.",
     ),
 ]
 
@@ -947,9 +951,24 @@ _GIT = [
 ]
 
 
+_CHECKED = [
+    _spec(
+        name="app.launch_checked", tier="red", capability="app.launch_checked", handler=checked.launch_app,
+        holds=True, resolve=checked.resolve_app, describe=checked.describe_app,
+        frozen=("app", "launch", "open", "program", "arguments", "workdir", "files", "set_sha256", "why"),
+        success="Opening {name}, Emperor.",
+        failure="I did not open it, sir. {reason} {alternative}",
+        audit="OPEN FROM THE CARD {app} {program} {arguments} set {set_sha256}",
+        note="An app whose program is outside the admin-only program folders, or a shortcut that adds its own "
+             "arguments from a folder anyone signed in can change: the card shows the program, its arguments and "
+             "each file's sha256, all frozen, re-checked just before it opens; once approved, that exact set "
+             "opens by name with no card.",
+    ),
+]
+
 REGISTRY: dict[str, ToolSpec] = {
     s.name: s for s in (_FILES + _WINDOWS + _PROCS + _CLIP + _SYSTEM + _SHELL
-                        + _BROWSER + _X + _CLAIMS + _CODE + _GIT)
+                        + _BROWSER + _X + _CLAIMS + _CODE + _GIT + _CHECKED)
 }
 
 # ─────────────────────────────────────────────────────────────────────────────

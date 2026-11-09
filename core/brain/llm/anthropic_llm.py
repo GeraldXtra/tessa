@@ -28,6 +28,8 @@ from __future__ import annotations
 import os
 from typing import Any, Iterator
 
+from core.security import secrets as secret_store
+
 from .base import Completion, LLMAdapter, LLMUnavailable, Message, ToolDef, Usage
 
 
@@ -38,7 +40,7 @@ class AnthropicLLM(LLMAdapter):
         self.model_main = str(models.get("main", "claude-opus-5"))
         self.model_classify = str(models.get("classify", "claude-haiku-4-5-20251001"))
         self.model_fallback = str(models.get("fallback", "claude-sonnet-5"))
-        self.api_key = os.environ.get(str(self.cfg.get("api_key_env", "ANTHROPIC_API_KEY")), "")
+        self.api_key = secret_store.get(str(self.cfg.get("api_key_env", "ANTHROPIC_API_KEY")))
         self._client: Any = None
         self.last_fallback: str | None = None
 

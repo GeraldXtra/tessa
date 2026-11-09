@@ -23,6 +23,7 @@ import threading
 from pathlib import Path
 from typing import Any, Callable, get_args
 
+from core.security import gate
 from core.security.audit import Actor as _AuditActor
 from core.security.guard import whole_folder_target
 from core.tools import REGISTRY
@@ -147,6 +148,10 @@ class Executor:
             _x_tools.bind_reporter(self._log)
         except Exception:  # noqa: BLE001
             pass
+
+    def _voice_verdict(self) -> Any:
+        verdict = getattr(getattr(self, "_tls", None), "voice_verdict", None)
+        return verdict if verdict is not None else getattr(self, "voice_verdict", None)
 
     def _state(self, s: str, detail: dict | None = None) -> None:
         if self._on_state is None:
@@ -336,7 +341,7 @@ class Executor:
                 self.ledger.clear()
             first = asked[0].call
             origin = self._actor_of(first.origin)
-            verdict = getattr(self, "voice_verdict", None)
+            verdict = self._voice_verdict()
             doubted = verdict is not None and not verdict.allows("amber", getattr(self, "voice_confident", 0.62))
             if doubted or (self.session is not None and getattr(self.session, "external_content_in_context", 0)):
                 return " ".join(x for x in (earlier, self.run(first)) if x), [first.name]
@@ -762,6 +767,24 @@ class Executor:
     # ONLY these four keys. `_ctx` belongs to the vault's ActionContext, which
     # does not exist yet; it is stripped when that lands, not here.
     _FORGEABLE_ARG_KEYS = ("provenance", "origin", "_approved_by_surface", "confirmed")
+
+    _CARD_REDIRECT = threading.local()
+
+    def _approved_instead_of_card(self, spec: Any, call: Any, args: dict[str, Any], redirect: ToolRedirect,
+                                  origin: str) -> str | None:
+        target = REGISTRY.get(redirect.tool)
+        if target is None or target.tier == "red" or redirect.tool == spec.name:
+            return None
+        if getattr(self._CARD_REDIRECT, "depth", 0):
+            return None
+        self._log("REDIRECTED", spec.name,
+                  f"{self._audit_line(spec, args)} -> {redirect.tool}: {redirect.why}", spec.tier, actor=origin)
+        self._CARD_REDIRECT.depth = 1
+        try:
+            return self._dispatch_registry(ToolCall(name=redirect.tool, args=dict(redirect.call_args),
+                                                    origin=call.origin)) or ""
+        finally:
+            self._CARD_REDIRECT.depth = 0
 
     @staticmethod
     def _actor_of(origin: Any) -> str:
@@ -1273,7 +1296,7 @@ class Executor:
         #     Green is untouched: the whole design errs toward accepting HIM,
         #     and everything that could actually hurt him is red and needs the
         #     approval card regardless of who spoke.
-        verdict = getattr(self, "voice_verdict", None)
+        verdict = self._voice_verdict()
         if verdict is not None and spec.tier in ("amber", "red"):
             confident = getattr(self, "voice_confident", 0.62)
             if not verdict.allows(spec.tier, confident):
@@ -1308,7 +1331,16 @@ class Executor:
                 #     what `execute_approved` strips again before running.
                 resolve = getattr(spec, "resolve", None)
                 if resolve is not None:
-                    args = dict(resolve(dict(args)))
+                    try:
+                        args = dict(resolve(dict(args)))
+                    except ToolRedirect as redirect:
+                        said = self._approved_instead_of_card(spec, call, args, redirect, origin)
+                        if said is not None:
+                            return said
+                        try:
+                            args = dict(resolve({**args, "card": True}))
+                        except ToolRedirect:
+                            raise ToolError("that has nowhere to go", "Nothing was done.") from None
                 detail = self._red_detail(spec, args)
             except ToolError as err:
                 # A core/system capability's `describe` REFUSED THE TARGET
@@ -1604,6 +1636,13 @@ class Executor:
             if not path.exists():
                 return action_failed(f"{path} is not there",
                                      "Give me another path and I will open it.")
+            kind = gate.item_kind(path)
+            if kind == "source":
+                return self._dispatch_registry(ToolCall(name="code.run_file", args={"path": str(path)},
+                                                        origin=call.origin)) or ""
+            if kind == "program":
+                return action_failed(f"{path.name} is something Windows would run, not show",
+                                     "Ask me to run it and read the card, or name the app you want.")
             himself = memory.he_opened_it_himself(str(path))
             open_path(path)
             memory.record(name, str(path))
@@ -1625,6 +1664,10 @@ class Executor:
             entries, _how = get_index().resolve(app)
             if not entries:
                 return action_failed(f"I cannot find {app}", "Say the name again?")
+            if gate.app_needs_card(entries[0]) is not None:
+                return self._dispatch_registry(ToolCall(
+                    name="app.launch_checked", args={"app": entries[0].name, "launch": entries[0].launch},
+                    origin=call.origin)) or ""
             ok, detail = launch(entries[0])
             if not ok:
                 return action_failed(f"{app} would not start ({detail})",
@@ -1634,20 +1677,11 @@ class Executor:
 
         if name == "app.open_vscode":
             target = str(args.get("path") or "")
-            if not target:
-                exe = shutil.which("code") or shutil.which("code.cmd")
-                if exe is None:
-                    return action_failed("VS Code is not on PATH",
-                                         "I can open the folder in Explorer instead.")
-                subprocess.Popen([exe], shell=False)
-                memory.record(name, "vscode")
-                return action_done()
-            ok, detail = open_in_vscode(Path(target))
-            if not ok:
-                return action_failed(detail, "I can open it in Explorer instead.")
-            himself = memory.he_opened_it_himself(target)
-            memory.record(name, target)
-            return action_done(he_did_it_himself=himself)
+            himself = memory.he_opened_it_himself(target) if target else False
+            said = self._dispatch_registry(ToolCall(name="system.code.open", args={"path": target},
+                                                    origin=call.origin))
+            memory.record(name, target or "vscode")
+            return said or action_done(he_did_it_himself=himself)
 
         if name == "app.open_url":
             ok, detail = open_url(str(args["url"]), args.get("browser"))

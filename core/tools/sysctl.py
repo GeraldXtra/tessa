@@ -21,6 +21,8 @@ from __future__ import annotations
 import ctypes
 import socket
 import subprocess
+
+from core.security import gate
 import time
 from typing import Any
 
@@ -43,8 +45,8 @@ _PS = ["powershell", "-NoProfile", "-NonInteractive", "-Command"]
 
 def _ps(script: str, timeout: float = 20.0) -> str:
     """PowerShell with a CONSTANT script. `script` is only ever a literal from this module."""
-    r = subprocess.run(_PS + [script], capture_output=True, text=True,
-                       timeout=timeout, shell=False)
+    r = gate.run(_PS + [script], why="a fixed system query", capture_output=True, text=True,
+                 timeout=timeout, shell=False)
     return r.stdout.strip()
 
 
@@ -165,8 +167,8 @@ def ip_address() -> dict[str, Any]:
 
 
 def wifi_list() -> dict[str, Any]:
-    r = subprocess.run(["netsh", "wlan", "show", "networks"],
-                       capture_output=True, text=True, timeout=25, shell=False)
+    r = gate.run(["netsh", "wlan", "show", "networks"], why="wifi networks",
+                 capture_output=True, text=True, timeout=25, shell=False)
     if r.returncode != 0:
         raise ToolError("Windows would not list the networks", "Check the wireless adapter is on.")
     ssids = [ln.split(":", 1)[1].strip()

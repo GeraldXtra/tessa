@@ -31,7 +31,9 @@ from ctypes import wintypes
 from pathlib import Path, PurePath
 from typing import Any, Iterator
 
-from .base import ToolError, ToolHold
+from core.security import gate
+
+from .base import ToolError, ToolHold, ToolRedirect
 
 # ── the Recycle Bin, via the shell's own file operation ──────────────────────
 
@@ -362,14 +364,21 @@ def read_text(path: str, max_bytes: int = MAX_READ_BYTES) -> dict[str, Any]:
 
 def open_path(path: str) -> dict[str, Any]:
     p = _resolve(path)
-    os.startfile(str(p))  # noqa: S606 — a resolved Path, never a string from a model
+    kind = gate.item_kind(p)
+    if kind == "source":
+        raise ToolRedirect("code.run_file", {"path": str(p)}, "a source file runs only through the code tools")
+    if kind == "program":
+        raise ToolError(f"{p.name} is something Windows would run when opened: a program, an installer, a shortcut, "
+                        f"a script or a macro file. I only open folders, documents, pages, pictures, sound and video",
+                        "To run code, ask me to run it and read the card. To open one of your apps, say its name.")
+    gate.start(gate.Start(kind=gate.ITEM, why="fs.open", path=str(p)))
     return {"path": str(p), "name": p.name}
 
 
 def reveal(path: str) -> dict[str, Any]:
     """Explorer, with the item selected. `/select,` needs the comma and no space."""
     p = _resolve(path)
-    subprocess.Popen(["explorer.exe", f"/select,{p}"], shell=False)
+    gate.start(gate.Start(kind=gate.ITEM, why="fs.reveal", path=str(p), mode="reveal"))
     return {"path": str(p), "name": p.name}
 
 
@@ -394,6 +403,7 @@ def disk_usage(path: str) -> dict[str, Any]:
 
 def make_folder(path: str) -> dict[str, Any]:
     p = _resolve(path, must_exist=False)
+    gate.refuse_protected(p)
     if p.exists():
         raise ToolError(f"{p.name} already exists", "Give it another name.")
     p.mkdir(parents=True)
@@ -406,9 +416,11 @@ def rename(path: str, to: str) -> dict[str, Any]:
     if not new_name or any(c in new_name for c in '\\/:*?"<>|'):
         raise ToolError(f"{new_name!r} is not a usable file name", "Try one without slashes or colons.")
     target = p.with_name(new_name)
+    gate.refuse_protected(p, target)
     if target.exists():
         raise ToolError(f"{new_name} already exists there", "Pick another name.")
     p.rename(target)
+    gate.record(target, "rename", "fs.rename")
     return {"path": str(target), "was": p.name, "name": new_name}
 
 
@@ -419,10 +431,12 @@ def move(path: str, to: str) -> dict[str, Any]:
     dst = _resolve(to, must_exist=False)
     if dst.is_dir():
         dst = dst / src.name
+    gate.refuse_protected(src, dst)
     if dst.exists():
         raise ToolError(f"{dst.name} is already there", "Move it somewhere else or rename it first.")
     dst.parent.mkdir(parents=True, exist_ok=True)
     shutil.move(str(src), str(dst))
+    gate.record(dst, "move", "fs.move")
     return {"path": str(dst), "name": src.name, "to": str(dst.parent)}
 
 
@@ -433,6 +447,7 @@ def copy(path: str, to: str) -> dict[str, Any]:
     dst = _resolve(to, must_exist=False)
     if dst.is_dir():
         dst = dst / src.name
+    gate.refuse_protected(dst)
     if dst.exists():
         raise ToolError(f"{dst.name} is already there", "Pick another destination.")
     dst.parent.mkdir(parents=True, exist_ok=True)
@@ -440,6 +455,7 @@ def copy(path: str, to: str) -> dict[str, Any]:
         shutil.copytree(str(src), str(dst))
     else:
         shutil.copy2(str(src), str(dst))
+    gate.record(dst, "copy", "fs.copy")
     return {"path": str(dst), "name": src.name, "to": str(dst.parent)}
 
 
@@ -520,6 +536,7 @@ def delete(path: str, confirmed: bool = False) -> dict[str, Any]:
     happens.
     """
     p = _resolve(path)
+    gate.refuse_protected(p)
     _refuse_root(p)  # ⚠ a drive or a protected root: refused before it is even counted
     if p.is_dir():
         n = sum(1 for _ in _walk(p, max_entries=200_000))

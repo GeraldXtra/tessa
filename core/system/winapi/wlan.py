@@ -11,6 +11,8 @@ guessed.
 from __future__ import annotations
 
 import subprocess
+
+from core.security import gate
 from typing import Any
 
 
@@ -32,8 +34,8 @@ def interface() -> dict[str, Any]:
     `signal` is an int percentage or None.
     """
     try:
-        r = subprocess.run(["netsh", "wlan", "show", "interfaces"],
-                           capture_output=True, text=True, timeout=15, shell=False)
+        r = gate.run(["netsh", "wlan", "show", "interfaces"], why="wifi state",
+                     capture_output=True, text=True, timeout=15, shell=False)
     except subprocess.TimeoutExpired:
         raise WlanUnavailable("netsh did not answer in time") from None
     if r.returncode != 0:

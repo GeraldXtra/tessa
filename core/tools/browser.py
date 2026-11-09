@@ -50,6 +50,8 @@ import time
 from pathlib import Path
 from typing import Any, Callable
 
+from core.security import gate
+
 from .base import ToolError, ToolHold
 
 PROFILE_ROOT = Path(os.environ.get("LOCALAPPDATA", "")) / "Tessa" / "browser-profiles"
@@ -577,8 +579,9 @@ class BrowserSession:
                 self._pw = sync_playwright().start()
                 try:
                     # HIS Chrome, by channel. No Chromium download, no metered bytes.
-                    self._ctx = self._pw.chromium.launch_persistent_context(
-                        channel="chrome", **launch)
+                    self._ctx = gate.start(gate.Start(kind=gate.OWN, why="her browser, by channel", mode="browser",
+                                                      launcher=self._pw.chromium,
+                                                      options=dict(channel="chrome", **launch)))
                     self.launch_via = "channel=chrome"
                 except Exception as exc:  # noqa: BLE001
                     # The same Chrome by path — only if Windows knows where it is.
@@ -589,8 +592,9 @@ class BrowserSession:
                             f"Chrome would not start: {type(exc).__name__}",
                             "Close any Chrome running from this profile and ask me again.") from None
                     try:
-                        self._ctx = self._pw.chromium.launch_persistent_context(
-                            executable_path=exe, **launch)
+                        self._ctx = gate.start(gate.Start(kind=gate.OWN, why="her browser, by path", mode="browser",
+                                                          launcher=self._pw.chromium,
+                                                          options=dict(executable_path=exe, **launch)))
                         self.launch_via = f"executable_path={exe}"
                     except Exception as exc2:  # noqa: BLE001
                         self._shutdown_playwright()
@@ -1145,12 +1149,16 @@ def read_page(url: str | None = None) -> dict[str, Any]:
 
 
 def screenshot(path: str | None = None) -> dict[str, Any]:
-    page = SESSION.page()
     target = Path(path) if path else (
         Path(os.environ.get("LOCALAPPDATA", ".")) / "Tessa" / "screenshots"
         / f"shot-{int(time.time())}.png")
+    if path:
+        gate.refuse_protected(target)
+    page = SESSION.page()
     target.parent.mkdir(parents=True, exist_ok=True)
     page.screenshot(path=str(target), full_page=False)
+    if path:
+        gate.record(target, "write", "browser.screenshot")
     return {"path": str(target), "name": target.name, "url": page.url}
 
 

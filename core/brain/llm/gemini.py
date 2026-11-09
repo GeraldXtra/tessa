@@ -52,6 +52,8 @@ import os
 import time
 from typing import Any, Iterator
 
+from core.security import secrets as secret_store
+
 from .base import LLMAdapter, LLMUnavailable, Message, RateLimited, ToolDef, Usage
 
 API_ROOT = "https://generativelanguage.googleapis.com/v1beta"
@@ -153,7 +155,7 @@ class GeminiLLM(LLMAdapter):
 
     @property
     def _key(self) -> str:
-        return os.environ.get(self._key_env, "")
+        return secret_store.get(self._key_env)
 
     @property
     def available(self) -> tuple[bool, str]:

@@ -201,12 +201,23 @@ check("programs start with no console window and suspended until they are in the
       (ROOT / "core" / "tools" / "runner.py").read_text(encoding="utf-8"))
 
 print("\n(3) 3b: running a file he names\n")
+def approve_last(ex: Executor) -> str:
+    req = list(ex.approvals.pending.values())[-1]
+    return ex.execute_approved(req.request_id)["result"]["said"]
+
+
 ex = executor()
 args_py = write("args.py", "import os, sys\nprint('args', sys.argv[1:])\nprint('key', os.environ.get('FAKE_API_KEY'))\n")
-os.environ["FAKE_API_KEY"] = "do-not-pass"
 said = new_turn(ex).run(ToolCall("code.run_file", {"path": str(args_py), "argv": ["3", "4"], "how": "named"}, origin="human"))
+pending = list(ex.approvals.pending.values())
+check("a file he named and never approved goes to the card first, with its code, and does not run yet",
+      len(pending) == 1 and pending[0].tool == "code.run_mine" and "It ran" not in said
+      and pending[0].args.get("code") == args_py.read_text(encoding="utf-8") and pending[0].args.get("whose") == "yours",
+      said[:120])
+os.environ["FAKE_API_KEY"] = "do-not-pass"
+said = approve_last(ex)
 os.environ.pop("FAKE_API_KEY", None)
-check("a file he named runs on his word, with its own interpreter", "It ran and finished" in said, said[:120])
+check("approved on the card, it runs with its own interpreter", "It ran and finished" in said, said[:120])
 check("his arguments arrive as separate arguments", "args ['3', '4']" in said)
 check("her secret is not in the program's environment", "key None" in said)
 check("what it printed is on screen in a block that is never spoken", "```text" in said and "--- what it printed ---" in said)
@@ -216,6 +227,12 @@ runs = list((CODE / "runs").iterdir())
 check("its full output is saved in a runs folder inside her code folder, never beside his file",
       runs and (runs[-1] / "output.txt").is_file() and not (WORK / "output.txt").exists())
 ex = executor()
+said = new_turn(ex).run(ToolCall("code.run_file", {"path": str(hello), "how": "named"}, origin="human"))
+said = approve_last(ex)
+check("approved once on the card, it runs", "It ran and finished" in said, said[:120])
+said = new_turn(ex).run(ToolCall("code.run_file", {"path": str(hello), "how": "named"}, origin="human"))
+check("asked again unchanged, it runs on his word with no card", "It ran and finished" in said
+      and not ex.approvals.pending, said[:120])
 said = new_turn(ex).run(ToolCall("code.run_file", {"path": str(hello), "how": "it"}, origin="human"))
 check("a file that came from 'it' is named, with where it is, and asked first",
       said.endswith("yes or no?") and "hello.py" in said and "conversation" in said and ex.ledger.pending is not None, said)
@@ -229,8 +246,9 @@ with open(str(web) + ":Zone.Identifier", "w", encoding="utf-8") as fh:
     fh.write("[ZoneTransfer]\nZoneId=3\n")
 ex = executor()
 said = new_turn(ex).run(ToolCall("code.run_file", {"path": str(web), "how": "named"}, origin="human"))
-check("a file Windows marks as downloaded from the internet is named and asked about first",
-      said.endswith("yes or no?") and "internet" in said, said)
+pending = list(ex.approvals.pending.values())
+check("a file Windows marks as downloaded from the internet goes to the card, and the card and her line say so",
+      len(pending) == 1 and "fromweb.py" in pending[0].args.get("downloaded", "") and "internet" in said, said)
 ex = executor()
 exe = write("tool.exe", "MZ")
 said = new_turn(ex).run(ToolCall("code.run_file", {"path": str(exe), "how": "named"}, origin="human"))
@@ -241,14 +259,18 @@ rb = write("hello.rb", "puts 1\n")
 said = new_turn(ex).run(ToolCall("code.run_file", {"path": str(rb), "how": "named"}, origin="human"))
 check("a language that is not installed is said plainly, never installed", "Ruby is not installed" in said, said)
 bat = write("go.bat", "@echo off\necho hi\n")
+ex = executor()
 said = new_turn(ex).run(ToolCall("code.run_file", {"path": str(bat), "argv": ["x"], "how": "named"}, origin="human"))
-check("a batch file takes no arguments", "takes no arguments" in said, said)
-said = new_turn(ex).run(ToolCall("code.run_file", {"path": str(forever), "how": "named", "timeout_s": 2}, origin="human"))
+check("a batch file takes no arguments, said before any card", "takes no arguments" in said
+      and not ex.approvals.pending, said)
+new_turn(ex).run(ToolCall("code.run_file", {"path": str(forever), "how": "named", "timeout_s": 2}, origin="human"))
+said = approve_last(ex)
 check("a never-ending file stops at his limit and she says so", "time limit of 2 seconds" in said, said[:140])
 check("the longest limit is ten minutes", "ten minutes" in new_turn(ex).run(ToolCall(
     "code.run_file", {"path": str(hello), "how": "named", "timeout_s": 900}, origin="human")))
 crash = write("dllcrash.py", "import ctypes\nctypes.windll.kernel32.ExitProcess(0xC0000139)\n")
-said = new_turn(ex).run(ToolCall("code.run_file", {"path": str(crash), "how": "named"}, origin="human"))
+new_turn(ex).run(ToolCall("code.run_file", {"path": str(crash), "how": "named"}, origin="human"))
+said = approve_last(ex)
 check("a Windows crash code is said in words, its number kept on screen",
       "not the version it was built for" in said.split("```")[0] and "0xC0000139" in said, said[:200])
 rd = TMP / "plan"
@@ -285,7 +307,8 @@ check("asked about Perl, she says she can run it with the copy inside Git, never
       spoken == "Yes, Emperor. I can run Perl here, with the copy that comes inside Git for Windows." and
       "not installed" not in spoken, spoken)
 err = write("broken.py", "print(undefined_name)\n")
-said = new_turn(ex).run(ToolCall("code.run_file", {"path": str(err), "how": "named"}, origin="human"))
+new_turn(ex).run(ToolCall("code.run_file", {"path": str(err), "how": "named"}, origin="human"))
+said = approve_last(ex)
 check("an error is reported with its exit code, read from the output, no model call",
       "stopped with an error" in said and "exit code 1" in said, said[:160])
 
@@ -358,6 +381,11 @@ said = new_turn(ex).run(ToolCall("code.run_mine", {"which": "last"}, origin="hum
 check("'the program you wrote' is the last one, and one she cannot run is said before any card",
       "cannot run COBOL" in said and not ex.approvals.pending, said)
 said = new_turn(ex).run(ToolCall("code.run_mine", {"path": str(mine)}, origin="human"))
+check("approved once, the same program asked for again runs with no card", "It ran and finished" in said
+      and not ex.approvals.pending, said[:120])
+mine.write_text(mine.read_text(encoding="utf-8") + "print('again')\n", encoding="utf-8")
+said = new_turn(ex).run(ToolCall("code.run_mine", {"path": str(mine)}, origin="human"))
+check("one line added to it, the card is back", len(ex.approvals.pending) == 1 and "It ran" not in said, said[:120])
 req = list(ex.approvals.pending.values())[-1]
 target = Path(req.args["path"])
 target.write_text(target.read_text(encoding="utf-8") + "print('changed')\n", encoding="utf-8")

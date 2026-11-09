@@ -50,6 +50,8 @@ import random
 import re
 import shutil
 import subprocess
+
+from core.security import gate
 import time
 from pathlib import Path, PurePath
 from typing import Any
@@ -2581,6 +2583,7 @@ def _download_media(url: str, expected: int, cap: int, what: str, ext: str, fina
         _rm_part(part)
         raise ToolError(f"could not place the {what} as {final.name} ({type(exc).__name__})",
                         "Nothing was overwritten.") from None
+    gate.record(final, "download", "x.save")
     return got
 
 
@@ -2635,6 +2638,7 @@ def _write_new(path: Path, data: bytes) -> None:
     except FileExistsError:
         raise ToolError(f"{path.name} appeared in {path.parent} while I was saving",
                         "Nothing was overwritten. Ask me again.") from None
+    gate.record(path, "download", "x.save")
 
 
 def _open_post(target: str) -> tuple[Any, dict[str, str], list[dict[str, Any]]]:
@@ -2822,7 +2826,8 @@ def save_video(post_id: str = "", index: int = 0, confirmed: bool = False) -> di
 def _ffmpeg_run(argv: list[str]) -> int:
     """THE ONE SUBPROCESS BOUNDARY of this file: reached only by `_save_hls`, with a fixed argv."""
     flags = int(getattr(subprocess, "CREATE_NO_WINDOW", 0))
-    return int(subprocess.run(argv, capture_output=True, timeout=900, creationflags=flags, check=False).returncode)
+    return int(gate.run(argv, why="ffmpeg stitches a saved video", capture_output=True, timeout=900,
+                        creationflags=flags, check=False).returncode)
 
 
 def _save_hls(target: str, who: str, stem_who: str, playlists: list[str], fields: dict[str, str],
@@ -2872,6 +2877,7 @@ def _save_hls(target: str, who: str, stem_who: str, playlists: list[str], fields
     except OSError as exc:
         raise ToolError(f"could not place the file as {final.name} ({type(exc).__name__})",
                         f"The stitched video is still at {part}.") from None
+    gate.record(final, "download", "x.save")
     size = final.stat().st_size
     spoken = f"Saved {who}'s video ({_size_words(size)}, stitched from the stream) to Videos\\Tessa, Emperor: {final.name}."
     return {"post_id": target, "who": who, "n": 1, "files": [{"path": str(final), "name": final.name, "bytes": size,

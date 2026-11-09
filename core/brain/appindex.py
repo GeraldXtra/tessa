@@ -88,6 +88,8 @@ import subprocess
 import threading
 import time
 import winreg
+
+from core.security import gate
 from dataclasses import asdict, dataclass, field
 from difflib import SequenceMatcher
 from pathlib import Path
@@ -304,8 +306,8 @@ def _start_apps() -> list[AppEntry]:
     """
     ps = "Get-StartApps | ForEach-Object { \"$($_.Name)`t$($_.AppID)\" }"
     try:
-        r = subprocess.run(
-            ["powershell", "-NoProfile", "-NonInteractive", "-Command", ps],
+        r = gate.run(
+            ["powershell", "-NoProfile", "-NonInteractive", "-Command", ps], why="list Start apps",
             capture_output=True, text=True, timeout=90,
         )
     except (OSError, subprocess.SubprocessError):
@@ -361,8 +363,8 @@ def _resolve_lnk_targets(paths: list[str]) -> dict[str, str]:
         "}\n"
     )
     try:
-        r = subprocess.run(
-            ["powershell", "-NoProfile", "-NonInteractive", "-Command", ps],
+        r = gate.run(
+            ["powershell", "-NoProfile", "-NonInteractive", "-Command", ps], why="read shortcut targets",
             input="\n".join(paths), capture_output=True, text=True, timeout=180,
         )
     except (OSError, subprocess.SubprocessError):
@@ -724,20 +726,7 @@ def launch(entry: AppEntry) -> tuple[bool, str]:
     (CLAUDE.md invariant 4) — this takes an AppEntry we built, not text.
     """
     try:
-        if entry.kind == "uwp":
-            # UWP packages launch only through the shell's AppsFolder.
-            subprocess.Popen(
-                ["explorer.exe", f"shell:AppsFolder\\{entry.launch}"],
-                close_fds=True,
-            )
-            return True, entry.name
-        if entry.kind == "shell":
-            if entry.launch.startswith("ms-settings:"):
-                os.startfile(entry.launch)  # noqa: S606
-            else:
-                subprocess.Popen([entry.launch], close_fds=True)
-            return True, entry.name
-        os.startfile(entry.launch)  # noqa: S606 - a path we indexed, never model text
+        gate.start(gate.Start(kind=gate.APP, why="open an app by name", entry=entry))
         return True, entry.name
     except OSError as exc:
         return False, f"{type(exc).__name__}: {exc}"

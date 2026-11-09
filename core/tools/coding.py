@@ -13,6 +13,9 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from core.security import gate
+from core.security import secrets as secret_store
+
 from . import langs, runner
 from .base import ToolError, ToolHold, ToolRedirect
 
@@ -400,6 +403,28 @@ def _slug(text: str) -> str:
     return re.sub(r"[^a-z0-9]+", "-", str(text).lower()).strip("-")[:24].strip("-") or "program"
 
 
+def batch_ok(src: Path, argv: list[str]) -> None:
+    if argv:
+        raise ToolError("a batch file takes no arguments in this step", "Ask me again without them.")
+    if re.search(r'[%^&|<>!"]', str(src)):
+        raise ToolError("that batch file's path has characters the command prompt would read as commands",
+                        "Rename the file or its folder and ask again.")
+
+
+def _runnable_here(p: Path, spec: langs.Spec, argv: list[str]) -> langs.Found:
+    found = langs.find(spec.key)
+    if found is None or not found.installed:
+        raise ToolError(f"{spec.name} is not installed on this laptop",
+                        "I never install a language myself. Ask me what I can run.")
+    if spec.key == "batch":
+        batch_ok(p, argv)
+    return found
+
+
+def downloaded_files(pieces: list[Any]) -> list[str]:
+    return [str(f.rel) for f in pieces if zone_of(Path(f.path)) >= 3]
+
+
 def plan_for(found: langs.Found, src: Path, rd: Path, argv: list[str]) -> dict[str, Any]:
     k, exe = found.key, found.exe
     out = rd / (_slug(src.stem) + ".exe")
@@ -430,11 +455,7 @@ def plan_for(found: langs.Found, src: Path, rd: Path, argv: list[str]) -> dict[s
     elif k == "powershell":
         plan["run"] = [exe, "-NoLogo", "-NoProfile", "-NonInteractive", "-File", str(src), *argv]
     elif k == "batch":
-        if argv:
-            raise ToolError("a batch file takes no arguments in this step", "Ask me again without them.")
-        if re.search(r'[%^&|<>!"]', str(src)):
-            raise ToolError("that batch file's path has characters the command prompt would read as commands",
-                            "Rename the file or its folder and ask again.")
+        batch_ok(src, argv)
         plan["run"] = [exe, "/d", "/c", str(src)]
     elif k == "bash":
         plan["run"] = [exe, src.as_posix(), *argv]
@@ -513,6 +534,9 @@ def run_source(p: Path, spec: langs.Spec, argv: list[str], timeout_s: int, *, mi
                        f"{compiled.ms / 1000:.2f} s)\n--- what the compiler printed ---\n{_shown_output(compile_text, rd)}")
             return {**facts, "spoken": spoken, "said": f"{spoken}\n```text\n{details}\n```",
                     "external_text": compile_text[:FENCE_CHARS], "external_source": "program output"}
+        held = gate.current()
+        if held is not None:
+            held.allow_built(plan["built"])
     res = runner.run_process(plan["run"], cwd=str(p.parent), env=run_env, timeout_s=timeout_s,
                              out_file=rd / "output.txt", label=f"run {p.name}")
     text = runner.decode(res.output)
@@ -559,13 +583,12 @@ def run_file(path: str, argv: Any = (), timeout_s: int = DEFAULT_TIMEOUT_S, how:
     p, spec = _source(path)
     args = _argv(argv)
     t = _timeout(timeout_s)
-    if hers(path=p) or hers(sha=sha256_of(p)):
+    _runnable_here(p, spec, args)
+    fs = gate.program_set(p, args)
+    if not gate.store().is_approved(fs.set_sha):
         raise ToolRedirect("code.run_mine", {"path": str(p), "timeout_s": t, **({"argv": args} if args else {})},
-                           "a program she wrote runs only from the card")
-    found = langs.find(spec.key)
-    if found is None or not found.installed:
-        raise ToolError(f"{spec.name} is not installed on this laptop",
-                        "I never install a language myself. Ask me what I can run.")
+                           "code runs only from the card, unless you approved this exact program before")
+    mine = bool(hers(path=p) or hers(sha=sha256_of(p)))
     reasons = []
     if provenance != "human":
         reasons.append("the model picked it from your words")
@@ -580,7 +603,9 @@ def run_file(path: str, argv: Any = (), timeout_s: int = DEFAULT_TIMEOUT_S, how:
         reasons.append("it is in a protected folder")
     if reasons and not confirmed:
         raise ToolHold(f"That runs {p.name} from {where_words(p)}: {', and '.join(reasons)}")
-    return run_source(p, spec, args, t)
+    with gate.verified(fs.card_files(), entry=fs.entry, root=fs.root, approved_by="approved list " + fs.set_sha[:16],
+                       argv=args):
+        return run_source(p, spec, args, t, mine=mine)
 
 
 def list_languages(language: str = "", look_again: Any = False) -> dict[str, Any]:
@@ -630,7 +655,7 @@ def generate(key: str, task: str, fixing: tuple[str, str] | None = None, brain: 
         clean = redact(error)
         clean = clean if isinstance(clean, str) else str(clean)
         for secret in langs.secret_names():
-            value = os.environ.get(secret, "")
+            value = secret_store.get(secret)
             if len(value) >= 8:
                 clean = clean.replace(value, "<REDACTED>")
         user = (f"This {lang} program failed when it ran. Write a corrected version of the whole file. The "
@@ -715,6 +740,7 @@ def write_program(language: str = "", task: str = "", run: Any = False, fix: str
         fh.write(code)
     sha = sha256_of(path)
     remember_written(path, sha, key, str(task), fix_of)
+    gate.record(path, "write", "code.write", sha)
     lines = len(code.splitlines())
     lang = langs.display(key)
     found = langs.find(key) if key in langs.BY_KEY else None
@@ -755,9 +781,9 @@ def resolve_mine(args: dict[str, Any]) -> dict[str, Any]:
     path, name = str(args.get("path") or "").strip(), str(args.get("name") or "").strip()
     if path:
         p = Path(path)
-        row = hers(path=p) or (hers(sha=sha256_of(p)) if p.is_file() else None)
-        if row is None:
-            raise ToolError(f"{p.name} is not a program I wrote", "Ask me to run it as yours, by its name and folder.")
+        if not p.is_file():
+            raise ToolError(f"{p.name} is not there", "Name the folder that holds it.")
+        row = hers(path=p) or hers(sha=sha256_of(p)) or {"language": ""}
     elif name:
         row = last_written(name)
         if row is None:
@@ -777,19 +803,31 @@ def resolve_mine(args: dict[str, Any]) -> dict[str, Any]:
     spec = langs.spec_for_ext(p.suffix)
     found = langs.find(spec.key) if spec else None
     if spec is None or found is None or not found.installed:
-        raise ToolError(f"I cannot run {langs.display(row.get('language', '')) or p.suffix} here: it is not installed",
-                        "I can still show you the code.")
+        lang = langs.display(row.get("language", "")) or (spec.name if spec else p.suffix)
+        raise ToolError(f"I cannot run {lang} here: it is not installed", "I can still show you the code.")
     code = raw.decode("utf-8", errors="replace")
-    out = {"path": str(p), "language": f"{found.name} ({found.version})", "file": p.name, "code": code,
-           "sha256": hashlib.sha256(raw).hexdigest(), "runs_in": str(p.parent), "time_limit": f"{t} s",
-           "timeout_s": t, "lines": len(code.splitlines()), "runs_as": RUNS_AS}
     argv = _argv(args.get("argv"))
+    if spec.key == "batch":
+        batch_ok(p, argv)
+    fs = gate.program_set(p, argv)
+    if not args.get("card") and gate.store().is_approved(fs.set_sha):
+        raise ToolRedirect("code.run_file", {"path": str(p), "timeout_s": t, **({"argv": argv} if argv else {})},
+                           "you approved this exact program before")
+    labels = {f.hers for f in fs.pieces}
+    out = {"path": str(p), "language": f"{found.name} ({found.version})", "file": p.name, "code": code,
+           "sha256": hashlib.sha256(raw).hexdigest(), "runs_in": fs.root, "time_limit": f"{t} s",
+           "timeout_s": t, "lines": len(code.splitlines()), "runs_as": RUNS_AS,
+           "files": fs.card_files(), "views": fs.views(), "set_sha256": fs.set_sha, "unchecked": fs.unchecked,
+           "whose": "mine" if labels == {True} else "yours" if labels == {False} else "mixed"}
     if argv:
         out["argv"] = argv
         out["arguments"] = " ".join(argv)
     if program_traits(spec.key, code)["online"]:
         out["goes_online"] = "Yes. This program uses the internet when it runs."
-    return out
+    zoned = downloaded_files(fs.pieces)
+    if zoned:
+        out["downloaded"] = "Windows marks " + ", ".join(zoned) + " as downloaded from the internet."
+    return gate.fit_card(out)
 
 
 def describe_mine(args: dict[str, Any]) -> str:
@@ -797,8 +835,15 @@ def describe_mine(args: dict[str, Any]) -> str:
     n = int(args.get("lines") or 0)
     argv = _argv(args.get("argv"))
     traits = program_traits(langs.canonical(lang) or "", str(args.get("code") or ""))
-    line = (f"run the {lang} program I wrote, {speak_name(args.get('file') or args.get('path') or '')}, "
+    whose = {"mine": "I wrote", "yours": "you named", "mixed": "that you and I both wrote parts of"}.get(
+        str(args.get("whose") or ""), "I wrote")
+    count = len(list(args.get("files") or []))
+    line = (f"run the {lang} program {whose}, {speak_name(args.get('file') or args.get('path') or '')}, "
             f"{n} line{'s' if n != 1 else ''} of code")
+    if args.get("downloaded"):
+        line += ", which Windows marks as downloaded from the internet"
+    if count > 1:
+        line += f", and {count - 1} more file{'s' if count != 2 else ''} it can load, all on the card"
     if argv:
         line += f", with {len(argv)} argument{'s' if len(argv) != 1 else ''}"
     line += f", for up to {limit_words(int(args.get('timeout_s') or 60))}"
@@ -811,13 +856,26 @@ def describe_mine(args: dict[str, Any]) -> str:
 
 def run_mine(path: str = "", language: str = "", file: str = "", code: str = "", sha256: str = "", runs_in: str = "",
              time_limit: str = "", timeout_s: int = DEFAULT_TIMEOUT_S, lines: int = 0, runs_as: str = "",
-             name: str = "", which: str = "", argv: Any = (), arguments: str = "", goes_online: str = "", *,
-             _approved_by_surface: bool = False) -> dict[str, Any]:
+             name: str = "", which: str = "", argv: Any = (), arguments: str = "", goes_online: str = "",
+             files: Any = (), views: Any = None, set_sha256: str = "", unchecked: Any = (), whose: str = "",
+             downloaded: str = "", *, _approved_by_surface: bool = False, _request_id: str = "") -> dict[str, Any]:
     if not _approved_by_surface:
-        raise ToolError("a program I wrote runs only from the approval card", "Approve it on the card and I will run it.")
+        raise ToolError("a program runs from here only from the approval card", "Approve it on the card and I will run it.")
     p, spec = _source(path)
     now = sha256_of(p)
     if not sha256 or now != sha256:
         raise ToolError(f"{p.name} changed after the card was raised, so nothing ran",
                         "Ask me to run it again and read the new card.")
-    return run_source(p, spec, _argv(argv), _timeout(timeout_s), mine=True)
+    rows = [dict(r) for r in (files or [])]
+    args = _argv(argv)
+    root = str(runs_in or p.parent)
+    entry = gate.program_set(p, args, root=root).entry if not rows else next(
+        (str(r["file"]) for r in rows if gate.norm(r["path"]) == gate.norm(p)), "")
+    if not rows or not entry or gate.set_sha(gate.CODE, entry, [(str(r["file"]), str(r["sha256"])) for r in rows],
+                                             args) != set_sha256:
+        raise ToolError("the card did not list every file of the program, so nothing ran",
+                        "Ask me to run it again and read the new card.")
+    with gate.verified(rows, entry=entry, root=root, approved_by=_request_id or "card", argv=args):
+        gate.store().approve(set_sha256, gate.CODE, str(p), [{"rel": r["file"], "sha256": r["sha256"]} for r in rows],
+                             args, _request_id or "card")
+        return run_source(p, spec, args, _timeout(timeout_s), mine=whose != "yours")

@@ -176,6 +176,11 @@ class HealthCollector:
                 ok, _why = audit.verify_incremental()
                 out["chainVerified"] = bool(ok)
                 out["chainVerifiedAt"] = _iso_now()
+                status = getattr(audit, "chain_status", None)
+                if callable(status):
+                    st = status()
+                    out["chainCheckedTo"] = st.get("checkedTo")
+                    out["chainFirstBadSeq"] = st.get("firstBadSeq")
             except Exception:  # noqa: BLE001
                 # A checker that throws must not be reported as a broken chain.
                 # Omitting the field is honest; `false` would be an accusation.

@@ -17,6 +17,8 @@ import json
 import os
 import secrets
 import subprocess
+
+from core.security import gate
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -175,8 +177,9 @@ def _lock_down_acl(path: Path) -> None:
         return
 
     user = os.environ.get("USERNAME") or getpass.getuser()
-    result = subprocess.run(
+    result = gate.run(
         ["icacls", str(path), "/inheritance:r", "/grant:r", f"{user}:F", "/grant:r", "SYSTEM:F"],
+        why="lock the runtime file to the owner",
         capture_output=True,
         text=True,
         check=False,
@@ -197,8 +200,9 @@ def _acl_is_locked_down(path: Path) -> tuple[bool, str]:
     if sys.platform != "win32":
         return True, ""
 
-    result = subprocess.run(
-        ["icacls", str(path)], capture_output=True, text=True, check=False
+    result = gate.run(
+        ["icacls", str(path)], why="read the runtime file's access list", capture_output=True, text=True,
+        check=False
     )
     if result.returncode != 0:
         return False, f"could not read ACL: {result.stderr.strip()}"
@@ -341,8 +345,8 @@ def remove_runtime_file(token: str, pid: int | None = None) -> bool:
 
 def pid_is_alive(pid: int) -> bool:
     if sys.platform == "win32":
-        result = subprocess.run(
-            ["tasklist", "/FI", f"PID eq {pid}", "/NH"],
+        result = gate.run(
+            ["tasklist", "/FI", f"PID eq {pid}", "/NH"], why="is a process alive",
             capture_output=True,
             text=True,
             check=False,

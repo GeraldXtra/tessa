@@ -21,6 +21,8 @@ from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any
 
+from core.security import gate
+
 Tier = str  # "green" | "amber" | "red"
 
 
@@ -218,15 +220,20 @@ def fuzzy_match(query: str, candidates: dict[str, Path]) -> tuple[list[str], str
 
 
 def open_path(path: Path) -> None:
-    os.startfile(str(path))  # noqa: S606 - a Path we constructed, never model text
+    gate.start(gate.Start(kind=gate.ITEM, why="open a folder or a document", path=str(path)))
 
 
-def open_in_vscode(path: Path) -> tuple[bool, str]:
-    exe = shutil.which("code") or shutil.which("code.cmd")
-    if exe is None:
-        return False, "VS Code is not on PATH"
-    subprocess.Popen([exe, str(path)], shell=False)
-    return True, str(path)
+def open_in_vscode(path: Path | None) -> tuple[bool, str]:
+    from core.system.abilities import code as vscode
+    from core.tools.base import ToolError, ToolRedirect
+
+    try:
+        got = vscode.open_in_code(str(path) if path is not None else "")
+    except ToolRedirect:
+        return False, "VS Code is outside the program folders, so it opens only from your card"
+    except ToolError as err:
+        return False, err.reason
+    return True, str(got.get("path") or "")
 
 
 def open_url(url: str, browser: str | None = None) -> tuple[bool, str]:
@@ -241,9 +248,9 @@ def open_url(url: str, browser: str | None = None) -> tuple[bool, str]:
     exe = _BROWSERS.get((browser or "").lower())
     resolved = shutil.which(exe) if exe else None
     if resolved:
-        subprocess.Popen([resolved, url], shell=False)
+        gate.start(gate.Start(kind=gate.PAGE, why=f"open a page in {browser}", url=url, argv=[resolved, url]))
         return True, f"{browser}: {url}"
-    os.startfile(url)  # noqa: S606 - validated http(s) above
+    gate.start(gate.Start(kind=gate.PAGE, why="open a page", url=url, mode="default"))
     return True, f"default browser: {url}"
 
 
@@ -251,8 +258,8 @@ def listening_on_port(port: int) -> list[dict[str, Any]]:
     """Who holds a port. `netstat -ano` then resolve each PID via tasklist."""
     out: list[dict[str, Any]] = []
     try:
-        res = subprocess.run(["netstat", "-ano", "-p", "TCP"],
-                             capture_output=True, text=True, timeout=15)
+        res = gate.run(["netstat", "-ano", "-p", "TCP"], why="who holds a port",
+                       capture_output=True, text=True, timeout=15)
     except (OSError, subprocess.SubprocessError):
         return out
     for line in res.stdout.splitlines():
@@ -270,20 +277,25 @@ def listening_on_port(port: int) -> list[dict[str, Any]]:
 
 def _pid_name(pid: int) -> str:
     try:
-        res = subprocess.run(["tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV", "/NH"],
-                             capture_output=True, text=True, timeout=15)
+        res = gate.run(["tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV", "/NH"], why="a process name",
+                       capture_output=True, text=True, timeout=15)
         m = re.match(r'^"([^"]+)"', res.stdout.strip())
         return m.group(1) if m else "unknown"
     except (OSError, subprocess.SubprocessError):
         return "unknown"
 
 
+VERSION_PROGRAMS = ("node", "npm", "python", "git")
+
+
 def tool_version(tool: str) -> tuple[bool, str]:
+    if tool not in VERSION_PROGRAMS:
+        return False, f"I only check the versions of {', '.join(VERSION_PROGRAMS)}"
     exe = shutil.which(tool) or shutil.which(f"{tool}.cmd")
     if exe is None:
         return False, f"{tool} is not on PATH"
     try:
-        res = subprocess.run([exe, "--version"], capture_output=True, text=True, timeout=20)
+        res = gate.run([exe, "--version"], why="a version check", capture_output=True, text=True, timeout=20)
         return True, (res.stdout or res.stderr).strip().splitlines()[0]
     except (OSError, subprocess.SubprocessError, IndexError) as exc:
         return False, f"{tool} did not answer --version ({exc})"

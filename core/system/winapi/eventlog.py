@@ -29,6 +29,8 @@ core/system/untrusted.py.
 from __future__ import annotations
 
 import subprocess
+
+from core.security import gate
 import xml.etree.ElementTree as ET
 from typing import Any
 
@@ -61,8 +63,8 @@ def tail(log: str = "System", count: int = 10) -> list[dict[str, Any]]:
         raise EventLogUnavailable(f"{log} is not a log I read; I have {', '.join(LOGS)}")
     n = max(1, min(int(count), MAX_COUNT))
     try:
-        result = subprocess.run(
-            ["wevtutil", "qe", log, f"/c:{n}", "/rd:true", "/f:xml"],
+        result = gate.run(
+            ["wevtutil", "qe", log, f"/c:{n}", "/rd:true", "/f:xml"], why="read an event log",
             capture_output=True, text=True, timeout=60, shell=False)
     except subprocess.TimeoutExpired:
         raise EventLogUnavailable(f"the {log} log did not answer in time") from None

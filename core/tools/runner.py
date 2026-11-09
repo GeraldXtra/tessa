@@ -10,6 +10,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from core.security import gate
+
 CREATE_SUSPENDED = 0x00000004
 CREATE_NEW_PROCESS_GROUP = 0x00000200
 CREATE_NO_WINDOW = 0x08000000
@@ -198,10 +200,10 @@ def run_process(argv: list[str], *, cwd: str, env: dict[str, str], timeout_s: fl
     t0 = time.perf_counter()
     started_at = time.time()
     try:
-        proc = subprocess.Popen(argv, cwd=cwd, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                                stderr=subprocess.STDOUT,
-                                creationflags=CREATE_SUSPENDED | CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP)
-    except OSError:
+        proc = gate.start(gate.Start(kind=gate.CODE, why=label, argv=list(argv), mode="popen", options=dict(
+            cwd=cwd, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            creationflags=CREATE_SUSPENDED | CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP)))
+    except BaseException:
         job.close()
         raise
     handle = int(proc._handle)

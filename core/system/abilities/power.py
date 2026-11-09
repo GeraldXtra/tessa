@@ -93,6 +93,8 @@ from __future__ import annotations
 
 import os
 import subprocess
+
+from core.security import gate
 import threading
 import time
 from dataclasses import dataclass, field
@@ -150,8 +152,8 @@ def _run_shutdown_exe(argv: list[str]) -> subprocess.CompletedProcess:
     here with a constant argv; a proof replaces this function with a recorder
     and nothing below it ever runs.
     """
-    return subprocess.run(argv, shell=False, capture_output=True, text=True,
-                          timeout=20, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    return gate.run(argv, why="shutdown.exe", shell=False, capture_output=True, text=True,
+                    timeout=20, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
 
 
 #: How a delay becomes a timer. `threading.Timer` in the daemon; a proof

@@ -17,6 +17,8 @@ mapped from Python's own tables and validated again by the script's
 from __future__ import annotations
 
 import subprocess
+
+from core.security import gate
 import time
 from pathlib import Path
 
@@ -37,7 +39,7 @@ def _run(kind: str, state: str, timeout: float = 25.0) -> dict[str, object]:
     argv = ["powershell", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
             "-File", str(_SCRIPT), "-Kind", kind, "-State", state]
     try:
-        r = subprocess.run(argv, capture_output=True, text=True, timeout=timeout, shell=False)
+        r = gate.run(argv, why="radio state", capture_output=True, text=True, timeout=timeout, shell=False)
     except subprocess.TimeoutExpired:
         raise RadioUnavailable("Windows did not answer about the radios in time") from None
     access = ""

@@ -35,6 +35,7 @@ os.environ["FOR_DISABLE_CONSOLE_CTRL_HANDLER"] = "1"
 import argparse  # noqa: E402
 import asyncio  # noqa: E402
 import hashlib  # noqa: E402
+import inspect
 import json  # noqa: E402
 import re  # noqa: E402
 import secrets  # noqa: E402
@@ -99,6 +100,7 @@ from core.security.audit import AuditLog  # noqa: E402
 from core.security.identity import IdentityError, assert_not_service_account  # noqa: E402
 from core.security.guard import Guard, Verdict  # noqa: E402
 from core.security import runtime as rt  # noqa: E402
+from core.security import secrets as secret_store
 from core import lifecycle  # noqa: E402
 from core.pty.grants import GrantRegistry, RedeemResult, Session  # noqa: E402
 from core.telemetry.cost import CURRENCY, CostLedger  # noqa: E402
@@ -571,6 +573,7 @@ class TessaDaemon:
         # audit entry whose meaning quietly changed is worse than one that is
         # missing, so both are recorded and neither stands in for the other.
         self.ptt_active = False
+        self._rearming = False
         self.mic_stream_open = False
         self.mic_opened_at: float | None = None
         self._voice_heard_id: str | None = None
@@ -1202,6 +1205,14 @@ class TessaDaemon:
         await self.broadcast("evt.pty.revoke", {"sessionId": session_id, "reason": reason})
         self.arm_revoke_watchdog(session_id, reason)
 
+    def _voice_stop(self, stages: list) -> Any:
+        stop = self.voice.stop
+        try:
+            takes = "stages" in inspect.signature(stop).parameters
+        except (TypeError, ValueError):
+            takes = False
+        return stop(stages=stages) if takes else stop()
+
     async def _run_voice_turn(self) -> None:
         """
         Key-up to spoken answer. The whole §4 budget lives in here.
@@ -1213,14 +1224,23 @@ class TessaDaemon:
         owner most needs to see that something is happening.
         """
         self._voice_turns += 1
+        own_stages: list = []
         try:
             turn = await asyncio.wait_for(
-                asyncio.to_thread(self.voice.stop), timeout=VOICE_TURN_STALL_S)
+                asyncio.to_thread(self._voice_stop, own_stages), timeout=VOICE_TURN_STALL_S)
         except asyncio.TimeoutError:
             abandon = getattr(self.voice, "abandon", None)
             if callable(abandon):
-                abandon(f"it stalled for {VOICE_TURN_STALL_S:.0f} s")
-            stages = getattr(self.voice, "stages", [])
+                try:
+                    scoped = "stages" in inspect.signature(abandon).parameters
+                except (TypeError, ValueError):
+                    scoped = False
+                reason = f"it stalled for {VOICE_TURN_STALL_S:.0f} s"
+                if scoped:
+                    abandon(reason, stages=own_stages)
+                else:
+                    abandon(reason)
+            stages = list(own_stages)
             last = stages[-1][0] if stages else "no stage reached"
             trail = " -> ".join(f"{n}@{ms:.0f}ms" for n, ms in stages) or "none"
             log(f"!! VOICE TURN STALLED after {VOICE_TURN_STALL_S:.0f}s | last stage: {last}")
@@ -1469,10 +1489,20 @@ class TessaDaemon:
         already armed and lose the pre-roll, so this checks the flags again on
         the event loop where they cannot race.
         """
-        if not self.convo.open or self.ptt_active or self.voice is None:
+        if not self._may_rearm():
             return
-        if self._floor.locked() or self._floor_waiting or self._typed_jobs:
-            return
+        self._rearming = True
+        try:
+            await self._rearm_claimed()
+        finally:
+            self._rearming = False
+
+    def _may_rearm(self, *, claimed: bool = False) -> bool:
+        if (self._rearming and not claimed) or not self.convo.open or self.ptt_active or self.voice is None:
+            return False
+        return not (self._floor.locked() or self._floor_waiting or self._typed_jobs)
+
+    async def _rearm_claimed(self) -> None:
         loop_now = asyncio.get_running_loop()
 
         def _auto_stop(reason: str) -> None:
@@ -1487,9 +1517,15 @@ class TessaDaemon:
         # herself. See ArmedMicrophone.flush_ring.
         dropped = await asyncio.to_thread(self.voice.mic.flush_ring)
 
+        if not self._may_rearm(claimed=True):
+            return
         self.ptt_active = True
         self._segment_by = "session"
-        await asyncio.to_thread(lambda: self.voice.start(on_auto_stop=_auto_stop))
+        try:
+            await asyncio.to_thread(lambda: self.voice.start(on_auto_stop=_auto_stop))
+        except BaseException:
+            self.ptt_active = False
+            raise
         log(f"  [session] listening again — {self.convo.describe()} "
             f"(flushed {dropped / 16000:.2f}s of her own audio from the ring)")
 
@@ -2717,6 +2753,35 @@ class TessaDaemon:
                 log(f"!! health sample failed: {err}")
                 continue
             await self.broadcast("evt.daemon.health", payload)
+            if payload.get("chainVerified") is False:
+                await self._tell_chain_broken()
+
+    async def _tell_chain_broken(self) -> None:
+        status = self.audit.chain_status()
+        told = getattr(self, "_chain_told", None)
+        if told is None:
+            told = self._chain_told = set()
+        bad = status.get("firstBadSeq")
+        payload = {
+            "level": "error",
+            "title": f"Audit chain check failed at seq {bad}",
+            "body": (f"{status.get('reason') or 'the audit log does not verify'}. Entries up to seq "
+                     f"{status.get('checkedTo')} verified; nothing after that point is proven."),
+            "actions": [],
+        }
+        frame = envelope("evt.notification", payload)
+        for ws, state in list(self.clients.items()):
+            surface = state.get("surface")
+            if (not state.get("authed") or surface in told
+                    or not topic_matches(state.get("subs") or (), "evt.notification")):
+                continue
+            try:
+                await ws.send(frame)
+            except websockets.exceptions.ConnectionClosed:
+                self.clients.pop(ws, None)
+                continue
+            told.add(surface)
+            log(f"!! audit chain: told the {surface} once this start, first bad seq {bad}")
 
     async def sweep_grants(self) -> None:
         """
@@ -2777,6 +2842,11 @@ async def main() -> None:
     parser.add_argument("--stt-model", default="base",
                         help="whisper size: tiny | base | small (default base)")
     args = parser.parse_args()
+    _held = secret_store.hold_and_scrub()
+    log(f"environment: {len(_held)} secret-named variable(s) held in memory and removed from every process "
+        f"she starts" + (f": {', '.join(_held)}" if _held else ""))
+    for _name in sorted(secret_store.configured_names()):
+        log(f"brain key {_name}: {secret_store.source_of(_name)}")
 
     # THE ONE STOP DOOR (core/lifecycle.py). Bound first, so a console close, a
     # sign-out or a tcli stop that lands during the ~20 s startup is queued and
@@ -2809,11 +2879,16 @@ async def main() -> None:
         log(f"health: psutil active | budget cap {daemon.budget_cap:.2f} {CURRENCY} "
             f"| spent today {daemon.ledger.spent_today():.2f} {CURRENCY}")
 
+    _t_chain = time.perf_counter()
     ok, why = daemon.audit.verify()
+    _chain = daemon.audit.chain_status()
+    _chain_ms = (time.perf_counter() - _t_chain) * 1000.0
     if not ok:
-        log(f"!! AUDIT CHAIN BROKEN: {why}")
+        log(f"!! AUDIT CHAIN BROKEN: {why} (first bad seq {_chain['firstBadSeq']}, "
+            f"verified to seq {_chain['checkedTo']}, {_chain_ms:.0f} ms)")
     else:
-        log(f"audit chain intact ({daemon.audit.count} entries)")
+        log(f"audit chain intact ({daemon.audit.count} entries, verified to seq {_chain['checkedTo']}"
+            f"{', the pinned fork at line 71 accepted' if _chain.get('fork') else ''}, {_chain_ms:.0f} ms)")
 
     # A browser orphaned by a force-killed previous daemon. Item 2c: a headful
     # Chrome must never outlive the daemon, and `atexit` does not run under

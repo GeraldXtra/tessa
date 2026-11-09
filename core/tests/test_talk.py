@@ -726,6 +726,7 @@ async def t7_sessions() -> None:
           any(fr["type"] == "evt.transcript.message" and fr["payload"]["message"]["role"] == "user"
               and fr["payload"]["message"]["text"] == "what day is it" for _t, fr, _n in rig.orb.frames))
     check("the microphone was never armed while she played", during and not any(during))
+    await until(lambda: d.voice.armed, 5.0)
     check("afterwards the conversation is open and listening", d.convo.open and d.voice.armed)
     vline = [fr["payload"]["message"] for _t, fr, _n in rig.orb.frames if fr["type"] == "evt.transcript.message"
              and fr["payload"]["message"]["text"] == "what day is it"]

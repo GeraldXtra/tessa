@@ -24,7 +24,7 @@ import random
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import Callable
+from typing import Any, Callable
 
 import numpy as np
 
@@ -207,6 +207,8 @@ class VoiceLoop:
         self._closing = False
         self._gen = 0
         self._drop_reason = ""
+        self._drop_reasons: dict[int, str] = {}
+        self._turn_gens: dict[int, int] = {}
         self._turn_local = threading.local()
         self._hint_given = False
         self.last_barge = None
@@ -276,10 +278,20 @@ class VoiceLoop:
     def _current(self, gen: int) -> bool:
         return gen == self._gen
 
-    def abandon(self, reason: str) -> None:
+    def abandon(self, reason: str, stages: list | None = None) -> None:
         with self._arm_lock:
-            self._gen += 1
-            self._drop_reason = reason
+            if stages is not None:
+                own = self._turn_gens.get(id(stages))
+                if own is None or own != self._gen:
+                    return
+            self._supersede(reason)
+
+    def _supersede(self, reason: str) -> None:
+        self._drop_reasons.setdefault(self._gen, reason)
+        while len(self._drop_reasons) > 16:
+            self._drop_reasons.pop(min(self._drop_reasons))
+        self._gen += 1
+        self._drop_reason = reason
 
     def _speak(self, gen: int, syn) -> bool:
         with self._arm_lock:
@@ -291,7 +303,8 @@ class VoiceLoop:
 
     def _dropped(self, where: str, heard: str, t0: float, audio_s: float,
                  intent: Intent = Intent.UNROUTED) -> Turn:
-        reason = self._drop_reason or "it was replaced"
+        reason = (self._drop_reasons.get(getattr(self._turn_local, "gen", None))
+                  or self._drop_reason or "it was replaced")
         self._stage(f"turn.dropped {where}: {reason} - nothing of it is said or shown", t0)
         return Turn(heard=heard, said="", intent=intent, timing=TurnTiming(audio_s=audio_s), dropped=reason)
 
@@ -430,7 +443,8 @@ class VoiceLoop:
         would have. Gerald hit the same wall and had no way to tell either.
         """
         now = time.perf_counter()
-        self.stages.append((name, (now - t0) * 1000.0))
+        own = getattr(self._turn_local, "stages", None)
+        (own if own is not None else self.stages).append((name, (now - t0) * 1000.0))
         if self._on_stage is not None:
             self._on_stage(name, (now - t0) * 1000.0)
         return now
@@ -452,8 +466,7 @@ class VoiceLoop:
         was billed for all of it.
         """
         with self._arm_lock:
-            self._gen += 1
-            self._drop_reason = "a new press replaced it"
+            self._supersede("a new press replaced it")
         speaking = self.bus.is_speaking
         spoke = getattr(self.bus, "spoke_within", None)
         recent = speaking or (callable(spoke) and spoke(float(getattr(self.mic, "pre_roll_s", 1.0)) + RECENT_SPEECH_S))
@@ -507,7 +520,7 @@ class VoiceLoop:
         if self._on_stage is not None:
             self._on_stage(msg, 0.0)
 
-    def stop(self) -> Turn | None:
+    def stop(self, stages: list | None = None) -> Turn | None:
         """Key UP. Everything from here to first audio is the §4 budget."""
         with self._arm_lock:
             armed, self._armed, self._closing = self._armed, False, False
@@ -517,13 +530,33 @@ class VoiceLoop:
             return None
         self._turn_local.gen = gen
         self._turn_local.heard_sent = False
+        self._turn_local.stages = stages if stages is not None else []
+        self._turn_local.outcomes = []
+        key = id(self._turn_local.stages)
+        self._turn_gens[key] = gen
         try:
             turn = self._turn(gen)
             turn.heard_sent = bool(getattr(self._turn_local, "heard_sent", False))
             return turn
         finally:
+            self._turn_gens.pop(key, None)
             self._turn_local.gen = None
             self._turn_local.heard_sent = False
+            self._turn_local.stages = None
+            self._turn_local.outcomes = None
+            self._set_verdict(None)
+
+    def _turn_list(self, name: str) -> list:
+        own = getattr(self._turn_local, name, None)
+        if own is None:
+            own = []
+            setattr(self._turn_local, name, own)
+        return own
+
+    def _set_verdict(self, verdict: Any) -> None:
+        tls = getattr(self.executor, "_tls", None)
+        if tls is not None:
+            tls.voice_verdict = verdict
 
     def _turn(self, gen: int) -> Turn:
         # A second press must end the segment INSTANTLY — his only escape hatch,
@@ -531,13 +564,13 @@ class VoiceLoop:
         # a second turn behind this one.
         if hasattr(self.mic, "cancel_watch"):
             self.mic.cancel_watch()
-        self.tool_outcomes = []
-        self.stages = []
+        outcomes = self.tool_outcomes = self._turn_list("outcomes")
+        self.stages = self._turn_list("stages")
         # THE VERDICT IS PER-TURN, like the fence. Leaving last turn's score in
         # place would let one confident utterance authorise an amber action in a
         # LATER segment that was never scored — the same class of leak as the
         # injection flag surviving a turn, which took a live session to find.
-        self.executor.voice_verdict = None
+        self._set_verdict(None)
         t0 = time.perf_counter()
         cap = self.mic.disarm()
         self._stage("disarm.returned", t0)
@@ -603,7 +636,7 @@ class VoiceLoop:
             else:
                 self._stage(f"verify.ok score={verdict.score:.3f} "
                             f"{verdict.reason} ({verdict.elapsed_ms:.0f} ms)", t0)
-                self.executor.voice_verdict = verdict
+                self._set_verdict(verdict)
                 self.executor.voice_confident = self.speaker.confident
 
         self._stage(f"transcribe.entered dur={cap.duration_s:.2f}s peak={cap.peak} rms={cap.rms:.0f}", t0)
@@ -920,13 +953,13 @@ class VoiceLoop:
                     self._stage(f"execute.entered {call.name}", t0)
                     tool_results.append(self.executor.run(call))
                     self._stage(f"execute.returned {call.name}", t0)
-                    self.tool_outcomes.append((call.name, True, ""))
+                    outcomes.append((call.name, True, ""))
                 except Exception as exc:  # noqa: BLE001
                     # The executor already catches its own failures; this is the
                     # backstop for anything it cannot. Still speaks.
                     tool_results.append(action_failed(
                         f"{type(exc).__name__}: {exc}", "Say it again and I will retry."))
-                    self.tool_outcomes.append((call.name, False, f"{type(exc).__name__}: {exc}"))
+                    outcomes.append((call.name, False, f"{type(exc).__name__}: {exc}"))
             if routed.plan:
                 if not self._current(gen):
                     return self._dropped("before the plan started", heard, t0, cap.duration_s, routed.intent)
@@ -935,11 +968,11 @@ class VoiceLoop:
                     line, ran = self.executor.start_plan(routed.plan)
                     tool_results.append(line)
                     self._stage(f"plan.returned {ran}", t0)
-                    self.tool_outcomes.append(("agent.plan", True, ""))
+                    outcomes.append(("agent.plan", True, ""))
                 except Exception as exc:
                     tool_results.append(action_failed(
                         f"{type(exc).__name__}: {exc}", "Nothing was done. Say it again and I will retry."))
-                    self.tool_outcomes.append(("agent.plan", False, f"{type(exc).__name__}: {exc}"))
+                    outcomes.append(("agent.plan", False, f"{type(exc).__name__}: {exc}"))
             routed.speech = " ".join(r for r in tool_results if r).strip()
         take_note = getattr(self.executor, "take_plan_note", None)
         note = take_note() if callable(take_note) else ""
@@ -1037,7 +1070,7 @@ class VoiceLoop:
             except Exception:  # noqa: BLE001
                 pass          # telemetry must never take a turn down
         return Turn(heard=heard, said=routed.speech, intent=routed.intent,
-                    timing=timing, tools=list(self.tool_outcomes),
+                    timing=timing, tools=list(outcomes),
                     ends_session=ends_session)
 
     def idle(self) -> None:

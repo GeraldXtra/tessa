@@ -37,6 +37,12 @@ def launch(app: str) -> dict[str, Any]:
         names = ", ".join(e.name for e in entries[:3])
         raise ToolError(f"{app} could be {names}", "Which one?")
     entry = entries[0]
+    from core.security import gate
+    from core.tools.base import ToolRedirect
+
+    if gate.app_needs_card(entry) is not None:
+        raise ToolRedirect("app.launch_checked", {"app": entry.name, "launch": entry.launch},
+                           "an app that is not in the program folders opens only from the card")
     ok, detail = _launch(entry)
     if not ok:
         raise ToolError(f"{entry.name} would not start ({detail})", "Try it again, or name it differently.")

@@ -26,6 +26,8 @@ is chosen by whoever installed it. See core/system/untrusted.py.
 from __future__ import annotations
 
 import subprocess
+
+from core.security import gate
 import winreg
 from typing import Any
 
@@ -81,8 +83,8 @@ def _configured() -> dict[str, dict[str, Any]]:
 def _live_states() -> dict[str, str]:
     """Service name (lowered) -> running | stopped | ... from `sc query`."""
     try:
-        result = subprocess.run(
-            ["sc", "query", "type=", "service", "state=", "all"],
+        result = gate.run(
+            ["sc", "query", "type=", "service", "state=", "all"], why="list services",
             capture_output=True, text=True, timeout=60, shell=False)
     except (subprocess.TimeoutExpired, OSError):
         return {}

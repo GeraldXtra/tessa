@@ -57,6 +57,8 @@ import threading
 import time
 import urllib.parse
 import webbrowser
+
+from core.security import gate
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -371,7 +373,7 @@ def authorise(timeout_s: int = 300, open_browser: bool = True) -> dict[str, Any]
     print(f"  {url}\n")
     if open_browser:
         try:
-            webbrowser.open(url)
+            gate.start(gate.Start(kind=gate.PAGE, why="Google sign-in", url=url))
         except Exception:
             pass
 

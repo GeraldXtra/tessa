@@ -292,6 +292,7 @@ tiers:
                            # name not in the service table. No sc create/delete, no
                            # binPath=.
     - code.run_own
+    - app.launch_checked
 
 # ── Protected paths ──────────────────────────────────────────────────────────
 # Writes, deletes, and renames under these confirm REGARDLESS of tier or actor.

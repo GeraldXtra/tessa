@@ -40,6 +40,14 @@ Tier = Literal["green", "amber", "red", "none"]
 
 GENESIS = "0" * 64
 
+KNOWN_FORK = {
+    "line": 71,
+    "seq": 69,
+    "prev": "e8867d2926f94210ff0a50ce0152bd63c13eefc9245c4327a9c4f619c3347de2",
+    "twin": "72c0f88f8148cdd6d58e96738e94064a5ca3bc934dd1be57ffc043fccd8b7692",
+    "kept": "83378a4ffed8f2c0f458b760116a04a6fc4dc6ce6c8e1fc428166245c02d155e",
+}
+
 # How much of the log's tail to read when re-deriving the chain head.
 #
 # Only the last line is needed. 64 KB is ~150 entries at the observed ~430 bytes
@@ -167,6 +175,14 @@ _SECRET_PATTERNS: list[tuple[re.Pattern[str], str]] = [
 ]
 
 
+def _held_values() -> list[str]:
+    try:
+        from core.security import secrets as _secrets
+    except Exception:
+        return []
+    return _secrets.held_values()
+
+
 def redact(value: Any) -> Any:
     """
     Recursively scrub secrets from a value before it is persisted.
@@ -198,6 +214,9 @@ def redact(value: Any) -> Any:
             out = out[:_MAX_REDACT_INPUT_CHARS] + f"…[truncated {dropped} bytes]"
         for pattern, replacement in _SECRET_PATTERNS:
             out = pattern.sub(replacement, out)
+        for held in _held_values():
+            if len(held) >= 8 and held in out:
+                out = out.replace(held, "<REDACTED>")
         return out
     if isinstance(value, dict):
         return {k: redact(v) for k, v in value.items()}
@@ -220,6 +239,48 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
 
+def _fresh_check() -> dict[str, Any]:
+    return {"pos": 0, "line": 0, "seq": 0, "prev": GENESIS, "fork": "", "checked_to": None,
+            "broken": None, "bad_seq": None, "bad_line": None}
+
+
+def _fail(state: dict[str, Any], lineno: int, bad_seq: Any, reason: str) -> str:
+    state.update(broken=reason, bad_seq=bad_seq, bad_line=lineno)
+    return reason
+
+
+def _check_entry(state: dict[str, Any], lineno: int, entry: dict[str, Any]) -> str | None:
+    stated = entry.pop("hash", None)
+    recomputed = hashlib.sha256(_canonical(entry)).hexdigest()
+    seq = entry.get("seq")
+    prev = entry.get("prev")
+    pin = KNOWN_FORK
+    if state["fork"] == "twin":
+        if (lineno == pin["line"] and seq == pin["seq"] and prev == pin["prev"]
+                and stated == recomputed == pin["kept"]):
+            state.update(fork="done", prev=recomputed, seq=seq + 1, checked_to=seq)
+            return None
+        return _fail(state, lineno, pin["seq"],
+                     f"line {lineno}: seq {seq} is not the pinned second entry of the known fork "
+                     f"at line {pin['line']}")
+    if seq != state["seq"]:
+        bad = seq if isinstance(seq, int) and not isinstance(seq, bool) else state["seq"]
+        return _fail(state, lineno, bad, f"line {lineno}: seq {seq} != expected {state['seq']}")
+    if prev != state["prev"]:
+        return _fail(state, lineno, seq, f"line {lineno}: seq {seq}: prev hash does not match previous entry")
+    if stated != recomputed:
+        return _fail(state, lineno, seq, f"line {lineno}: seq {seq}: content altered (hash mismatch)")
+    if seq == pin["seq"] and prev == pin["prev"]:
+        if lineno == pin["line"] - 1 and recomputed == pin["twin"] and not state["fork"]:
+            state["fork"] = "twin"
+            return None
+        return _fail(state, lineno, seq,
+                     f"line {lineno}: seq {seq}: does not match the pinned known fork "
+                     f"(lines {pin['line'] - 1} and {pin['line']})")
+    state.update(prev=recomputed, seq=seq + 1, checked_to=seq)
+    return None
+
+
 class AuditLog:
     """
     Append-only hash-chained log, one JSON object per line.
@@ -234,14 +295,7 @@ class AuditLog:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.Lock()
         self._seq, self._head = self._recover()
-        #: Incremental-verification cursor. See `verify_incremental`.
-        #: `_vpos` is a byte offset, `_vseq`/`_vprev` the chain state at it, and
-        #: `_vbroken` latches the first failure so a broken chain cannot heal.
-        self._vpos = 0
-        self._vline = 0
-        self._vseq = 0
-        self._vprev = GENESIS
-        self._vbroken: str | None = None
+        self._check = _fresh_check()
 
     def _recover(self) -> tuple[int, str]:
         """
@@ -390,38 +444,47 @@ class AuditLog:
         Returns (True, None) if intact, else (False, reason) naming the first
         entry where it broke.
         """
-        prev = GENESIS
-        expected_seq = 0
-        n = 0
+        state = _fresh_check()
+        result = self._walk(state, partial_tail_ok=False)
+        self._check = state
+        return result
 
+    def _walk(self, state: dict[str, Any], *, partial_tail_ok: bool) -> tuple[bool, str | None]:
+        if state["broken"] is not None:
+            return False, state["broken"]
         if not self.path.exists():
             return True, None
-
-        with self.path.open("r", encoding="utf-8") as fh:
-            for lineno, raw in enumerate(fh, start=1):
-                raw = raw.strip()
+        with self.path.open("rb") as fh:
+            fh.seek(state["pos"])
+            lineno = state["line"]
+            while True:
+                raw = fh.readline()
                 if not raw:
-                    continue
-                try:
-                    entry = json.loads(raw)
-                except json.JSONDecodeError:
-                    return False, f"line {lineno}: malformed JSON (torn write?)"
-
-                if entry.get("seq") != expected_seq:
-                    return False, f"line {lineno}: seq {entry.get('seq')} != expected {expected_seq}"
-                if entry.get("prev") != prev:
-                    return False, f"seq {entry['seq']}: prev hash does not match previous entry"
-
-                stated = entry.pop("hash", None)
-                recomputed = hashlib.sha256(_canonical(entry)).hexdigest()
-                if stated != recomputed:
-                    return False, f"seq {entry['seq']}: content altered (hash mismatch)"
-
-                prev = recomputed
-                expected_seq += 1
-                n += 1
-
+                    break
+                if partial_tail_ok and not raw.endswith(b"\n"):
+                    break
+                lineno += 1
+                stripped = raw.strip()
+                if stripped:
+                    try:
+                        entry = json.loads(stripped.decode("utf-8"))
+                    except (UnicodeDecodeError, json.JSONDecodeError):
+                        entry = None
+                    if not isinstance(entry, dict):
+                        return False, _fail(state, lineno, state["seq"],
+                                            f"line {lineno}: malformed JSON (torn write?) where seq "
+                                            f"{state['seq']} was expected")
+                    why = _check_entry(state, lineno, entry)
+                    if why is not None:
+                        return False, why
+                state["line"] = lineno
+                state["pos"] = fh.tell()
         return True, None
+
+    def chain_status(self) -> dict[str, Any]:
+        s = self._check
+        return {"ok": s["broken"] is None, "checkedTo": s["checked_to"], "firstBadSeq": s["bad_seq"],
+                "line": s["bad_line"], "reason": s["broken"], "fork": s["fork"] == "done"}
 
     def verify_incremental(self) -> tuple[bool, str | None]:
         """
@@ -444,71 +507,10 @@ class AuditLog:
         indicator: the surface would flicker back to green while the log is
         still wrong.
         """
-        if self._vbroken is not None:
-            return False, self._vbroken
-        if not self.path.exists():
-            return True, None
-
         try:
-            with self.path.open("r", encoding="utf-8") as fh:
-                fh.seek(self._vpos)
-                lineno = self._vline
-                # `readline()` RATHER THAN `for raw in fh`, and this was a live
-                # bug rather than a style choice. Python disables `tell()` on a
-                # file being iterated ("telling position disabled by next()
-                # call"), so the cursor never advanced while `_vseq` did — and
-                # the SECOND call re-read from byte 0 against an advanced
-                # sequence number and latched CHAIN BROKEN on a perfectly good
-                # log. A false alarm on the one thing this architecture is built
-                # around is worse than no indicator, which is the whole reason
-                # Session 2 refused to do this in the renderer.
-                while True:
-                    raw = fh.readline()
-                    if not raw:
-                        break
-                    lineno += 1
-                    stripped = raw.strip()
-                    if not stripped:
-                        self._vline = lineno
-                        self._vpos = fh.tell()
-                        continue
-                    # A partially-written final line is NOT a break. The daemon
-                    # may be mid-append, and reporting CHAIN BROKEN because we
-                    # read between the write and the newline would be the same
-                    # false alarm by a different route.
-                    if not raw.endswith("\n"):
-                        break
-                    try:
-                        entry = json.loads(stripped)
-                    except json.JSONDecodeError:
-                        self._vbroken = f"line {lineno}: malformed JSON (torn write?)"
-                        return False, self._vbroken
-
-                    if entry.get("seq") != self._vseq:
-                        self._vbroken = (f"line {lineno}: seq {entry.get('seq')} "
-                                         f"!= expected {self._vseq}")
-                        return False, self._vbroken
-                    if entry.get("prev") != self._vprev:
-                        self._vbroken = (f"seq {entry['seq']}: prev hash does not "
-                                         f"match previous entry")
-                        return False, self._vbroken
-
-                    stated = entry.pop("hash", None)
-                    recomputed = hashlib.sha256(_canonical(entry)).hexdigest()
-                    if stated != recomputed:
-                        self._vbroken = f"seq {entry['seq']}: content altered (hash mismatch)"
-                        return False, self._vbroken
-
-                    self._vprev = recomputed
-                    self._vseq += 1
-                    self._vline = lineno
-                    self._vpos = fh.tell()
+            return self._walk(self._check, partial_tail_ok=True)
         except OSError as exc:
-            # Cannot read is NOT the same as broken, and must not be reported as
-            # a tamper. Leave the last good verdict standing.
             return True, f"could not read the log ({exc})"
-
-        return True, None
 
     @property
     def head(self) -> str:

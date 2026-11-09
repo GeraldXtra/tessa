@@ -22,6 +22,8 @@ import re
 import socket
 import ssl
 import subprocess
+
+from core.security import gate
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from html.parser import HTMLParser
@@ -177,7 +179,7 @@ def _whois_age(domain: str) -> tuple[str | None, str | None]:
         pass
 
     try:
-        res = subprocess.run(["whois", domain], capture_output=True, text=True, timeout=25)
+        res = gate.run(["whois", domain], why="domain age", capture_output=True, text=True, timeout=25)
     except FileNotFoundError:
         return None, "domain age (RDAP unreachable and no whois client installed)"
     except (OSError, subprocess.SubprocessError) as exc:

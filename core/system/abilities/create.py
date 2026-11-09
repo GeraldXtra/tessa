@@ -78,6 +78,9 @@ def create_folder(path: str) -> dict[str, Any]:
     from core.tools.base import ToolError
 
     target = _target(path)
+    from core.security import gate
+
+    gate.refuse_protected(target)
     if target.exists():
         # THE NO-CLOBBER REFUSAL. Naming which kind of thing is already there
         # is the difference between a refusal he can act on and one he argues
@@ -98,6 +101,9 @@ def create_file(path: str, text: str = "") -> dict[str, Any]:
     from core.tools.base import ToolError
 
     target = _target(path)
+    from core.security import gate
+
+    gate.refuse_protected(target)
     if target.exists():
         what = "folder" if target.is_dir() else "file"
         raise ToolError(f"there is already a {what} called {target.name} in {target.parent}",
@@ -120,6 +126,7 @@ def create_file(path: str, text: str = "") -> dict[str, Any]:
     except OSError as exc:
         raise ToolError(f"Windows would not make it ({exc.strerror or exc})",
                         "Check the name has no illegal characters.") from None
+    gate.record(target, "create", "system.files.create_file")
     return {"path": str(target), "name": target.name, "where": str(target.parent),
             "chars": len(body), "empty": not body}
 
