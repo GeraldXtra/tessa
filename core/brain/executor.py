@@ -246,7 +246,7 @@ class Executor:
 
         Returns her line when the utterance WAS an answer, and None when it was
         not — and the None case is the important one. It is what lets him say
-        "actually, what time is it" while a delete is held without that
+        "actually, tell me the time" while a delete is held without that
         becoming a confirmation of the delete. Anything that is not recognisably
         an answer is routed normally and the hold simply stays pending until it
         expires.
@@ -688,6 +688,24 @@ class Executor:
                 # the approval card IS the confirmation.
                 handler_args["confirmed"] = True
                 result = spec.handler(**handler_args)
+        except ToolRedirect as again:
+            if again.tool != spec.name or spec.resolve is None:
+                self._log("APPROVED-BUT-FAILED", spec.name,
+                          f"requestId={request_id} tried to go to {again.tool} after the card", spec.tier, actor=actor)
+                raise ApprovalError("internal", "that has nowhere to go after the card; nothing was done") from None
+            try:
+                fresh = dict(spec.resolve(dict(again.call_args)))
+                detail = self._red_detail(spec, fresh)
+            except ToolError as err:
+                self._log("APPROVED-BUT-FAILED", spec.name, f"requestId={request_id} {err.reason}", spec.tier,
+                          actor=actor)
+                raise ApprovalError("internal", err.reason) from None
+            req = self.approvals.request(tool=spec.name, args=fresh, tier="red", provenance=actor, detail=detail,
+                                         frozen=tuple(getattr(spec, "frozen", ()) or ()))
+            req.external_at_request = bool(getattr(self.session, "external_content_in_context", 0))
+            self._log("APPROVED-BUT-ASKED-AGAIN", spec.name,
+                      f"requestId={request_id} {again.why}; new requestId={req.request_id}", spec.tier, actor=actor)
+            raise ApprovalError("permission.pending", f"{again.why}, so nothing was done; a new card is up") from None
         except ToolHold as again:
             # IT ASKED AGAIN, AFTER THE CARD (the sentences round, item 5a). One
             # retry with `confirmed` is all a card buys: a handler that holds a
@@ -730,6 +748,9 @@ class Executor:
 
         self._absorb_external(spec, result, actor=actor)
 
+        trace = result.get("trace") if isinstance(result, dict) else None
+        if isinstance(trace, str) and trace:
+            self._log("APPROVED-RAN", spec.name, f"requestId={request_id} {trace}", spec.tier, actor=actor)
         spoken = spec.success.format(**result) if isinstance(result, dict) else ""
         return {"tool": spec.name, "tier": spec.tier, "requestId": request_id,
                 "requested_args": dict(pending.args),
@@ -1397,7 +1418,9 @@ class Executor:
                           "a red refusal made a pending 'yes' ambiguous", "amber",
                           actor=self._actor_of(getattr(dropped, "origin", None)))
                 self.ledger.clear()
-            return red_refusal(spec.name, detail, editable=spec.name not in ("code.run_mine", "git.push")
+            return red_refusal(spec.name, detail, editable=spec.name not in ("code.run_mine", "git.push",
+                                                                             "app.launch_checked", "fs.write_checked",
+                                                                             "input.type_checked")
                                or bool(set(req.args) - set(req.frozen)))
 
         _target, whole = whole_folder_target(args)
@@ -1423,7 +1446,8 @@ class Executor:
         #     Green is untouched; red is the card above; a human-built amber
         #     call is exactly as it was; a holding amber tool still holds
         #     through its own handler below.
-        if (spec.tier == "amber" and origin != "human" and not spec.holds
+        gated = bool(getattr(spec, "gated", False)) and origin in ("human", "agent")
+        if (spec.tier == "amber" and origin != "human" and not spec.holds and not gated
                 and not bool(getattr(call, "confirmed", False))
                 and self.ledger.resolve_repeat(spec.name, args, origin=origin) is None):
             detail = f"{self._audit_line(spec, args)}, which the model picked from your words"

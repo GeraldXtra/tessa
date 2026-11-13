@@ -161,13 +161,160 @@ _SUSPICIOUS_TITLE_WORDS = ("powershell", "command prompt", "cmd.exe", "terminal"
                            "bash", "wsl", "administrator:")
 
 
+class GUITHREADINFO(ctypes.Structure):
+    _fields_ = [("cbSize", wintypes.DWORD), ("flags", wintypes.DWORD), ("hwndActive", wintypes.HWND),
+                ("hwndFocus", wintypes.HWND), ("hwndCapture", wintypes.HWND), ("hwndMenuOwner", wintypes.HWND),
+                ("hwndMoveSize", wintypes.HWND), ("hwndCaret", wintypes.HWND), ("rcCaret", wintypes.RECT)]
+
+
+user32.GetWindowThreadProcessId.argtypes = (wintypes.HWND, ctypes.POINTER(wintypes.DWORD))
+user32.GetWindowThreadProcessId.restype = wintypes.DWORD
+user32.GetGUIThreadInfo.argtypes = (wintypes.DWORD, ctypes.POINTER(GUITHREADINFO))
+user32.GetGUIThreadInfo.restype = wintypes.BOOL
+user32.IsWindow.argtypes = (wintypes.HWND,)
+user32.IsWindow.restype = wintypes.BOOL
+user32.AttachThreadInput.argtypes = (wintypes.DWORD, wintypes.DWORD, wintypes.BOOL)
+user32.AttachThreadInput.restype = wintypes.BOOL
+user32.BringWindowToTop.argtypes = (wintypes.HWND,)
+user32.SetForegroundWindow.argtypes = (wintypes.HWND,)
+
+
+def _class_of(hwnd: Any) -> str:
+    cls = ctypes.create_unicode_buffer(256)
+    user32.GetClassNameW(hwnd, cls, 256)
+    return cls.value
+
+
+def _process_path(pid: int) -> str:
+    k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    k32.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+    k32.OpenProcess.restype = wintypes.HANDLE
+    k32.QueryFullProcessImageNameW.argtypes = (wintypes.HANDLE, wintypes.DWORD, wintypes.LPWSTR,
+                                               ctypes.POINTER(wintypes.DWORD))
+    k32.QueryFullProcessImageNameW.restype = wintypes.BOOL
+    k32.CloseHandle.argtypes = (wintypes.HANDLE,)
+    h = k32.OpenProcess(0x1000, False, int(pid))
+    if not h:
+        return ""
+    try:
+        buf = ctypes.create_unicode_buffer(32768)
+        size = wintypes.DWORD(32768)
+        return buf.value if k32.QueryFullProcessImageNameW(h, 0, buf, ctypes.byref(size)) else ""
+    finally:
+        k32.CloseHandle(h)
+
+
+def target_now() -> dict[str, Any]:
+    out = {**foreground(), "pid": 0, "thread": 0, "process": "", "process_path": "", "focus_hwnd": 0,
+           "focus_class": ""}
+    hwnd = out["hwnd"]
+    if not hwnd:
+        return _with_refusal(out)
+    pid = wintypes.DWORD()
+    tid = int(user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid)))
+    gui = GUITHREADINFO(cbSize=ctypes.sizeof(GUITHREADINFO))
+    if tid and user32.GetGUIThreadInfo(tid, ctypes.byref(gui)) and gui.hwndFocus:
+        out["focus_hwnd"] = int(gui.hwndFocus)
+        out["focus_class"] = _class_of(gui.hwndFocus)
+    path = _process_path(int(pid.value)) if pid.value else ""
+    out.update(pid=int(pid.value), thread=tid, process_path=path, process=path.rsplit("\\", 1)[-1].lower() if path else "")
+    return _with_refusal(out)
+
+
+FRONT_WAIT_S = 2.0
+FRONT_SETTLE_S = 0.5
+FRONT_POLL_S = 0.01
+FRONT_DIRECT = "direct"
+FRONT_ATTACHED = "attached"
+FRONT_LAST: dict[str, Any] = {}
+
+
+def _in_front(hwnd: int) -> bool:
+    return int(user32.GetForegroundWindow() or 0) == int(hwnd)
+
+
+def _wait_front(hwnd: int, seconds: float) -> bool:
+    end = time.perf_counter() + seconds
+    while not _in_front(hwnd):
+        if time.perf_counter() >= end:
+            return False
+        time.sleep(FRONT_POLL_S)
+    return True
+
+
+def _front_direct(hwnd: int) -> bool:
+    FRONT_LAST["direct_accepted"] = bool(user32.SetForegroundWindow(hwnd))
+    return _wait_front(hwnd, FRONT_WAIT_S)
+
+
+def _front_attached(hwnd: int) -> bool:
+    k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    me = int(k32.GetCurrentThreadId())
+    fg = user32.GetForegroundWindow()
+    other = int(user32.GetWindowThreadProcessId(fg, None)) if fg else 0
+    attached = bool(other and other != me and user32.AttachThreadInput(me, other, True))
+    try:
+        user32.BringWindowToTop(hwnd)
+        user32.SetForegroundWindow(hwnd)
+    finally:
+        if attached:
+            user32.AttachThreadInput(me, other, False)
+    for _ in range(15):
+        if _in_front(hwnd):
+            return True
+        time.sleep(0.01)
+    return False
+
+
+def bring_to_front(hwnd: int, pid: int = 0) -> str:
+    FRONT_LAST.clear()
+    if not hwnd or not user32.IsWindow(hwnd):
+        return ""
+    owner = wintypes.DWORD()
+    user32.GetWindowThreadProcessId(hwnd, ctypes.byref(owner))
+    if pid and int(owner.value) != int(pid):
+        return ""
+    started = time.perf_counter()
+    way = ""
+    for name, attempt in ((FRONT_DIRECT, _front_direct), (FRONT_ATTACHED, _front_attached)):
+        if attempt(hwnd):
+            way = name
+            break
+    FRONT_LAST.update(way=way, seconds=time.perf_counter() - started)
+    return way
+
+
+def wait_target(matches: Any, seconds: float | None = None) -> dict[str, Any]:
+    end = time.perf_counter() + (FRONT_SETTLE_S if seconds is None else seconds)
+    while True:
+        now = target_now()
+        if matches(now) or time.perf_counter() >= end:
+            return now
+        time.sleep(FRONT_POLL_S)
+
+
+def _still(expect: dict[str, Any] | None) -> dict[str, Any]:
+    now = target_now()
+    if now["refuse"]:
+        raise InputRefused(now["refuse"])
+    if expect is not None:
+        for k in ("hwnd", "pid", "focus_hwnd", "class", "focus_class"):
+            if str(now.get(k) or "") != str(expect.get(k) or ""):
+                raise InputRefused(f"the keyboard moved to {now.get('title') or 'another window'} before I typed, "
+                                   f"so I stopped")
+    return now
+
+
 def keyboard_target() -> dict[str, Any]:
     """
     Where a keystroke would land, and whether that is allowed.
 
     Returns the foreground window plus `refuse` (a reason, or empty).
     """
-    fg = foreground()
+    return _with_refusal(foreground())
+
+
+def _with_refusal(fg: dict[str, Any]) -> dict[str, Any]:
     cls = (fg.get("class") or "").strip().lower()
     title = (fg.get("title") or "").strip().lower()
     if cls in TERMINAL_CLASSES:
@@ -261,7 +408,7 @@ def check_combo(keys: list[str]) -> str:
     return ""
 
 
-def send_keys(keys: list[str]) -> dict[str, Any]:
+def send_keys(keys: list[str], expect: dict[str, Any] | None = None) -> dict[str, Any]:
     """
     Press a key or a combination, modifiers held then released in reverse.
 
@@ -270,9 +417,7 @@ def send_keys(keys: list[str]) -> dict[str, Any]:
     reason = check_combo(keys)
     if reason:
         raise InputRefused(reason)
-    target = keyboard_target()
-    if target["refuse"]:
-        raise InputRefused(target["refuse"])
+    target = _still(expect)
     named = [k.strip().lower() for k in keys if k.strip()]
     mods = [k for k in named if k in MODIFIERS]
     rest = [k for k in named if k not in MODIFIERS]
@@ -291,18 +436,18 @@ TYPE_PAUSE_S = 0.01
 MAX_TEXT = 4000
 
 
-def send_text(text: str) -> dict[str, Any]:
+def send_text(text: str, expect: dict[str, Any] | None = None) -> dict[str, Any]:
     """Type `text` into whatever has focus, as characters rather than keys."""
     body = str(text or "")
     if not body:
         raise InputRefused("there is nothing to type")
     if len(body) > MAX_TEXT:
         raise InputRefused(f"that is {len(body)} characters; I type at most {MAX_TEXT} at once")
-    target = keyboard_target()
-    if target["refuse"]:
-        raise InputRefused(target["refuse"])
+    target = _still(expect)
     sent = 0
     for i in range(0, len(body), TYPE_CHUNK):
+        if i:
+            _still(expect)
         chunk = body[i:i + TYPE_CHUNK]
         seq: list[INPUT] = []
         for ch in chunk:

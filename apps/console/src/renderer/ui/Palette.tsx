@@ -39,7 +39,7 @@ export function Palette({ items, onClose }: { items: PaletteItem[]; onClose: () 
           ref={inputRef}
           className="pal-in"
           value={q}
-          placeholder="What do you want to do?"
+          placeholder="Type a command"
           autoComplete="off"
           aria-label="Command"
           onChange={(e) => {

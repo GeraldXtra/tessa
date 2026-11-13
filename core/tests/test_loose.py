@@ -94,7 +94,8 @@ saved = {n: REGISTRY[n] for n in ("x.follow", "proc.kill", "fs.move")}
 try:
     REGISTRY["x.follow"] = dataclasses.replace(saved["x.follow"], handler=_follow)
     REGISTRY["proc.kill"] = dataclasses.replace(saved["proc.kill"], handler=_kill)
-    REGISTRY["fs.move"] = dataclasses.replace(saved["fs.move"], handler=lambda **k: calls.append({"move": k}) or {})
+    REGISTRY["fs.move"] = dataclasses.replace(saved["fs.move"], handler=lambda **k: calls.append({"move": k}) or {},
+                                              gated=False)
     ex, aud, _s = executor()
     said = ex.run(ToolCall("x.follow", {"handle": "NASA"}, origin="human"))
     check("follow: she says the plain hold", said == "Following @NASA on X, publicly, as you — yes or no?", said)

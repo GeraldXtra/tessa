@@ -51,12 +51,29 @@ def _refuse(exc: Exception, alternative: str) -> Any:
     raise ToolError(str(exc), alternative) from None
 
 
-def type_text(text: str) -> dict[str, Any]:
+def _allowed_target(op: str, what: dict[str, Any], provenance: str) -> dict[str, Any]:
+    from core.security import allow
+    from core.system.winapi import inputs
+    from core.tools.base import ToolRedirect
+
+    t = inputs.target_now()
+    if t["refuse"]:
+        _refuse(inputs.InputRefused(t["refuse"]), "Put the cursor where you want it and ask me again.")
+    label = allow.typing_allowed(t) if provenance in allow.WRITERS else ""
+    if not label:
+        why = (f"{t.get('title') or 'that window'} ({t.get('process') or 'an unknown program'}) is not on the short "
+               f"list of places I type into without asking")
+        raise ToolRedirect(allow.TYPE_CARD, {"op": op, **what}, why)
+    return t
+
+
+def type_text(text: str, provenance: str = "schedule") -> dict[str, Any]:
     """AMBER. Type into whatever has focus — after the mechanism approves it."""
     from core.system.winapi import inputs
 
+    t = _allowed_target("type", {"text": text}, provenance)
     try:
-        got = inputs.send_text(text)
+        got = inputs.send_text(text, expect=t)
     except inputs.InputRefused as exc:
         _refuse(exc, "Put the cursor where you want it and ask me again.")
     # ⚠ SHE SAYS WHERE IT WENT. Typing goes to whatever holds focus, and focus
@@ -71,13 +88,21 @@ def type_text(text: str) -> dict[str, Any]:
             "verdict": f"Typed {got['chars']} characters into {where}, Emperor."}
 
 
-def press_key(keys: str) -> dict[str, Any]:
+def key_parts(keys: str) -> list[str]:
+    return [p for p in str(keys or "").replace(" plus ", "+").replace(" ", "+").split("+") if p]
+
+
+def press_key(keys: str, provenance: str = "schedule") -> dict[str, Any]:
     """AMBER. "enter", "ctrl+c", "alt+tab" — from the closed key table."""
     from core.system.winapi import inputs
 
-    parts = [p for p in str(keys or "").replace(" plus ", "+").replace(" ", "+").split("+") if p]
+    parts = key_parts(keys)
+    reason = inputs.check_combo(parts)
+    if reason:
+        _refuse(inputs.InputRefused(reason), "Tell me what you want to happen and I will find another way.")
+    t = _allowed_target("key", {"keys": "+".join(k.strip().lower() for k in parts)}, provenance)
     try:
-        got = inputs.send_keys(parts)
+        got = inputs.send_keys(parts, expect=t)
     except inputs.InputRefused as exc:
         _refuse(exc, "Tell me what you want to happen and I will find another way.")
     where = got.get("window") or "the focused window"
@@ -134,7 +159,7 @@ CAPABILITIES = [
     Capability(
         name="system.input.type", capability="input.keyboard", tier="amber",
         run=type_text,
-        params=(Param("text", str, doc="What should I type?"),),
+        params=(Param("text", str, doc="What should I type?"),), gated=True,
         phrasings=("type hello world", "type this out", "write that into the window"),
         success="{verdict}",
         audit="TYPE {text} into the focused window",
@@ -147,7 +172,7 @@ CAPABILITIES = [
     Capability(
         name="system.input.key", capability="input.keyboard", tier="amber",
         run=press_key,
-        params=(Param("keys", str, doc="Which key, or which combination?"),),
+        params=(Param("keys", str, doc="Which key, or which combination?"),), gated=True,
         phrasings=("press enter", "hit control c", "alt tab", "press escape"),
         success="{verdict}",
         audit="KEY {keys}",

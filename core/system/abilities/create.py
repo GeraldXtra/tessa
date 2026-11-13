@@ -55,7 +55,9 @@ def _target(raw: str) -> Path:
     except (OSError, ValueError):
         raise ToolError(f"{text!r} is not a usable path", "Try a simpler name.") from None
     if not path.is_absolute():
-        path = Path.home() / "Documents" / path
+        from core.security import allow
+
+        path = allow.known("Documents") / path
     # `\\` at the front is a UNC share. Creating on somebody else's machine is
     # not what "make a folder" means, and it is not this batch's act.
     if str(path).startswith("\\\\"):
@@ -74,11 +76,11 @@ def _guard_parent(path: Path) -> None:
         raise ToolError(f"{parent} is a file, not a folder", "Give me a folder to put it in.")
 
 
-def create_folder(path: str) -> dict[str, Any]:
+def create_folder(path: str, provenance: str = "schedule") -> dict[str, Any]:
     from core.tools.base import ToolError
 
     target = _target(path)
-    from core.security import gate
+    from core.security import allow, gate
 
     gate.refuse_protected(target)
     if target.exists():
@@ -89,6 +91,7 @@ def create_folder(path: str) -> dict[str, Any]:
         raise ToolError(f"there is already a {what} called {target.name} in {target.parent}",
                         "Give it another name, or tell me to open the one that is there.")
     _guard_parent(target)
+    allow.check_write("create_folder", target, provenance, folder=True)
     try:
         target.mkdir()
     except OSError as exc:
@@ -97,11 +100,11 @@ def create_folder(path: str) -> dict[str, Any]:
     return {"path": str(target), "name": target.name, "where": str(target.parent)}
 
 
-def create_file(path: str, text: str = "") -> dict[str, Any]:
+def create_file(path: str, text: str = "", provenance: str = "schedule") -> dict[str, Any]:
     from core.tools.base import ToolError
 
     target = _target(path)
-    from core.security import gate
+    from core.security import allow, gate
 
     gate.refuse_protected(target)
     if target.exists():
@@ -113,6 +116,17 @@ def create_file(path: str, text: str = "") -> dict[str, Any]:
     if len(body.encode("utf-8")) > MAX_TEXT_BYTES:
         raise ToolError(f"that is more than {MAX_TEXT_BYTES // 1024} kilobytes of text",
                         "Give me something shorter, or make it empty and edit it.")
+    allow.check_write("create_file", target, provenance, text=body)
+    return _write_file(target, body)
+
+
+def _write_file(target: Path, body: str) -> dict[str, Any]:
+    from core.security import gate
+    from core.tools.base import ToolError
+
+    _guard_parent(target)
+    if len(body.encode("utf-8")) > MAX_TEXT_BYTES:
+        raise ToolError(f"that is more than {MAX_TEXT_BYTES // 1024} kilobytes of text", "Give me something shorter.")
     try:
         # `x` — EXCLUSIVE CREATE. Not `w`. Between the exists() check above and
         # this line something could appear, and `w` would truncate it. `x`
@@ -136,7 +150,7 @@ CAPABILITIES = [
         name="system.files.create_folder", capability="fs.create", tier="amber",
         run=create_folder,
         params=(Param("path", str, doc="Where to make it, name included."),),
-        mutating=True, target="path",
+        mutating=True, target="path", gated=True,
         phrasings=("make a folder called drafts", "create a folder called notes"),
         success="Made it, Emperor. {name}, in {where}.",
         audit="mkdir {path}",
@@ -150,7 +164,7 @@ CAPABILITIES = [
         run=create_file,
         params=(Param("path", str, doc="Where to make it, name included."),
                 Param("text", str, default="", doc="What to put in it, if anything.")),
-        mutating=True, target="path",
+        mutating=True, target="path", gated=True,
         phrasings=("create a file called notes.txt", "make a new file called todo.md"),
         success="Made it, Emperor. {name}, in {where}.",
         audit="create file {path}",

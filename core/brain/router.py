@@ -4,7 +4,7 @@ core/brain/router.py — spec §5.3's first branch: local intents, answered free
 TWO THINGS CHANGED HERE AFTER GERALD ACTUALLY USED HER.
 
 1. THE MATCHING WAS TOO LITERAL. An exact-phrase table missed three of his four
-   real utterances — "How are you running?" and "What's the date?" both went to
+   real utterances — a status question and a date question both went to
    UNROUTED despite the intents existing. He will not learn my phrasings; the
    router has to meet him. It now normalises hard (contractions, filler openers,
    punctuation), scores KEYWORD SETS rather than matching whole strings, and
@@ -20,7 +20,7 @@ TWO THINGS CHANGED HERE AFTER GERALD ACTUALLY USED HER.
 
 THE POSSESSIVE REGISTER IS ON ACTIONS ONLY. "You opened this one yourself
 yesterday. Ask me next time." is right when she opens a folder and wrong as a
-response to "what time is it" — used everywhere it stops being character and
+response to "tell me the time" — used everywhere it stops being character and
 becomes a verbal tic, which is the same failure as a single fixed string.
 """
 
@@ -140,7 +140,7 @@ def collapse_repetition(text: str) -> str:
     A transcript that is one phrase repeated IS that phrase.
 
     He pressed the chord five times not knowing it toggled, and Whisper returned
-    "What time is it?" five times over. That is one question, not five, and
+    "tell me the time?" five times over. That is one question, not five, and
     routing it as a 60-character string missed the intent entirely.
     """
     t = " ".join(text.split())
@@ -162,10 +162,6 @@ def collapse_repetition(text: str) -> str:
 
 
 # ── keyword intents ──────────────────────────────────────────────────────────
-#
-# ANY of `must_any` plus optional `boost` words. Scored rather than matched, so
-# "how are you running" hits STATUS on both "how are you" and "running" without
-# needing that exact string to have been imagined in advance.
 
 @dataclass(frozen=True)
 class IntentSpec:

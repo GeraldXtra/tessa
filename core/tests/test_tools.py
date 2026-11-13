@@ -198,7 +198,7 @@ def main() -> int:
     check("'no' cancels", led.resolve_utterance("no")[0] == "cancel")
     led.arm("fs.delete", {"path": "X"}, "detail")
     check("an unrelated question is not an answer",
-          led.resolve_utterance("what time is it")[0] == "none")
+          led.resolve_utterance("the time on the clock")[0] == "none")
     check("...and leaves the hold pending", led.pending is not None)
 
     # ── 7. phrasings, including the collisions that already bit once

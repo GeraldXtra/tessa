@@ -31,7 +31,7 @@ from ctypes import wintypes
 from pathlib import Path, PurePath
 from typing import Any, Iterator
 
-from core.security import gate
+from core.security import allow, gate
 
 from .base import ToolError, ToolHold, ToolRedirect
 
@@ -401,55 +401,80 @@ def disk_usage(path: str) -> dict[str, Any]:
 
 # ── AMBER ────────────────────────────────────────────────────────────────────
 
-def make_folder(path: str) -> dict[str, Any]:
+def make_folder(path: str, *, provenance: str = "schedule") -> dict[str, Any]:
     p = _resolve(path, must_exist=False)
     gate.refuse_protected(p)
     if p.exists():
         raise ToolError(f"{p.name} already exists", "Give it another name.")
+    allow.check_write("make_folder", p, provenance, folder=True)
+    return _make_folder(p)
+
+
+def _make_folder(p: Path) -> dict[str, Any]:
     p.mkdir(parents=True)
     return {"path": str(p), "name": p.name}
 
 
-def rename(path: str, to: str) -> dict[str, Any]:
-    p = _resolve(path)
+def _rename_target(p: Path, to: str) -> Path:
     new_name = str(to).strip()
     if not new_name or any(c in new_name for c in '\\/:*?"<>|'):
         raise ToolError(f"{new_name!r} is not a usable file name", "Try one without slashes or colons.")
-    target = p.with_name(new_name)
+    return p.with_name(new_name)
+
+
+def rename(path: str, to: str, *, provenance: str = "schedule") -> dict[str, Any]:
+    p = _resolve(path)
+    target = _rename_target(p, to)
     gate.refuse_protected(p, target)
     if target.exists():
-        raise ToolError(f"{new_name} already exists there", "Pick another name.")
+        raise ToolError(f"{target.name} already exists there", "Pick another name.")
+    allow.check_write("rename", target, provenance, source=p, folder=p.is_dir())
+    return _rename(p, target)
+
+
+def _rename(p: Path, target: Path) -> dict[str, Any]:
     p.rename(target)
     gate.record(target, "rename", "fs.rename")
-    return {"path": str(target), "was": p.name, "name": new_name}
+    return {"path": str(target), "was": p.name, "name": target.name}
 
 
-def move(path: str, to: str) -> dict[str, Any]:
-    import shutil
-
-    src = _resolve(path)
+def _destination(src: Path, to: str) -> Path:
     dst = _resolve(to, must_exist=False)
-    if dst.is_dir():
-        dst = dst / src.name
+    return dst / src.name if dst.is_dir() else dst
+
+
+def move(path: str, to: str, *, provenance: str = "schedule") -> dict[str, Any]:
+    src = _resolve(path)
+    dst = _destination(src, to)
     gate.refuse_protected(src, dst)
     if dst.exists():
         raise ToolError(f"{dst.name} is already there", "Move it somewhere else or rename it first.")
+    allow.check_write("move", dst, provenance, source=src, folder=src.is_dir())
+    return _move(src, dst)
+
+
+def _move(src: Path, dst: Path) -> dict[str, Any]:
+    import shutil
+
     dst.parent.mkdir(parents=True, exist_ok=True)
     shutil.move(str(src), str(dst))
     gate.record(dst, "move", "fs.move")
     return {"path": str(dst), "name": src.name, "to": str(dst.parent)}
 
 
-def copy(path: str, to: str) -> dict[str, Any]:
-    import shutil
-
+def copy(path: str, to: str, *, provenance: str = "schedule") -> dict[str, Any]:
     src = _resolve(path)
-    dst = _resolve(to, must_exist=False)
-    if dst.is_dir():
-        dst = dst / src.name
+    dst = _destination(src, to)
     gate.refuse_protected(dst)
     if dst.exists():
         raise ToolError(f"{dst.name} is already there", "Pick another destination.")
+    allow.check_write("copy", dst, provenance, source=src, folder=src.is_dir())
+    return _copy(src, dst)
+
+
+def _copy(src: Path, dst: Path) -> dict[str, Any]:
+    import shutil
+
     dst.parent.mkdir(parents=True, exist_ok=True)
     if src.is_dir():
         shutil.copytree(str(src), str(dst))
@@ -457,6 +482,131 @@ def copy(path: str, to: str) -> dict[str, Any]:
         shutil.copy2(str(src), str(dst))
     gate.record(dst, "copy", "fs.copy")
     return {"path": str(dst), "name": src.name, "to": str(dst.parent)}
+
+
+MAX_CARD_TREE = 20000
+MAX_CARD_HASH = 64 * 1024 * 1024
+WRITE_OPS = ("create_file", "create_folder", "make_folder", "copy", "move", "rename")
+
+
+def _fingerprint(p: Path) -> dict[str, Any]:
+    import hashlib
+
+    if p.is_dir():
+        h = hashlib.sha256()
+        n = 0
+        total = 0
+        for e in sorted(_walk(p, max_entries=MAX_CARD_TREE + 1), key=lambda x: str(x).lower()):
+            n += 1
+            if n > MAX_CARD_TREE:
+                raise ToolError(f"{p} holds more than {MAX_CARD_TREE} things, too many to put on a card",
+                                "Do that one yourself, or copy it into one of your usual folders.")
+            try:
+                st = e.stat(follow_symlinks=False)
+            except OSError:
+                continue
+            total += 0 if e.is_dir() else st.st_size
+            h.update(f"{e.relative_to(p)}|{st.st_size}|{st.st_mtime_ns}\n".encode("utf-8"))
+        return {"kind": "folder", "files": n, "bytes": total, "sha256": h.hexdigest(),
+                "hashed": "the names, sizes and times of everything in it"}
+    size = p.stat().st_size
+    if size <= MAX_CARD_HASH:
+        return {"kind": "file", "files": 1, "bytes": size, "sha256": gate.sha256_file(p), "hashed": "its contents"}
+    st = p.stat()
+    h = hashlib.sha256(f"{size}|{st.st_mtime_ns}".encode("utf-8")).hexdigest()
+    return {"kind": "file", "files": 1, "bytes": size, "sha256": h, "hashed": "its size and time, as it is too big to read"}
+
+
+def resolve_write(args: dict[str, Any]) -> dict[str, Any]:
+    import hashlib
+
+    op = str(args.get("op") or "")
+    if op not in WRITE_OPS:
+        raise ToolError(f"I do not know the write {op!r}", "Nothing was written.")
+    dest = _resolve(args.get("path"), must_exist=False)
+    raw_source = str(args.get("source") or "")
+    source = _resolve(raw_source) if raw_source else None
+    gate.refuse_protected(dest, *([source] if source is not None and op in ("move", "rename") else []))
+    if op in ("copy", "move", "rename") and source is None:
+        raise ToolError("nothing to copy or move came through", "Name the file and I will try again.")
+    if dest.exists():
+        raise ToolError(f"{dest.name} is already there", "Pick another name or place.")
+    if op in ("create_file", "create_folder") and not dest.parent.is_dir():
+        raise ToolError(f"{dest.parent} does not exist", "Make that folder first, or name one that is there.")
+    if op == "create_file":
+        from core.system.abilities import create
+
+        if len(str(args.get("text") or "").encode("utf-8")) > create.MAX_TEXT_BYTES:
+            raise ToolError(f"that is more than {create.MAX_TEXT_BYTES // 1024} kilobytes of text",
+                            "Give me something shorter.")
+    verdicts = [allow.place(dest, "agent", folder=op in ("create_folder", "make_folder") or bool(
+        source is not None and source.is_dir()))]
+    if source is not None and op in ("move", "rename"):
+        verdicts.append(allow.place(source, "agent", folder=True))
+    verdict, why = allow.worst(*verdicts)
+    if verdict == allow.REFUSE:
+        raise ToolError(why, "Do that one yourself, or name another place.")
+    out: dict[str, Any] = {"op": op, "path": str(dest), "folder": str(dest.parent),
+                           "why": why if verdict == allow.CARD else "you asked for this card"}
+    if op == "create_file":
+        body = str(args.get("text") or "")
+        out.update(text=body, kind="file", files=1, bytes=len(body.encode("utf-8")),
+                   sha256=hashlib.sha256(body.encode("utf-8")).hexdigest(), hashed="its text")
+    elif op in ("create_folder", "make_folder"):
+        out.update(kind="folder", files=0, bytes=0, sha256="", hashed="a new empty folder")
+    else:
+        out["source"] = str(source)
+        out.update(_fingerprint(source))
+        if out["kind"] == "file" and out["bytes"] <= gate.MAX_VIEW_BYTES:
+            text = gate._text_of(source.read_bytes())
+            if text is not None:
+                out["text"] = text
+    return out
+
+
+def describe_write(args: dict[str, Any]) -> str:
+    op = str(args.get("op") or "")
+    path = str(args.get("path") or "")
+    if op == "create_file":
+        n = len(str(args.get("text") or ""))
+        line = f"write a new file {path}, {n} character{'s' if n != 1 else ''}"
+    elif op in ("create_folder", "make_folder"):
+        line = f"make the folder {path}"
+    elif op == "rename":
+        line = f"rename {args.get('source')} to {Path(path).name}"
+    else:
+        line = f"{op} {args.get('source')} to {path}"
+    return f"{line}, because {args.get('why')}"
+
+
+def write_checked(op: str = "", path: str = "", source: str = "", text: str = "", folder: str = "", why: str = "",
+                  kind: str = "", files: int = 0, bytes: int = 0, sha256: str = "", hashed: str = "", *,
+                  _approved_by_surface: bool = False) -> dict[str, Any]:
+    import hashlib
+
+    if not _approved_by_surface:
+        raise ToolError("a write outside your usual folders happens only from the card", "Approve it on the card.")
+    if op not in WRITE_OPS:
+        raise ToolError(f"I do not know the write {op!r}", "Nothing was written.")
+    dest = _resolve(path, must_exist=False)
+    src = _resolve(source) if source else None
+    gate.refuse_protected(dest, *([src] if src is not None and op in ("move", "rename") else []))
+    if dest.exists():
+        raise ToolError(f"{dest.name} appeared there after the card, so I wrote nothing", "Ask me again.")
+    if op == "create_file":
+        if hashlib.sha256(str(text).encode("utf-8")).hexdigest() != sha256:
+            raise ToolError("the text is not the text on the card, so I wrote nothing", "Ask me again.")
+        from core.system.abilities import create
+
+        return {**create._write_file(dest, str(text)), "said": f"Saved {dest}."}
+    if op in ("create_folder", "make_folder"):
+        if not dest.parent.is_dir():
+            raise ToolError(f"{dest.parent} does not exist", "Make that folder first.")
+        return {**_make_folder(dest), "said": f"Made {dest}."}
+    if src is None or _fingerprint(src).get("sha256") != sha256:
+        raise ToolError(f"{Path(source).name} changed after the card, so nothing was done", "Ask me again and read the new card.")
+    done = {"copy": _copy, "move": _move, "rename": _rename}[op](src, dest)
+    return {**done, "said": f"Done: {op} to {dest}."}
 
 
 # ── RED ──────────────────────────────────────────────────────────────────────

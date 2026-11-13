@@ -185,7 +185,7 @@ check("'stop listening completely' turns the phrase off too",
 
 # ── 4. THINGS THAT MUST NOT CLOSE IT ─────────────────────────────────────────
 print("\n4. a session is not closed by anything else")
-for utt in ("open my pictures", "what is the time", "how are things holding up",
+for utt in ("open my pictures", "give me the time", "how are things holding up",
             "stop", "be quiet", "open chrome", "hey tessa"):
     out = Router().route(utt)
     check(f"{utt!r} keeps the session open", not out.ends_session,

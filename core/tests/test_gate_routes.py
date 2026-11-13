@@ -108,6 +108,13 @@ def cards(ex: Executor) -> list:
     return list(ex.approvals.pending.values())
 
 
+def through_card(fn):
+    try:
+        return fn()
+    except ToolRedirect as r:
+        return files.write_checked(**files.resolve_write(r.call_args), _approved_by_surface=True)
+
+
 print("\n(A) the approved list and the ledger: one store, forward-only\n")
 a = gate.Store(TMP / "empty.db", TMP / "none.jsonl")
 tables = set(a.tables())
@@ -269,7 +276,7 @@ ex.approvals.pending.clear()
 
 made_py = WORK / "made" / "made.py"
 made_py.parent.mkdir()
-create.create_file(str(made_py), "placeholder made\n")
+through_card(lambda: create.create_file(str(made_py), "placeholder made\n", provenance="human"))
 say(ex, "code.run_file", {"path": str(made_py)})
 pend = cards(ex)
 check("route 3: a file made by create_file then run goes to a card, labelled hers",
@@ -277,11 +284,11 @@ check("route 3: a file made by create_file then run goes to a card, labelled her
 ex.approvals.pending.clear()
 
 txt = write(WORK / "renamed" / "plain.txt", "placeholder renamed\n")
-files.rename(str(txt), "plain.py")
-moved = write(WORK / "moved-from" / "m.py", "placeholder moved\n")
-files.move(str(moved), str(WORK / "renamed"))
-copied = write(WORK / "copy-from" / "c.py", "placeholder copied\n")
-files.copy(str(copied), str(WORK / "renamed"))
+through_card(lambda: files.rename(str(txt), "plain.py", provenance="human"))
+moved =write(WORK / "moved-from" / "m.py", "placeholder moved\n")
+through_card(lambda: files.move(str(moved), str(WORK / "renamed"), provenance="human"))
+copied =write(WORK / "copy-from" / "c.py", "placeholder copied\n")
+through_card(lambda: files.copy(str(copied), str(WORK / "renamed"), provenance="human"))
 say(ex, "code.run_file", {"path": str(WORK / "renamed" / "plain.py")})
 pend = cards(ex)
 hers_by_file = {f["file"]: f["hers"] for f in pend[0].args["files"]} if pend else {}
@@ -350,6 +357,7 @@ check("the gate's administrator check agrees with Windows",
       gate._elevated_now() == bool(ctypes.windll.shell32.IsUserAnAdmin()), str(gate._elevated_now()))
 SC: dict = {}
 gate.read_shortcut = lambda path: SC[gate.norm(path)]
+gate.signature_of = lambda path: {"status": gate.UNSIGNED, "why": "it is not signed"}
 SYS = Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32"
 NOTEPAD = SYS / "notepad.exe"
 
@@ -389,7 +397,7 @@ for what, e, opens in cases:
           (v is None) == opens, "" if v is None else v["why"])
 copied_lnk = lnk(WORK / "lnk-src" / "Mine.lnk", NOTEPAD)
 (HOME / "Desktop").mkdir(exist_ok=True)
-files.copy(str(copied_lnk), str(HOME / "Desktop"))
+through_card(lambda: files.copy(str(copied_lnk), str(HOME / "Desktop"), provenance="human"))
 SC[gate.norm(HOME / "Desktop" / "Mine.lnk")] = SC[gate.norm(copied_lnk)]
 v = gate.app_needs_card(entry("lnk", "Mine", HOME / "Desktop" / "Mine.lnk"))
 check("route 7: a shortcut her file tools put on the Desktop needs a card, labelled hers",

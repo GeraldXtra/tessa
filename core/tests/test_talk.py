@@ -484,7 +484,7 @@ async def t3_typed_spoken() -> None:
     print("\n3. a typed answer is spoken: frame order, levels, nothing listens")
     rig = await build()
     before = len(Dev.streams)
-    await say_typed(rig, "what time is it")
+    await say_typed(rig, "the time on the clock")
     await quiet(rig)
     f = [(t, fr["type"], fr["payload"]) for t, fr, _n in rig.orb.frames]
     kinds = [k for _t, k, _p in f]
@@ -558,7 +558,7 @@ async def t4_errors_spoken() -> None:
     check("thinking, speaking, idle", states == ["thinking", "speaking", "idle"], str(states))
     rig2 = await build()
     rig2.d.voice.router.route = lambda text: (_ for _ in ()).throw(RuntimeError("router exploded"))
-    await say_typed(rig2, "what time is it")
+    await say_typed(rig2, "the time on the clock")
     await quiet(rig2)
     her2 = [p["payload"]["message"] for _t, p, _n in rig2.orb.frames
             if p["type"] == "evt.transcript.message" and p["payload"]["message"]["role"] == "assistant"]
@@ -598,7 +598,7 @@ async def t6_cannot_speak() -> None:
     print("\n6. when she cannot speak the answer arrives as text, exactly as today")
     rig = await build(voice=False)
     LOG.clear()
-    await say_typed(rig, "what time is it")
+    await say_typed(rig, "the time on the clock")
     await quiet(rig)
     await say_typed(rig, "what day is it")
     await quiet(rig)
@@ -614,7 +614,7 @@ async def t6_cannot_speak() -> None:
     rig = await build()
     rig.tts.fail = True
     LOG.clear()
-    await say_typed(rig, "what time is it")
+    await say_typed(rig, "the time on the clock")
     await quiet(rig)
     await say_typed(rig, "what day is it")
     await quiet(rig)
@@ -626,7 +626,7 @@ async def t6_cannot_speak() -> None:
     Dev.fail_open = True
     LOG.clear()
     try:
-        await say_typed(rig, "what time is it")
+        await say_typed(rig, "the time on the clock")
         await quiet(rig)
         await say_typed(rig, "what day is it")
         await quiet(rig)
@@ -637,13 +637,13 @@ async def t6_cannot_speak() -> None:
     check("no audio device: logged once", sum("no audio output" in x for x in LOG) == 1)
     Dev.fail_start = True
     try:
-        await say_typed(rig, "what time is it")
+        await say_typed(rig, "the time on the clock")
         await quiet(rig)
     finally:
         Dev.fail_start = False
     check("a device that fails to start leaves the bus usable", not rig.d.voice.bus.is_speaking)
     n = len(rig.tts.said)
-    await say_typed(rig, "what time is it")
+    await say_typed(rig, "the time on the clock")
     await quiet(rig)
     check("...and the next answer is spoken", len(rig.tts.said) == n + 1 and rig.orb.states()[-2:] == ["speaking", "idle"],
           str(rig.orb.states()[-3:]))
@@ -651,7 +651,7 @@ async def t6_cannot_speak() -> None:
     Dev.hang = True
     LOG.clear()
     try:
-        await say_typed(rig, "what time is it")
+        await say_typed(rig, "the time on the clock")
         ok = await until(lambda: "idle" in rig.orb.states()[rig.orb.states().index("speaking"):]
                          if "speaking" in rig.orb.states() else False, 8.0)
     finally:
@@ -678,7 +678,7 @@ async def t7_sessions() -> None:
     Dev.probe = lambda t: during.append(bool(rig.mic.armed or d.voice.armed))
     LOG.clear()
     try:
-        await say_typed(rig, "what time is it")
+        await say_typed(rig, "the time on the clock")
         await quiet(rig)
     finally:
         Dev.probe = None
@@ -707,7 +707,7 @@ async def t7_sessions() -> None:
     Dev.max_live = 0
     ROUTER.datetime = FixedDay
     try:
-        await say_typed(rig, "what time is it")
+        await say_typed(rig, "the time on the clock")
         await asyncio.sleep(0.6)
         check("while his segment holds speech she does not speak over it",
               len(Dev.streams) == before and d.voice.armed)
@@ -739,7 +739,7 @@ async def t7_sessions() -> None:
     await send(rig, "cmd.voice.pushToTalk", {"action": "start"})
     check("a chord segment is armed", d.voice.armed and d._segment_by == "chord")
     before = len(Dev.streams)
-    await say_typed(rig, "what time is it")
+    await say_typed(rig, "the time on the clock")
     await asyncio.sleep(0.6)
     check("a segment he opened himself is never released by a typed answer", d.voice.armed and len(Dev.streams) == before)
     rig.mic.on_close("hard-cap")
@@ -761,7 +761,7 @@ async def t8_interrupt() -> None:
         first = await speaking_for(0.5, before)
         arrival = pc()
         n_said = len(rig.tts.said)
-        await say_typed(rig, "what time is it")
+        await say_typed(rig, "the time on the clock")
         stops.append((first.aborted_at - arrival) * 1000.0 if first and first.aborted_at else float("inf"))
         await quiet(rig)
         line = [x for x in LOG if "stopped her for a new typed message" in x]

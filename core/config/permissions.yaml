@@ -293,6 +293,8 @@ tiers:
                            # binPath=.
     - code.run_own
     - app.launch_checked
+    - fs.write_outside
+    - input.keyboard_checked
 
 # ── Protected paths ──────────────────────────────────────────────────────────
 # Writes, deletes, and renames under these confirm REGARDLESS of tier or actor.

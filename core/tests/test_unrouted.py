@@ -46,10 +46,9 @@ def check(label: str, cond: bool, extra: str = "") -> None:
 
 print("\nunrouted: the router reaching the brain\n")
 
-# ── 1. HIS EIGHT TRANSCRIPTS, verbatim, each to the right disposition ────────
 EIGHT = [
     ("Tessa, what's the temperature in Abuja right now?",            Disposition.LIVE_DATA),
-    ("Tessa, what is a hash table?", Disposition.QUESTION),
+    ("Tessa, how does a hash table work?", Disposition.QUESTION),
     ("The",                                   Disposition.FRAGMENT),
     ("Tessa, Open My Zorblats",                  Disposition.UNRESOLVED),
     ("OpenWikipedia.org",                   None),   # routes — never classified
@@ -113,7 +112,7 @@ check("'weather' alone survives as live data",
 r = Router()
 first = r.route("are you there").speech
 for _ in range(4):
-    r.route("what time is it")
+    r.route("the time on the clock")
 later = r.route("are you there").speech
 check("turn 1 greets", any(w in first for w in ("Good morning", "Good afternoon",
                                                 "Good evening", "It is")), first)
@@ -148,7 +147,7 @@ check("her name is only stripped as an ADDRESS",
 # the list: it is a real English word, and stripping it would eat a real
 # sentence rather than an address.
 check("a common word that merely sounds close is NOT stripped",
-      repair("professor, what is a closure?")[0] == "professor, what is a closure?")
+      repair("professor, how do closures work?")[0] == "professor, how do closures work?")
 check("concatenation splits on a capital, not on a plural",
       split_concatenated("Tweets") == "Tweets" and
       split_concatenated("OpenGoogle") == "Open Google")

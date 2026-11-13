@@ -177,10 +177,10 @@ def record_switched(root: Path, old: str) -> None:
 def repo_root(folder: Any) -> Path:
     raw = str(folder or "").strip().strip('"')
     if not raw:
-        raise ToolError("no folder came through", "Tell me which folder the repository is in.")
+        raise ToolError("no folder came through", "Tell me the folder the repository is in.")
     p = Path(os.path.expandvars(raw)).expanduser()
     if not p.is_absolute() or not p.exists():
-        raise ToolError(f"{p} is not there", "Tell me which folder the repository is in.")
+        raise ToolError(f"{p} is not there", "Tell me the folder the repository is in.")
     here = p if p.is_dir() else p.parent
     for d in (here, *here.parents):
         if (d / ".git").exists():

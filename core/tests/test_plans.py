@@ -495,7 +495,7 @@ ex, aud, ses = executor()
 say(ex, NASA_PLAN)
 confirm.HOLD_TTL_S = 0.0
 time.sleep(0.02)
-t = say(ex, "what time is it")
+t = say(ex, "the time on the clock")
 confirm.HOLD_TTL_S = ttl
 check("an expired plan met by another request: she answers it AND says the plan stopped",
       t.said.startswith("The last hold waited more than a minute, so I let it go. I stopped the plan there.")

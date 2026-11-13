@@ -116,6 +116,7 @@ from core.tools import runner as _runner
 from core.brain.humanness import _FENCED as _CODE_BLOCK
 
 _NEVER_REMEMBERED = frozenset({"code.run_mine", "git.push"})
+_SPOKEN_REFUSALS = frozenset({"input.type_checked"})
 _STOP_WORDS = re.compile(r"^\s*(?:tessa[\s,]+)?(?:stop|stop it|stop that|stop the program|stop running|cancel|"
                          r"cancel it|halt|kill it|abort)\s*[.!]*\s*$", re.I)
 
@@ -2497,7 +2498,8 @@ class TessaDaemon:
                 "retryable": False}, corr=corr))
             log(f"permission REFUSED {pending.tool} ({request_id[:8]}): {err.message}")
             announce = getattr(self, "say_line", None)
-            if pending.tool in _NEVER_REMEMBERED and request_id not in gate.pending and callable(announce):
+            told = pending.tool in _NEVER_REMEMBERED or (pending.tool in _SPOKEN_REFUSALS and err.code == "internal")
+            if told and request_id not in gate.pending and callable(announce):
                 why = str(err.message or "").strip().rstrip(".")
                 announce({"messageId": ulid(), "role": "assistant", "ts": now_iso(),
                           "text": f"That did not run, Emperor. {why[:1].upper()}{why[1:]}."})
@@ -2524,8 +2526,9 @@ class TessaDaemon:
             "requestId": request_id, "decision": "approve",
             "decidedBy": state.get("surface", "unknown"),
             "remembered": bool(payload.get("remember", False)) and pending.tool not in _NEVER_REMEMBERED})
+        trace = record["result"].get("trace") if isinstance(record.get("result"), dict) else None
         log(f"permission APPROVED{' (EDITED)' if record['edited'] else ''} "
-            f"{record['tool']} ({request_id[:8]})")
+            f"{record['tool']} ({request_id[:8]})" + (f": {trace}" if isinstance(trace, str) and trace else ""))
         await ws.send(envelope("res.ok", {"spoken": _speakable(record["spoken"])}, corr=corr))
         said = record.get("result", {}).get("said") if isinstance(record.get("result"), dict) else None
         announce = getattr(self, "say_line", None)

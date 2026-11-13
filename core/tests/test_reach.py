@@ -154,7 +154,7 @@ for utt in ("read me that", "list it", "open this", "open it", "show me that"):
     check(f"{utt!r} fires no tool", not calls, str(calls))
 
 print("\n   ...without breaking the commands that work")
-for utt, want in (("what is in my pictures", "fs.list"),
+for utt, want in (("what's in the pictures folder", "fs.list"),
                   (r"list C:\dev", "fs.list"),
                   # RETARGETED 2026-09-07 to the indexed capability version.
                   # See core/system/abilities/search.py.

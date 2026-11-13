@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import ctypes
 import hashlib
 import json
@@ -26,6 +27,8 @@ SCHEMA = 1
 
 OWN, APP, PAGE, ITEM, CODE = "own", "app", "page", "item", "code"
 KINDS = (OWN, APP, PAGE, ITEM, CODE)
+SCRIPT, FOLDER = "script", "folder"
+PUBLISHER = "publisher"
 
 SOURCE_EXTS = frozenset({
     ".py", ".pyw", ".pyz", ".js", ".mjs", ".cjs", ".ts", ".mts", ".cts", ".jsx", ".tsx", ".java", ".kt", ".kts",
@@ -41,7 +44,7 @@ PROGRAM_EXTS = frozenset({
     ".scf", ".chm", ".gadget", ".settingcontent-ms", ".library-ms", ".search-ms", ".searchconnector-ms",
     ".diagcab", ".msh", ".mshxml", ".psc1", ".xbap", ".xll", ".docm", ".dotm", ".xlsm", ".xltm", ".xlam",
     ".pptm", ".potm", ".ppam", ".ppsm", ".sldm", ".accdb", ".mdb", ".iqy", ".slk", ".website", ".theme",
-    ".themepack", ".deskthemepack", ".rdp", ".mof",
+    ".themepack", ".deskthemepack", ".rdp", ".mof", ".pyc",
 })
 RUNNABLE_EXTS = SOURCE_EXTS | PROGRAM_EXTS
 DISPLAY_EXTS = frozenset({
@@ -431,10 +434,11 @@ class FileSet:
     unchecked: list[dict[str, Any]]
     argv: list[str]
     kind: str = CODE
+    scope: str = "folder"
 
     @property
     def set_sha(self) -> str:
-        return set_sha(self.kind, self.entry, [(p.rel, p.sha256) for p in self.pieces], self.argv)
+        return set_sha(self.kind, self.entry, [(p.rel, p.sha256) for p in self.pieces], self.argv, self.scope)
 
     def card_files(self) -> list[dict[str, Any]]:
         return [p.card() for p in self.pieces]
@@ -443,9 +447,11 @@ class FileSet:
         return {p.rel: p.text for p in self.pieces if p.text is not None}
 
 
-def set_sha(kind: str, entry: str, pairs: list[tuple[str, str]], argv: list[str]) -> str:
-    body = json.dumps({"kind": kind, "entry": entry, "files": sorted([list(x) for x in pairs]), "argv": list(argv)},
-                      sort_keys=True, ensure_ascii=False)
+def set_sha(kind: str, entry: str, pairs: list[tuple[str, str]], argv: list[str], scope: str = "folder") -> str:
+    doc: dict[str, Any] = {"kind": kind, "entry": entry, "files": sorted([list(x) for x in pairs]), "argv": list(argv)}
+    if scope != FOLDER:
+        doc["scope"] = scope
+    body = json.dumps(doc, sort_keys=True, ensure_ascii=False)
     return hashlib.sha256(body.encode("utf-8")).hexdigest()
 
 
@@ -528,10 +534,361 @@ def _count_files(d: Path) -> int:
     return n
 
 
+PROJECT_MARKERS = frozenset({"package.json", "pyproject.toml", "requirements.txt", ".git", "node_modules"})
+FOLLOWED = {".py": "python", ".pyw": "python", ".js": "node", ".mjs": "node", ".cjs": "node", ".ts": "node",
+            ".mts": "node", ".cts": "node"}
+MAX_PARSE_BYTES = 1024 * 1024
+BESIDE_EXTS = frozenset({".exe", ".com", ".dll"})
+_PY_SOURCE = (".py", ".pyw")
+_PY_BINARY = (".pyc", ".pyd")
+_PY_MODULES_OUT = frozenset({
+    "importlib", "imp", "runpy", "subprocess", "ctypes", "cffi", "zipimport", "pkgutil", "code", "codeop", "builtins",
+    "site", "multiprocessing", "pty", "webbrowser", "unittest", "doctest", "pytest", "nose", "pydoc", "marshal",
+    "_winapi", "_posixsubprocess", "nt", "posix", "_imp", "_frozen_importlib", "_frozen_importlib_external",
+})
+_PY_NAMES_OUT = frozenset({"__import__", "__builtins__", "exec", "eval", "compile", "execfile", "globals", "locals",
+                           "vars", "breakpoint"})
+_PY_ATTRS_OUT = frozenset({
+    "import_module", "system", "popen", "startfile", "spawnl", "spawnle", "spawnlp", "spawnlpe", "spawnv", "spawnve",
+    "spawnvp", "spawnvpe", "execl", "execle", "execlp", "execlpe", "execv", "execve", "execvp", "execvpe", "posix_spawn",
+    "posix_spawnp", "add_dll_directory", "create_subprocess_exec", "create_subprocess_shell", "run_path",
+    "run_module", "load_module", "exec_module", "spec_from_file_location", "LoadLibrary", "LoadLibraryW",
+    "LoadLibraryExW", "CDLL", "WinDLL", "OleDLL", "PyDLL", "windll", "oledll", "cdll", "pydll", "meta_path",
+    "path_hooks", "modules", "addsitedir", "__subclasses__", "__globals__", "__builtins__", "__code__", "__dict__",
+    "__loader__", "__spec__", "__import__", "__bases__", "__base__", "__mro__", "attrgetter", "methodcaller",
+    "discover",
+})
+_JS_FOLLOW = (".js", ".mjs", ".cjs", ".ts", ".mts", ".cts", ".tsx", ".jsx", "")
+_JS_SUFFIXES = (".js", ".mjs", ".cjs", ".ts", ".mts", ".cts", ".tsx", ".jsx", ".node")
+_JS_MODULES_OUT = frozenset({"child_process", "vm", "worker_threads", "module", "cluster", "inspector", "wasi",
+                             "repl"})
+_JS_STATIC = re.compile(
+    r"\brequire\s*\(\s*(['\"])([^'\"\\\r\n]*)\1\s*\)"
+    r"|\bimport\s*\(\s*(['\"])([^'\"\\\r\n]*)\3\s*\)"
+    r"|\bimport\s+(?:type\s+)?(?:[\w$]+\s*,?\s*)?(?:\*\s*as\s+[\w$]+\s*|\{[^}]*\}\s*)?from\s*(['\"])([^'\"\\\r\n]*)\5"
+    r"|\bimport\s*(['\"])([^'\"\\\r\n]*)\7"
+    r"|\bexport\s+(?:type\s+)?(?:\*(?:\s*as\s+[\w$]+)?|\{[^}]*\})\s*from\s*(['\"])([^'\"\\\r\n]*)\9"
+    r"|\bimport\s+[\w$]+\s*=\s*require\s*\(\s*(['\"])([^'\"\\\r\n]*)\11\s*\)")
+_JS_WORD = re.compile(r"\b(?:require|import)\b")
+_JS_META = re.compile(r"import\s*\.\s*meta\s*\.\s*(?:url|dirname|filename)\b")
+_JS_OUT = re.compile(
+    r"\\u|\\x|\beval\b|\bFunction\b|\bconstructor\b|\bglobalThis\b|\bglobal\s*\[|"
+    r"\bprocess\s*\.\s*(?:dlopen|binding|_linkedBinding|mainModule)\b|\bmodule\s*\.\s*(?:require|constructor|paths|_\w+)|"
+    r"\bcreateRequire\b|\brequire\s*\.\s*(?:resolve|cache|main|extensions)\b|\bWebAssembly\b|"
+    r"\bset(?:Timeout|Interval|Immediate)\s*\(\s*['\"`]|\bimportScripts\b|\bDeno\b|\bBun\b|"
+    r"\bimport\s*\.\s*meta\s*\.\s*resolve\b")
+
+
+def zone_of(path: Any) -> int:
+    try:
+        text = open(str(path) + ":Zone.Identifier", encoding="utf-8", errors="replace").read()
+    except OSError:
+        return 0
+    m = re.search(r"ZoneId\s*=\s*(\d+)", text)
+    return int(m.group(1)) if m else 0
+
+
+def project_folder(entry: Any) -> Path | None:
+    start = Path(str(entry)).parent
+    home = norm(Path.home())
+    for d in (start, *start.parents):
+        if d.parent == d or norm(d) == home:
+            break
+        try:
+            items = list(os.scandir(d))
+        except OSError:
+            continue
+        for it in items:
+            n = it.name.lower()
+            try:
+                if n in PROJECT_MARKERS or (n.endswith(".csproj") and it.is_file(follow_symlinks=False)):
+                    return d
+            except OSError:
+                continue
+    return None
+
+
+def _py_inits(pkg: Path) -> list[Path]:
+    out = [pkg / ("__init__" + s) for s in (".py", ".pyw", ".pyc") if (pkg / ("__init__" + s)).is_file()]
+    out += sorted(p for p in pkg.glob("__init__*.pyd") if p.is_file())
+    return out
+
+
+def _py_files(base: Path, dotted: str) -> list[Path]:
+    out: list[Path] = []
+    d = base
+    for part in [x for x in str(dotted).split(".") if x]:
+        if not part.isidentifier():
+            break
+        out += [d / (part + s) for s in (".py", ".pyw", ".pyc") if (d / (part + s)).is_file()]
+        out += sorted(p for p in d.glob(part + ".pyd") if p.is_file())
+        out += sorted(p for p in d.glob(part + ".*.pyd") if p.is_file())
+        pkg = d / part
+        if not pkg.is_dir():
+            break
+        out += _py_inits(pkg)
+        d = pkg
+    return out
+
+
+def _py_all(pkg: Path) -> list[Path]:
+    out: list[Path] = []
+    try:
+        items = sorted(os.scandir(pkg), key=lambda e: e.name.lower())
+    except OSError:
+        return out
+    for it in items:
+        p = Path(it.path)
+        if it.is_dir(follow_symlinks=False):
+            if it.name.isidentifier():
+                out += _py_inits(p)
+        elif p.suffix.lower() in (".py", ".pyw", ".pyc", ".pyd"):
+            out.append(p)
+    return out
+
+
+def _py_imports(f: Path, base: Path) -> list[Path] | None:
+    try:
+        raw = f.read_bytes()
+    except OSError:
+        return None
+    if len(raw) > MAX_PARSE_BYTES:
+        return None
+    try:
+        tree = ast.parse(raw, filename=str(f))
+    except (SyntaxError, ValueError, MemoryError, RecursionError):
+        return None
+    out: list[Path] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for a in node.names:
+                if a.name.split(".")[0] in _PY_MODULES_OUT:
+                    return None
+                out += _py_files(base, a.name)
+        elif isinstance(node, ast.ImportFrom):
+            mod = node.module or ""
+            names = [a.name for a in node.names]
+            if node.level == 0:
+                if mod.split(".")[0] in _PY_MODULES_OUT or any(n in _PY_ATTRS_OUT or n in _PY_NAMES_OUT for n in names):
+                    return None
+                if mod == "sys" and "path" in names:
+                    return None
+                root = base
+            else:
+                root = f.parent
+                for _ in range(node.level - 1):
+                    root = root.parent
+            if mod:
+                out += _py_files(root, mod)
+            for n in names:
+                if n == "*":
+                    pkg = root.joinpath(*mod.split(".")) if mod else root
+                    if pkg.is_dir():
+                        out += _py_all(pkg)
+                else:
+                    out += _py_files(root, f"{mod}.{n}" if mod else n)
+        elif isinstance(node, ast.Name) and node.id in _PY_NAMES_OUT:
+            return None
+        elif isinstance(node, ast.Attribute):
+            if node.attr in _PY_ATTRS_OUT:
+                return None
+            if node.attr == "path" and isinstance(node.value, ast.Name) and node.value.id == "sys":
+                return None
+        elif isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "getattr":
+            name = node.args[1] if len(node.args) > 1 else None
+            if not (isinstance(name, ast.Constant) and isinstance(name.value, str)):
+                return None
+            if name.value in _PY_ATTRS_OUT or name.value in _PY_NAMES_OUT:
+                return None
+    return out
+
+
+def _js_files(t: Path) -> list[Path] | None:
+    if not t.name:
+        return None
+    names = [t] + [t.with_name(t.name + s) for s in _JS_SUFFIXES]
+    if t.suffix.lower() in (".js", ".mjs", ".cjs", ".jsx"):
+        stem = t.with_suffix("")
+        names += [stem.with_name(stem.name + s) for s in (".ts", ".mts", ".cts", ".tsx")]
+    out: list[Path] = []
+    for c in names:
+        if c.is_file() and not any(norm(c) == norm(x) for x in out):
+            out.append(c)
+    if t.is_dir():
+        out += [t / ("index" + s) for s in _JS_SUFFIXES if (t / ("index" + s)).is_file()]
+        pj = t / "package.json"
+        if pj.is_file():
+            try:
+                meta = json.loads(pj.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                return None
+            if not isinstance(meta, dict) or "exports" in meta or "imports" in meta:
+                return None
+            out.append(pj)
+            main = meta.get("main")
+            if isinstance(main, str) and main.strip():
+                sub = _js_files(Path(os.path.normpath(str(t / main))))
+                if sub is None:
+                    return None
+                out += sub
+    return out
+
+
+def _js_spec(spec: str, importer: Path) -> list[Path] | None:
+    s = spec.strip()
+    if not s or s.startswith(("#", "file:", "data:", "http:", "https:")):
+        return None
+    name = s[5:] if s.startswith("node:") else s
+    if name.split("/")[0] in _JS_MODULES_OUT:
+        return None
+    if s.startswith("node:"):
+        return []
+    if s in (".", "..") or s.startswith(("./", "../", ".\\", "..\\", "/", "\\")) or re.match(r"^[A-Za-z]:[\\/]", s):
+        target = Path(s) if os.path.isabs(s) else importer.parent / s
+        return _js_files(Path(os.path.normpath(str(target))))
+    return []
+
+
+def _js_imports(f: Path) -> list[Path] | None:
+    try:
+        raw = f.read_bytes()
+    except OSError:
+        return None
+    if len(raw) > MAX_PARSE_BYTES:
+        return None
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+    if _JS_OUT.search(text):
+        return None
+    spans: list[tuple[int, int]] = []
+    specs: list[str] = []
+    for m in _JS_STATIC.finditer(text):
+        spans.append((m.start(), m.end()))
+        specs.append(next(g for g in (m.group(2), m.group(4), m.group(6), m.group(8), m.group(10), m.group(12))
+                          if g is not None))
+    for w in _JS_WORD.finditer(text):
+        if not any(a <= w.start() < b for a, b in spans) and not _JS_META.match(text, w.start()):
+            return None
+    out: list[Path] = []
+    for s in specs:
+        got = _js_spec(s, f)
+        if got is None:
+            return None
+        out += got
+    return out
+
+
+def lone_set(entry: Any) -> tuple[list[Path], list[dict[str, Any]]] | None:
+    e = Path(str(entry))
+    lang = FOLLOWED.get(e.suffix.lower())
+    if lang is None or not e.is_file():
+        return None
+    d = e.parent
+    if project_folder(e) is not None or zone_of(e) >= 3:
+        return None
+    try:
+        items = sorted(os.scandir(d), key=lambda x: x.name.lower())
+    except OSError:
+        return None
+    if len(items) > MAX_WALK_ENTRIES:
+        return None
+    found: dict[str, Path] = {}
+    followed: set[str] = set()
+    queue: list[Path] = []
+
+    def add(p: Path, follow: bool) -> bool:
+        k = norm(p)
+        if k not in found:
+            if _attrs(p) & CLOUD_BITS:
+                _refuse(f"{p.name} is a cloud placeholder or a link, so I cannot check it without downloading it",
+                        "Make the folder available offline first.")
+            found[k] = p
+        suf = p.suffix.lower()
+        if lang == "python" and suf in _PY_BINARY and follow:
+            return False
+        if lang == "node" and suf == ".node" and follow:
+            return False
+        can = suf in _PY_SOURCE if lang == "python" else suf in _JS_FOLLOW and p.name.lower() != "package.json"
+        if follow and can and k not in followed:
+            followed.add(k)
+            queue.append(p)
+        return True
+
+    add(e, True)
+    shadow = _shadow_names() if lang == "python" else set()
+    for it in items:
+        p = Path(it.path)
+        try:
+            is_dir = it.is_dir(follow_symlinks=False)
+        except OSError:
+            continue
+        if is_dir:
+            if it.name.lower() in shadow:
+                for init in _py_inits(p):
+                    add(init, False)
+            continue
+        suf = p.suffix.lower()
+        if suf in BESIDE_EXTS or (suf in (".py", ".pyw", ".pyc", ".pyd") and p.name.split(".")[0].lower() in shadow):
+            add(p, False)
+    while queue:
+        f = queue.pop()
+        deps = _py_imports(f, d) if lang == "python" else _js_imports(f)
+        if deps is None:
+            return None
+        for p in deps:
+            if not add(p, True):
+                return None
+        if len(found) > MAX_FILES:
+            return None
+    paths = sorted(found.values(), key=lambda p: _rel(p, d).lower())
+    note = {"folder": "the rest of its folder", "why": "not walked: the card holds the script and the files it imports, "
+            "followed through each one, plus any program or library at the top of its folder and any file there "
+            "named like a module Python could load in place of its own", "files": None}
+    return paths, [note]
+
+
+def _shadow_names() -> set[str]:
+    import sys
+
+    names = {n.lower() for n in getattr(sys, "stdlib_module_names", ())} | {"sitecustomize", "usercustomize"}
+    try:
+        from core.tools import langs
+
+        found = langs.find("python")
+        exe = Path(found.exe) if found is not None and found.installed and found.exe else None
+    except Exception:
+        exe = None
+    if exe is None:
+        return names
+    roots = [exe.parent / "Lib" / "site-packages"]
+    appdata = os.environ.get("APPDATA")
+    if appdata and exe.parent.name.lower().startswith("python"):
+        roots.append(Path(appdata) / "Python" / exe.parent.name / "site-packages")
+    for r in roots:
+        try:
+            items = list(os.scandir(r))
+        except OSError:
+            continue
+        for it in items:
+            n = it.name.lower()
+            if n.endswith((".dist-info", ".egg-info", ".pth")) or n.startswith("~") or n == "__pycache__":
+                continue
+            names.add(n.split(".")[0].split("-")[0])
+    return names
+
+
 def program_set(entry: Any, argv: list[str] | None = None, *, root: Any = None, kind: str = CODE,
-                extra: list[Path] | None = None) -> FileSet:
+                extra: list[Path] | None = None, scope: str = "") -> FileSet:
     e = Path(str(entry))
     r = Path(str(root)) if root is not None else program_root(e)
+    if kind == CODE and not extra and scope != FOLDER and norm(r) == norm(program_root(e)):
+        lone = lone_set(e)
+        if lone is not None:
+            paths, unchecked = lone
+            return FileSet(entry=_rel(e, r), root=str(r), pieces=file_pieces(paths, r), unchecked=unchecked,
+                           argv=list(argv or []), kind=kind, scope=SCRIPT)
     paths, unchecked = walk_runnable(r, e)
     for x in extra or []:
         if not any(norm(x) == norm(p) for p in paths):
@@ -637,13 +994,20 @@ def current() -> Held | None:
 
 @contextmanager
 def verified(files: list[dict[str, Any]], *, entry: str, root: str, kind: str = CODE, approved_by: str,
-             argv: list[str] | None = None, walk: bool = True) -> Iterator[Held]:
+             argv: list[str] | None = None, walk: bool = True, scope: str = "folder") -> Iterator[Held]:
     want = {str(f["rel"] if "rel" in f else f["file"]): str(f["sha256"]) for f in files}
     paths = {str(f["rel"] if "rel" in f else f["file"]): str(f["path"]) for f in files}
     if walk:
         r = Path(root)
         e = Path(r, entry) if not Path(entry).is_absolute() else Path(entry)
-        now_paths, _unchecked = walk_runnable(r, e)
+        if scope == SCRIPT:
+            lone = lone_set(e)
+            if lone is None:
+                _refuse("the program now loads files in a way I cannot follow, or now sits in a project, so its card "
+                        "is not the one you approved, and nothing ran", "Ask me again and read the new card.")
+            now_paths = lone[0]
+        else:
+            now_paths, _unchecked = walk_runnable(r, e)
         now = {_rel(p, r) for p in now_paths}
         if now != set(want):
             added = sorted(now - set(want))
@@ -889,6 +1253,177 @@ def in_admin_root(path: Any) -> bool:
     return _in_admin_root(path)
 
 
+SIGNED_OK, UNSIGNED, SIGNED_BROKEN = "valid", "unsigned", "broken"
+_WTD_UI_NONE = 2
+_WTD_REVOKE_NONE = 0
+_WTD_REVOKE_WHOLECHAIN = 1
+_WTD_CHOICE_FILE = 1
+_WTD_STATEACTION_VERIFY = 1
+_WTD_STATEACTION_CLOSE = 2
+_WTD_REVOCATION_CHECK_NONE = 0x10
+_WTD_REVOCATION_CHECK_CHAIN_EXCLUDE_ROOT = 0x80
+_WTD_CACHE_ONLY_URL_RETRIEVAL = 0x1000
+_SIG_WHY = {
+    0x800B0100: (UNSIGNED, "it is not signed"),
+    0x800B0003: (UNSIGNED, "it is not signed in a form Windows checks"),
+    0x800B0001: (UNSIGNED, "it is not signed in a form Windows checks"),
+    0x80096010: (SIGNED_BROKEN, "its contents do not match its signature"),
+    0x800B0109: (SIGNED_BROKEN, "it is signed with a certificate Windows does not trust"),
+    0x800B010A: (SIGNED_BROKEN, "its certificate chain could not be built from what this laptop already holds"),
+    0x800B0101: (SIGNED_BROKEN, "its certificate has expired"),
+    0x800B010C: (SIGNED_BROKEN, "its certificate was revoked"),
+    0x800B0111: (SIGNED_BROKEN, "its publisher is marked as distrusted on this laptop"),
+    0x800B0004: (SIGNED_BROKEN, "Windows does not trust its signature"),
+    0x800B0110: (SIGNED_BROKEN, "its certificate is not one for signing programs"),
+    0x80092026: (SIGNED_BROKEN, "a security setting on this laptop refuses its signature"),
+}
+_REVOCATION_UNKNOWN = frozenset({0x800B010E, 0x80092013, 0x80092012})
+
+
+class _GUID(ctypes.Structure):
+    _fields_ = [("Data1", wintypes.DWORD), ("Data2", wintypes.WORD), ("Data3", wintypes.WORD),
+                ("Data4", ctypes.c_ubyte * 8)]
+
+
+class _TrustFile(ctypes.Structure):
+    _fields_ = [("cbStruct", wintypes.DWORD), ("pcwszFilePath", wintypes.LPCWSTR), ("hFile", wintypes.HANDLE),
+                ("pgKnownSubject", ctypes.c_void_p)]
+
+
+class _TrustData(ctypes.Structure):
+    _fields_ = [("cbStruct", wintypes.DWORD), ("pPolicyCallbackData", ctypes.c_void_p),
+                ("pSIPClientData", ctypes.c_void_p), ("dwUIChoice", wintypes.DWORD),
+                ("fdwRevocationChecks", wintypes.DWORD), ("dwUnionChoice", wintypes.DWORD),
+                ("pFile", ctypes.POINTER(_TrustFile)), ("dwStateAction", wintypes.DWORD),
+                ("hWVTStateData", wintypes.HANDLE), ("pwszURLReference", wintypes.LPCWSTR),
+                ("dwProvFlags", wintypes.DWORD), ("dwUIContext", wintypes.DWORD),
+                ("pSignatureSettings", ctypes.c_void_p)]
+
+
+class _ProvCert(ctypes.Structure):
+    _fields_ = [("cbStruct", wintypes.DWORD), ("pCert", ctypes.c_void_p)]
+
+
+def _verify_action() -> _GUID:
+    import uuid
+
+    u = uuid.UUID("00AAC56B-CD44-11D0-8CC2-00C04FC295EE")
+    return _GUID(u.fields[0], u.fields[1], u.fields[2], (ctypes.c_ubyte * 8)(*u.bytes[8:]))
+
+
+def _wvt(data: _TrustData) -> int:
+    w = ctypes.WinDLL("wintrust", use_last_error=True)
+    w.WinVerifyTrust.argtypes = [wintypes.HWND, ctypes.POINTER(_GUID), ctypes.c_void_p]
+    w.WinVerifyTrust.restype = ctypes.c_long
+    action = _verify_action()
+    return int(w.WinVerifyTrust(wintypes.HWND(-1), ctypes.byref(action), ctypes.byref(data))) & 0xFFFFFFFF
+
+
+def _cert_name(c: Any, ctx: int, kind: int, flags: int, rdn: int | None = None) -> str:
+    para = wintypes.DWORD(rdn) if rdn is not None else None
+    ref = ctypes.byref(para) if para is not None else None
+    n = int(c.CertGetNameStringW(ctx, kind, flags, ref, None, 0))
+    if n <= 1:
+        return ""
+    buf = ctypes.create_unicode_buffer(n)
+    c.CertGetNameStringW(ctx, kind, flags, ref, buf, n)
+    return buf.value
+
+
+def _signer_names(state: Any) -> dict[str, str]:
+    w = ctypes.WinDLL("wintrust", use_last_error=True)
+    c = ctypes.WinDLL("crypt32", use_last_error=True)
+    w.WTHelperProvDataFromStateData.argtypes = [wintypes.HANDLE]
+    w.WTHelperProvDataFromStateData.restype = ctypes.c_void_p
+    w.WTHelperGetProvSignerFromChain.argtypes = [ctypes.c_void_p, wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    w.WTHelperGetProvSignerFromChain.restype = ctypes.c_void_p
+    w.WTHelperGetProvCertFromChain.argtypes = [ctypes.c_void_p, wintypes.DWORD]
+    w.WTHelperGetProvCertFromChain.restype = ctypes.POINTER(_ProvCert)
+    c.CertGetNameStringW.argtypes = [ctypes.c_void_p, wintypes.DWORD, wintypes.DWORD, ctypes.c_void_p,
+                                     wintypes.LPWSTR, wintypes.DWORD]
+    c.CertGetNameStringW.restype = wintypes.DWORD
+    prov = w.WTHelperProvDataFromStateData(state)
+    if not prov:
+        return {}
+    signer = w.WTHelperGetProvSignerFromChain(prov, 0, False, 0)
+    if not signer:
+        return {}
+    cert = w.WTHelperGetProvCertFromChain(signer, 0)
+    if not cert or not cert.contents.pCert:
+        return {}
+    ctx = cert.contents.pCert
+    return {"publisher": _cert_name(c, ctx, 4, 0), "issuer": _cert_name(c, ctx, 4, 1),
+            "subject": _cert_name(c, ctx, 2, 0, 3)}
+
+
+def _trust_call(path: str, revocation: bool) -> tuple[int, dict[str, str]]:
+    info = _TrustFile(ctypes.sizeof(_TrustFile), path, None, None)
+    data = _TrustData()
+    data.cbStruct = ctypes.sizeof(_TrustData)
+    data.dwUIChoice = _WTD_UI_NONE
+    data.fdwRevocationChecks = _WTD_REVOKE_WHOLECHAIN if revocation else _WTD_REVOKE_NONE
+    data.dwUnionChoice = _WTD_CHOICE_FILE
+    data.pFile = ctypes.pointer(info)
+    data.dwStateAction = _WTD_STATEACTION_VERIFY
+    data.dwProvFlags = _WTD_CACHE_ONLY_URL_RETRIEVAL | (
+        _WTD_REVOCATION_CHECK_CHAIN_EXCLUDE_ROOT if revocation else _WTD_REVOCATION_CHECK_NONE)
+    code = _wvt(data)
+    names: dict[str, str] = {}
+    try:
+        if data.hWVTStateData:
+            names = _signer_names(data.hWVTStateData)
+    except Exception:
+        names = {}
+    finally:
+        data.dwStateAction = _WTD_STATEACTION_CLOSE
+        _wvt(data)
+    return code, names
+
+
+def signature_of(path: Any) -> dict[str, str]:
+    p = str(path)
+    try:
+        code, names = _trust_call(p, False)
+    except Exception as exc:
+        return {"status": SIGNED_BROKEN, "why": f"I could not check its signature ({type(exc).__name__})",
+                "code": "", "publisher": "", "subject": "", "issuer": "", "revocation": ""}
+    out = {"publisher": names.get("publisher", ""), "subject": names.get("subject", ""),
+           "issuer": names.get("issuer", ""), "code": f"0x{code:08X}", "revocation": ""}
+    if code != 0:
+        status, why = _SIG_WHY.get(code, (SIGNED_BROKEN, f"Windows did not accept its signature (code 0x{code:08X})"))
+        return {**out, "status": status, "why": why}
+    if not out["subject"] or not out["publisher"]:
+        return {**out, "status": SIGNED_BROKEN, "why": "I could not read who signed it"}
+    try:
+        rcode, _names = _trust_call(p, True)
+    except Exception:
+        rcode = 0x800B010E
+    if rcode == 0x800B010C:
+        return {**out, "status": SIGNED_BROKEN, "why": "its certificate was revoked",
+                "revocation": "revoked, by the lists Windows already holds"}
+    if rcode == 0:
+        out["revocation"] = "not revoked, by the lists Windows already holds; nothing was checked online"
+    elif rcode in _REVOCATION_UNKNOWN:
+        out["revocation"] = "not known: Windows holds no list for it, and I never check online"
+    else:
+        out["revocation"] = f"not known (code 0x{rcode:08X}); I never check online"
+    return {**out, "status": SIGNED_OK, "why": f"it is signed by {out['publisher']}"}
+
+
+def publisher_sha(subject: str) -> str:
+    return set_sha(PUBLISHER, str(subject), [], [])
+
+
+def publisher_approved(sig: dict[str, Any]) -> bool:
+    subject = str(sig.get("subject") or "")
+    return bool(subject) and sig.get("status") == SIGNED_OK and store().is_approved(publisher_sha(subject))
+
+
+def approve_publisher(subject: str, request_id: str) -> None:
+    if subject:
+        store().approve(publisher_sha(subject), PUBLISHER, subject, [], [], request_id)
+
+
 def app_verdict(entry: Any) -> dict[str, Any]:
     kind = str(getattr(entry, "kind", ""))
     name = str(getattr(entry, "name", "") or getattr(entry, "launch", ""))
@@ -942,9 +1477,20 @@ def app_verdict(entry: Any) -> dict[str, Any]:
     if Path(target).suffix.lower() != ".exe":
         out["why"] = f"it starts {Path(target).name}, which is not a program file"
         return out
+    signed = ""
     if not _in_admin_root(target):
-        out["why"] = f"its program is in {Path(target).parent}, a folder that programs running as you can change"
-        return out
+        where = f"its program is in {Path(target).parent}, a folder that programs running as you can change"
+        sig = signature_of(target)
+        out["signature"] = {k: str(sig.get(k) or "") for k in ("status", "publisher", "issuer", "revocation", "why")}
+        if sig.get("status") != SIGNED_OK:
+            out["why"] = f"{where}, and {sig.get('why') or 'it is not signed'}"
+            return out
+        out["publisher"] = str(sig.get("publisher") or "")
+        out["subject"] = str(sig.get("subject") or "")
+        if not publisher_approved(sig):
+            out["why"] = f"{where}; it is signed by {out['publisher']}, a publisher you have not approved yet"
+            return out
+        signed = out["publisher"]
     if Path(target).name.lower() in HOSTS and args.strip():
         out["why"] = f"it hands {Path(target).name} a command line"
         return out
@@ -954,7 +1500,7 @@ def app_verdict(entry: Any) -> dict[str, Any]:
     if any(r["hers"] for r in rows):
         out["why"] = "I wrote or changed one of its files"
         return out
-    out.update(open=True, why="an installed program")
+    out.update(open=True, why=f"signed by {signed}, a publisher you approved" if signed else "an installed program")
     return out
 
 

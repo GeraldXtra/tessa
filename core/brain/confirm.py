@@ -162,7 +162,7 @@ class ConfirmLedger:
 
         Returns ("confirm" | "cancel" | "none", hold). "none" means the
         utterance was not an answer at all and should be routed normally —
-        which is what lets him say "actually, what time is it" mid-hold without
+        which is what lets him say "actually, tell me the time" mid-hold without
         that becoming a confirmation of anything.
         """
         held = self.pending

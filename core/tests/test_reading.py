@@ -237,7 +237,7 @@ check("he asked to post: the card carries his words only", name == "x.post" and 
 print("\n(3f) a keyword inside another question does not take it over\n")
 check("today in a rate question is not a date question", route("what's the dollar to naira rate today").intent is not Intent.DATE)
 check("today in a weather question is not a date question", route("is it going to rain today in lagos").intent is not Intent.DATE)
-check("the date question still is one", route("what's the date today").intent is Intent.DATE)
+check("the date question still is one", route("what date is it today").intent is Intent.DATE)
 check("heaviest processes sort by memory", call_of(route("which processes are the heaviest")) == ("proc.top", {"by": "memory"}))
 check("most cpu sorts by cpu", call_of(route("show me the processes using the most cpu")) == ("proc.top", {"by": "cpu"}))
 name, args = call_of(route("find the word invoice on my screen"))

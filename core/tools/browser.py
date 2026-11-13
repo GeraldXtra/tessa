@@ -1148,12 +1148,18 @@ def read_page(url: str | None = None) -> dict[str, Any]:
     }
 
 
-def screenshot(path: str | None = None) -> dict[str, Any]:
+def screenshot(path: str | None = None, *, provenance: str = "schedule") -> dict[str, Any]:
     target = Path(path) if path else (
         Path(os.environ.get("LOCALAPPDATA", ".")) / "Tessa" / "screenshots"
         / f"shot-{int(time.time())}.png")
     if path:
         gate.refuse_protected(target)
+        from core.security import allow
+
+        verdict, why = allow.place(target, provenance)
+        if verdict != allow.FREE:
+            raise ToolError(f"{why}, and a picture that does not exist yet cannot go on a card",
+                            "Name your Pictures, Desktop or Documents folder, or a folder of your own.")
     page = SESSION.page()
     target.parent.mkdir(parents=True, exist_ok=True)
     page.screenshot(path=str(target), full_page=False)

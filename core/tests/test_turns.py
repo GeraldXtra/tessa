@@ -260,7 +260,8 @@ ex.run(ToolCall("code.run_mine", {"which": "last"}, origin="human"))
 req = list(ex.approvals.pending.values())[-1]
 check("otherwise the card is unchanged, plus every file of the program and its set hash",
       set(req.args) == {"path", "language", "file", "code", "sha256", "runs_in", "time_limit", "timeout_s", "lines",
-                        "runs_as", "files", "views", "set_sha256", "unchecked", "whose"}, str(sorted(req.args)))
+                        "runs_as", "files", "views", "set_sha256", "unchecked", "whose", "scope"},
+      str(sorted(req.args)))
 check("'run the program you wrote with 3 and 4' carries his arguments to her card",
       routed("run the program you wrote with 3 and 4") == ("code.run_mine", {"which": "last", "argv": ["3", "4"]}),
       str(routed("run the program you wrote with 3 and 4")))

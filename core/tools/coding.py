@@ -392,7 +392,7 @@ def _source(path: Any) -> tuple[Path, langs.Spec]:
         raise ToolError(f"{p.name} is not a source file of a language I run",
                         "I run source files only, never programs or installers.")
     if not p.exists():
-        raise ToolError(f"{p.name} is not there in {p.parent}", "Tell me which folder it is in.")
+        raise ToolError(f"{p.name} is not there in {p.parent}", "Tell me the folder it is in.")
     if not p.is_file():
         raise ToolError(f"{p.name} is a folder, not a file", "Name the file inside it.")
     _local_file(p)
@@ -604,7 +604,7 @@ def run_file(path: str, argv: Any = (), timeout_s: int = DEFAULT_TIMEOUT_S, how:
     if reasons and not confirmed:
         raise ToolHold(f"That runs {p.name} from {where_words(p)}: {', and '.join(reasons)}")
     with gate.verified(fs.card_files(), entry=fs.entry, root=fs.root, approved_by="approved list " + fs.set_sha[:16],
-                       argv=args):
+                       argv=args, scope=fs.scope):
         return run_source(p, spec, args, t, mine=mine)
 
 
@@ -818,7 +818,7 @@ def resolve_mine(args: dict[str, Any]) -> dict[str, Any]:
            "sha256": hashlib.sha256(raw).hexdigest(), "runs_in": fs.root, "time_limit": f"{t} s",
            "timeout_s": t, "lines": len(code.splitlines()), "runs_as": RUNS_AS,
            "files": fs.card_files(), "views": fs.views(), "set_sha256": fs.set_sha, "unchecked": fs.unchecked,
-           "whose": "mine" if labels == {True} else "yours" if labels == {False} else "mixed"}
+           "whose": "mine" if labels == {True} else "yours" if labels == {False} else "mixed", "scope": fs.scope}
     if argv:
         out["argv"] = argv
         out["arguments"] = " ".join(argv)
@@ -842,7 +842,10 @@ def describe_mine(args: dict[str, Any]) -> str:
             f"{n} line{'s' if n != 1 else ''} of code")
     if args.get("downloaded"):
         line += ", which Windows marks as downloaded from the internet"
-    if count > 1:
+    if count > 1 and args.get("scope") == gate.SCRIPT:
+        line += (f", and {count - 1} more file{'s' if count != 2 else ''} it imports or that sit at the top of its "
+                 f"folder, all on the card")
+    elif count > 1:
         line += f", and {count - 1} more file{'s' if count != 2 else ''} it can load, all on the card"
     if argv:
         line += f", with {len(argv)} argument{'s' if len(argv) != 1 else ''}"
@@ -858,7 +861,8 @@ def run_mine(path: str = "", language: str = "", file: str = "", code: str = "",
              time_limit: str = "", timeout_s: int = DEFAULT_TIMEOUT_S, lines: int = 0, runs_as: str = "",
              name: str = "", which: str = "", argv: Any = (), arguments: str = "", goes_online: str = "",
              files: Any = (), views: Any = None, set_sha256: str = "", unchecked: Any = (), whose: str = "",
-             downloaded: str = "", *, _approved_by_surface: bool = False, _request_id: str = "") -> dict[str, Any]:
+             downloaded: str = "", scope: str = "", *, _approved_by_surface: bool = False,
+             _request_id: str = "") -> dict[str, Any]:
     if not _approved_by_surface:
         raise ToolError("a program runs from here only from the approval card", "Approve it on the card and I will run it.")
     p, spec = _source(path)
@@ -869,13 +873,14 @@ def run_mine(path: str = "", language: str = "", file: str = "", code: str = "",
     rows = [dict(r) for r in (files or [])]
     args = _argv(argv)
     root = str(runs_in or p.parent)
+    kept = gate.SCRIPT if scope == gate.SCRIPT else gate.FOLDER
     entry = gate.program_set(p, args, root=root).entry if not rows else next(
         (str(r["file"]) for r in rows if gate.norm(r["path"]) == gate.norm(p)), "")
     if not rows or not entry or gate.set_sha(gate.CODE, entry, [(str(r["file"]), str(r["sha256"])) for r in rows],
-                                             args) != set_sha256:
+                                             args, kept) != set_sha256:
         raise ToolError("the card did not list every file of the program, so nothing ran",
                         "Ask me to run it again and read the new card.")
-    with gate.verified(rows, entry=entry, root=root, approved_by=_request_id or "card", argv=args):
+    with gate.verified(rows, entry=entry, root=root, approved_by=_request_id or "card", argv=args, scope=kept):
         gate.store().approve(set_sha256, gate.CODE, str(p), [{"rel": r["file"], "sha256": r["sha256"]} for r in rows],
                              args, _request_id or "card")
         return run_source(p, spec, args, _timeout(timeout_s), mine=whose != "yours")

@@ -168,6 +168,7 @@ class ToolSpec:
     #: withholds `text`. Empty for every tool that existed before this field.
     private_args: tuple[str, ...] = ()
     card_provenance: str = ""
+    gated: bool = False
     #: One line for the audit entry, formatted with the ARGS (not the result) so
     #: the log records what was ASKED even when the tool then failed.
     audit: str = "{name}"

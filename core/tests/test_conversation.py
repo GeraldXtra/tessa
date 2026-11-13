@@ -157,7 +157,7 @@ for phrase in ["forget that", "Tessa, forget that", "start fresh", "start over",
                "clear your memory", "clear the context", "new conversation",
                "wipe your memory", "forget the last thing", "never mind that"]:
     check(f"{phrase!r} clears", is_clear_request(phrase))
-for phrase in ["open my pictures", "what is a closure", "forget me not",
+for phrase in ["open my pictures", "how do closures work", "forget me not",
                "start the server"]:
     check(f"{phrase!r} does NOT clear", not is_clear_request(phrase))
 check("two spoken variants, so it is not a tic", len(set(CLEARED_LINES)) >= 2)

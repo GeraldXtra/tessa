@@ -91,25 +91,25 @@ _FILES = [
         audit="usage {path}",
     ),
     _spec(
-        name="fs.create", tier="amber", capability="fs.create", handler=files.make_folder,
-        phrasings=("make a folder called drafts", "create a new folder in documents"),
+        name="fs.create", tier="amber", capability="fs.create", handler=files.make_folder, gated=True,
+        phrasings=("make a folder called drafts", "create a folder in documents"),
         success="Made it, Emperor. {name}.",
         audit="mkdir {path}",
     ),
     _spec(
-        name="fs.rename", tier="amber", capability="fs.rename", handler=files.rename,
+        name="fs.rename", tier="amber", capability="fs.rename", handler=files.rename, gated=True,
         phrasings=("rename that to final", "call it invoice march instead"),
         success="Renamed, Emperor. {was} is now {name}.",
         audit="rename {path} -> {to}",
     ),
     _spec(
-        name="fs.move", tier="amber", capability="fs.move", handler=files.move,
+        name="fs.move", tier="amber", capability="fs.move", handler=files.move, gated=True,
         phrasings=("move that to documents", "put it in the archive folder"),
         success="Moved, Emperor. {name} is in {to}.",
         audit="move {path} -> {to}",
     ),
     _spec(
-        name="fs.copy", tier="amber", capability="fs.copy", handler=files.copy,
+        name="fs.copy", tier="amber", capability="fs.copy", handler=files.copy, gated=True,
         phrasings=("copy that to my desktop", "make a copy in documents"),
         success="Copied, Emperor. {name} is in {to}.",
         audit="copy {path} -> {to}",
@@ -130,6 +130,19 @@ _FILES = [
         success="Gone to the Recycle Bin, Emperor. {things}. Say restore if I was wrong.",
         audit="RECYCLE {path}",
         note="Recycle Bin only, via SHFileOperationW + FOF_ALLOWUNDO. No hard-delete path exists.",
+    ),
+    _spec(
+        name="fs.write_checked", tier="red", capability="fs.write_outside", handler=files.write_checked, holds=True,
+        resolve=files.resolve_write, describe=files.describe_write,
+        frozen=("op", "path", "source", "text", "folder", "why", "kind", "files", "bytes", "sha256", "hashed"),
+        private_args=("text",),
+        success="{said}",
+        failure="I did not write it, sir. {reason} {alternative}",
+        audit="WRITE FROM THE CARD {op} {path}",
+        note="A write by her file tools outside Documents, Desktop, Downloads, Pictures, Videos, Music, the temp "
+             "folder and a folder he named himself: the card shows the path and what goes there, all frozen, and "
+             "the text or the source is checked again before it is written. Her own code, settings and stores are "
+             "refused even with a card.",
     ),
 ]
 
@@ -915,7 +928,7 @@ _CODE = [
         resolve=coding.resolve_mine, describe=coding.describe_mine, card_provenance="agent",
         frozen=("path", "language", "file", "code", "sha256", "runs_in", "time_limit", "timeout_s", "lines",
                 "runs_as", "name", "which", "argv", "arguments", "goes_online", "files", "views", "set_sha256",
-                "unchecked", "whose", "downloaded"),
+                "unchecked", "whose", "downloaded", "scope"),
         private_args=("views",),
         phrasings=("run the program you wrote", "run primes.py from your code folder"),
         success="{said}",
@@ -955,7 +968,8 @@ _CHECKED = [
     _spec(
         name="app.launch_checked", tier="red", capability="app.launch_checked", handler=checked.launch_app,
         holds=True, resolve=checked.resolve_app, describe=checked.describe_app,
-        frozen=("app", "launch", "open", "program", "arguments", "workdir", "files", "set_sha256", "why"),
+        frozen=("app", "launch", "open", "program", "arguments", "workdir", "files", "set_sha256", "why", "signature",
+                "publisher", "approving"),
         success="Opening {name}, Emperor.",
         failure="I did not open it, sir. {reason} {alternative}",
         audit="OPEN FROM THE CARD {app} {program} {arguments} set {set_sha256}",
@@ -963,6 +977,20 @@ _CHECKED = [
              "arguments from a folder anyone signed in can change: the card shows the program, its arguments and "
              "each file's sha256, all frozen, re-checked just before it opens; once approved, that exact set "
              "opens by name with no card.",
+    ),
+    _spec(
+        name="input.type_checked", tier="red", capability="input.keyboard_checked", handler=checked.type_checked,
+        holds=True, resolve=checked.resolve_typing, describe=checked.describe_typing,
+        frozen=("op", "text", "keys", "window", "process", "program", "pid", "hwnd", "window_class", "focus",
+                "focus_hwnd", "why", "pastes"),
+        private_args=("text",),
+        success="{said}",
+        failure="I did not type it, sir. {reason} {alternative}",
+        audit="KEYS FROM THE CARD {op} into {process} {window_class} {focus}",
+        note="Typing, a key chord or a paste into a window outside her short list: the card shows the exact keys and "
+             "the window (program, window class, focused element), all frozen; just before typing she checks the "
+             "keyboard is still there, brings that window back if his click on the card took the focus, and asks "
+             "again if the focused element changed.",
     ),
 ]
 

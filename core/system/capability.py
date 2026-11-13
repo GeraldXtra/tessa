@@ -236,6 +236,7 @@ class Capability:
     #: never fail to hold. Absent on every existing capability — nothing
     #: changes for them.
     describe: Callable[[dict[str, Any]], str] | None = None
+    gated: bool = False
 
     def __post_init__(self) -> None:
         if not self.name or "." not in self.name:
@@ -439,10 +440,12 @@ def _make_handler(cap: Capability, tier: str, guard: Guard) -> Callable[..., dic
             # cannot prove an owner's "yes" for one (an agent repeating its
             # own call would match its own hold), so a non-human origin is
             # refused outright until a job grant can be checked here.
-            if actor != "human":
+            if cap.gated and actor in ("human", "agent"):
+                pass
+            elif actor != "human":
                 raise ToolError(f"{cap.name} is amber-tier and will not run unattended for {actor}",
                                 "Ask me yourself and I will hold it for your yes.")
-            if not confirmed:
+            elif not confirmed:
                 raise ToolHold(_hold_line(cap, args))
         else:
             # GREEN runs — unless the guard's protected-path rule intervened.

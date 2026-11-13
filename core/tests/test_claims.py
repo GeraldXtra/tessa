@@ -212,7 +212,7 @@ check("nothing noted -> 'Nothing, Emperor'", said.startswith("Nothing, Emperor")
 block = store.prompt_block("is gerald's bank pin safe")
 check("the model block is fenced and labelled", block is not None and "UNTRUSTED EXTERNAL CONTENT" in block
       and "STRANGERS wrote" in block and "[UNVERIFIED, from @totally_legit" in block)
-check("no block for an unrelated question", store.prompt_block("what time is it") is None)
+check("no block for an unrelated question", store.prompt_block("the time on the clock") is None)
 out = ex.run(router.route("the claim about gerald's bank pin is a lie").calls[0])
 check("'is a lie' rejects it", "Marked false, Emperor" in out and store.claims[hostile.id].status == C.REJECTED)
 FEED.append([post("@again", "40000", HOSTILE)])
