@@ -73,17 +73,17 @@ import { tokenValue } from './design-tokens.ts';
  * fallback would look like a chosen colour, which is exactly how a previous
  * round lost a day to a stored `amber`.
  */
-export const THEME_IDS = ['gold', 'magenta', 'cyan', 'violet', 'emerald', 'red'] as const;
+export const THEME_IDS = ['gold', 'magenta', 'cyan', 'violet', 'emerald', 'red', 'ultron'] as const;
 export type ThemeId = (typeof THEME_IDS)[number];
 
-export const DEFAULT_THEME: ThemeId = 'gold';
+export const DEFAULT_THEME: ThemeId = 'ultron';
 
 export function isThemeId(value: unknown): value is ThemeId {
   return typeof value === 'string' && (THEME_IDS as readonly string[]).includes(value);
 }
 
 export function themeForKey(code: string, keyCode = 0): ThemeId | null {
-  const digit = code ? /^Digit([1-9])$/.exec(code)?.[1] : keyCode >= 49 && keyCode <= 54 ? String(keyCode - 48) : undefined;
+  const digit = code ? /^Digit([1-9])$/.exec(code)?.[1] : keyCode >= 49 && keyCode <= 55 ? String(keyCode - 48) : undefined;
   if (!digit) return null;
   return THEME_IDS[Number.parseInt(digit, 10) - 1] ?? null;
 }

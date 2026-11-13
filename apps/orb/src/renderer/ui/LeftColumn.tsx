@@ -4,25 +4,39 @@ import { auditStore, connectionStore, useStore } from '../state/store.ts';
 import { tickStore } from '../state/tick.ts';
 import { Loading, NoData } from './bits.tsx';
 import { hms, hmsOf, isHerAction, resultOf, tierOf } from './format.ts';
-import { auditLoadedStore, notesStore, type Note } from './stores.ts';
+import { noteLive, noteStack } from './notes-view.ts';
+import { auditLoadedStore, clearNote, notesStore, type Note } from './stores.ts';
 
 const FADE_MS = 450;
 
 function NoteCard({ note }: { note: Note }) {
   const [out, setOut] = useState(() => Date.now() >= note.until);
   useEffect(() => {
+    if (!Number.isFinite(note.until)) {
+      setOut(false);
+      return;
+    }
     const wait = note.until - Date.now();
-    if (wait <= 0) return;
+    if (wait <= 0) {
+      setOut(true);
+      return;
+    }
     const id = window.setTimeout(() => setOut(true), wait);
     return () => window.clearTimeout(id);
   }, [note.until]);
+  const pinned = note.sticky && note.cleared === null;
   return (
-    <div className={`note${note.kind ? ` ${note.kind}` : ''}${out ? ' out' : ''}`}>
+    <div className={`note${note.kind ? ` ${note.kind}` : ''}${out ? ' out' : ''}${pinned ? ' pinned' : ''}`}>
       <div className="h">
         <b>{note.src}</b>
         <time>{hms(new Date(note.at))}</time>
       </div>
       <div className="m">{note.msg}</div>
+      {pinned ? (
+        <button type="button" className="clear" onClick={() => clearNote(note.id)}>
+          CLEAR
+        </button>
+      ) : null}
     </div>
   );
 }
@@ -31,15 +45,14 @@ export function Notes() {
   const notes = useStore(notesStore);
   const now = useStore(tickStore);
   const [, force] = useState(0);
-  const live = notes.filter((n) => n.until + FADE_MS > Date.now());
+  const live = notes.filter((n) => noteLive(n, Date.now(), FADE_MS));
   useEffect(() => {
     const next = live.reduce((m, n) => Math.min(m, n.until + FADE_MS), Number.POSITIVE_INFINITY);
     if (!Number.isFinite(next)) return;
     const id = window.setTimeout(() => force((x) => x + 1), Math.max(0, next - Date.now()) + 5);
     return () => window.clearTimeout(id);
   }, [notes, now]);
-  const shown = live.slice(0, 3);
-  const more = live.length - shown.length;
+  const { shown, more } = noteStack(notes, Date.now(), FADE_MS, 3);
   return (
     <div className="notes" aria-live="polite">
       {shown.map((n) => (

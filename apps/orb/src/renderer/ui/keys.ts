@@ -2,7 +2,7 @@ import { approvalsStore } from '../state/approval-store.ts';
 import { closeQuick, composePatch, composeStore, openQuick, requestComposeFocus } from '../state/compose-store.ts';
 import { RAIL_IDS, connectionStore, railStore, type RailId } from '../state/store.ts';
 import { escStops, stopHer } from '../state/voice.ts';
-import { answerCard, cardFieldHasFocus, liveEntries } from './Card.tsx';
+import { liveEntries } from './Card.tsx';
 import { closePalette, cycleMode, modeStore, openPalette, paletteStore, setMode } from './modes.ts';
 import { debugStore, dockShownStore, pushNote } from './stores.ts';
 
@@ -86,7 +86,6 @@ export function askTessa(text: string, report: (line: string) => void, via: stri
 export function installKeys(report: (line: string) => void): () => void {
   function onKey(e: KeyboardEvent): void {
     const typing = editable(e.target);
-    const inCardField = typing && cardFieldHasFocus();
     const onlyCtrl = e.ctrlKey && !e.altKey && !e.shiftKey && !e.metaKey;
     const noMods = !e.ctrlKey && !e.altKey && !e.metaKey;
 
@@ -128,16 +127,8 @@ export function installKeys(report: (line: string) => void): () => void {
     if (onlyCtrl && (e.key === 'Enter' || e.key === 'Backspace') && cardWaiting()) {
       const decision = e.key === 'Enter' ? 'approve' : 'deny';
       const via = e.key === 'Enter' ? 'ctrl+enter' : 'ctrl+backspace';
-      if (typing && !inCardField) {
-        report(`CARD-ANSWER decision=${decision} via=${via} outcome=refused: focus is in a text input outside the card`);
-        return;
-      }
-      if (inCardField && decision === 'deny') {
-        report(`CARD-ANSWER decision=deny via=${via} outcome=refused: inside the card's edit field Ctrl+Backspace deletes a word`);
-        return;
-      }
-      e.preventDefault();
-      answerCard(decision, via);
+      report(`CARD-ANSWER decision=${decision} via=${via} outcome=refused: no key answers a card, only a click on APPROVE or DENY`);
+      if (!typing) e.preventDefault();
       return;
     }
 

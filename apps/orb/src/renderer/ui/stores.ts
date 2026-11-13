@@ -42,17 +42,24 @@ export interface Note {
   kind: NoteKind;
   at: number;
   until: number;
+  sticky: boolean;
+  cleared: number | null;
 }
 
 export const NOTES_LOG_MAX = 100;
 export const notesStore = createStore<readonly Note[]>([]);
 let noteSeq = 0;
 
-export function pushNote(src: string, msg: string, kind: NoteKind = ''): void {
+export function pushNote(src: string, msg: string, kind: NoteKind = '', sticky = false): void {
   const at = Date.now();
   noteSeq += 1;
-  const note: Note = { id: noteSeq, src, msg, kind, at, until: at + (kind === 'threat' ? 9000 : 6000) };
+  const note: Note = { id: noteSeq, src, msg, kind, at, until: sticky ? Number.POSITIVE_INFINITY : at + (kind === 'threat' ? 9000 : 6000), sticky, cleared: null };
   notesStore.set([note, ...notesStore.get()].slice(0, NOTES_LOG_MAX));
+}
+
+export function clearNote(id: number): void {
+  const now = Date.now();
+  notesStore.set(notesStore.get().map((n) => (n.id === id && n.cleared === null ? { ...n, cleared: now, until: Math.min(n.until, now) } : n)));
 }
 
 export const debugStore = createStore<boolean>(true);

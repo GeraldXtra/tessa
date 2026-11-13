@@ -1,3 +1,5 @@
+import { sceneHookStore } from './state/scene-inputs.ts';
+
 /**
  * Drive the UI without the operating system. DEV ONLY.
  *
@@ -90,7 +92,10 @@ export type DevAction =
   | 'tray'
   | 'mouse'
   | 'linkdrop'
-  | 'chord';
+  | 'chord'
+  | 'frames'
+  | 'push'
+  | 'win';
 
 export interface DevStep {
   action: DevAction;
@@ -122,6 +127,9 @@ const ACTIONS: readonly DevAction[] = [
   'mouse',
   'linkdrop',
   'chord',
+  'frames',
+  'push',
+  'win',
 ];
 
 /**
@@ -247,6 +255,51 @@ const sleep = (ms: number): Promise<void> =>
     window.setTimeout(resolve, ms);
   });
 
+export interface FrameMix {
+  frames: number;
+  at16: number;
+  at33: number;
+  at50: number;
+  longer: number;
+  longestMs: number;
+  p50Ms: number;
+  p95Ms: number;
+  hiddenSeen: boolean;
+}
+
+export function frameMix(intervals: readonly number[], hiddenSeen = false): FrameMix {
+  const sorted = [...intervals].sort((a, b) => a - b);
+  const pick = (q: number): number => (sorted.length ? (sorted[Math.min(sorted.length - 1, Math.floor(q * sorted.length))] as number) : 0);
+  let at16 = 0;
+  let at33 = 0;
+  let at50 = 0;
+  let longer = 0;
+  for (const d of intervals) {
+    if (d < 25) at16 += 1;
+    else if (d < 41.67) at33 += 1;
+    else if (d < 58.33) at50 += 1;
+    else longer += 1;
+  }
+  return { frames: intervals.length, at16, at33, at50, longer, longestMs: sorted.length ? (sorted[sorted.length - 1] as number) : 0, p50Ms: pick(0.5), p95Ms: pick(0.95), hiddenSeen };
+}
+
+function recordFrames(ms: number): Promise<FrameMix> {
+  return new Promise((resolve) => {
+    const intervals: number[] = [];
+    let last = -1;
+    let hiddenSeen = false;
+    const started = performance.now();
+    const tick = (t: number): void => {
+      if (document.hidden) hiddenSeen = true;
+      if (last >= 0) intervals.push(t - last);
+      last = t;
+      if (t - started < ms) requestAnimationFrame(tick);
+      else resolve(frameMix(intervals, hiddenSeen));
+    };
+    requestAnimationFrame(tick);
+  });
+}
+
 /** `tag.class` of whatever has focus, for the log. */
 function describeActive(): string {
   const el = document.activeElement;
@@ -276,6 +329,22 @@ export async function runDevScript(
       const ms = Number.parseInt(step.arg, 10);
       await sleep(Number.isFinite(ms) && ms > 0 ? Math.min(ms, 30_000) : 0);
       report(`DEV-DRIVE ${i} wait ${step.arg}ms`);
+      continue;
+    }
+
+    if (step.action === 'frames') {
+      const [msRaw, label] = step.arg.split('~');
+      const ms = Math.min(60_000, Math.max(500, Number.parseInt(msRaw ?? '', 10) || 10_000));
+      const name = (label ?? 'frames').replace(/[^A-Za-z0-9_-]/g, '').slice(0, 40) || 'frames';
+      report(`DEV-DRIVE ${i} frames ${name} ${ms} ms started t=${performance.now().toFixed(1)} hidden=${document.hidden}`);
+      void recordFrames(ms).then((m) => {
+        const share = (n: number): string => (m.frames ? ((100 * n) / m.frames).toFixed(1) : '0.0');
+        report(
+          `FRAMES ${name} ms=${ms} frames=${m.frames} at16.67=${m.at16} (${share(m.at16)}%) at33.3=${m.at33} (${share(m.at33)}%) ` +
+            `at50.0=${m.at50} (${share(m.at50)}%) longer=${m.longer} (${share(m.longer)}%) longestMs=${m.longestMs.toFixed(1)} ` +
+            `p50Ms=${m.p50Ms.toFixed(1)} p95Ms=${m.p95Ms.toFixed(1)} hiddenSeen=${m.hiddenSeen}`,
+        );
+      });
       continue;
     }
 
@@ -526,6 +595,20 @@ export async function runDevScript(
     if (step.action === 'chord') {
       report(`CHORD ${step.arg.trim()}`);
       report(`DEV-DRIVE ${i} chord ${step.arg.trim()} requested from main (dev-only hook, the callbacks Windows sends for it) t=${performance.now().toFixed(1)} wall=${Date.now()}`);
+      continue;
+    }
+
+    if (step.action === 'push') {
+      const [x, y, k] = step.arg.split(',').map((v) => Number.parseFloat(v));
+      const hooks = sceneHookStore.get();
+      if (hooks && Number.isFinite(x) && Number.isFinite(y)) hooks.push(x as number, y as number, Number.isFinite(k) ? (k as number) : 1);
+      report(`DEV-DRIVE ${i} push ${step.arg.trim()} ${hooks ? 'sent to the scene' : 'no scene'} t=${performance.now().toFixed(1)}`);
+      continue;
+    }
+
+    if (step.action === 'win') {
+      report(`WIN ${step.arg.trim()}`);
+      report(`DEV-DRIVE ${i} win ${step.arg.trim()} requested from main (dev-only hook) t=${performance.now().toFixed(1)} wall=${Date.now()}`);
       continue;
     }
 

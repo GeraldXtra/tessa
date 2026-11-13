@@ -36,41 +36,14 @@ import { dirname, join } from 'node:path';
  * drift here is silent: main would refuse a theme the renderer thinks is valid.
  * Adding magenta in one place and not the other is exactly that bug.
  */
-const THEME_IDS = ['gold', 'magenta', 'cyan', 'violet', 'emerald', 'red'] as const;
+const THEME_IDS = ['gold', 'magenta', 'cyan', 'violet', 'emerald', 'red', 'ultron'] as const;
 export type ThemeId = (typeof THEME_IDS)[number];
 
-export const DEFAULT_THEME: ThemeId = 'gold';
+export const DEFAULT_THEME: ThemeId = 'ultron';
 
-/**
- * The stored-file schema version, and the ONE-SHOT migration it exists for.
- *
- * His stored theme says `magenta`. Changing the default to gold does nothing
- * for someone who already has a stored choice — a fact that cost him a round
- * once already, when his file said `amber` and every "the default is now X"
- * change sailed past it. He wants to SEE gold, so the stored value is migrated.
- *
- * Migrated ONCE, not on every launch, and that is what the version marker is
- * for. Without it, "magenta means gold" would be permanent and he could never
- * choose magenta again — a migration that cannot be undone by the user is not a
- * migration, it is a removal. With it: a file at v1 (or with no version at all,
- * which is the same thing) is rewritten to gold at v2 and stamped; from then on
- * whatever he picks is honoured verbatim, magenta included.
- *
- * ─── A CHANGE SESSION 1 MUST BE TOLD ABOUT ───
- * The `theme` KEY is unchanged and the file PATH is unchanged — both were
- * explicitly off limits and both are untouched. What is new is a SIBLING key,
- * `v`. A reader that looks up `theme` and ignores everything else is unaffected;
- * a reader that rejects unknown keys would break. The Console reads this file
- * for its own palette. Flagged in the report so it can be relayed.
- */
-const THEME_FILE_VERSION = 2;
+const THEME_FILE_VERSION = 3;
 
-/**
- * What a pre-v2 file's value becomes. Only `magenta` is remapped, and only
- * because he asked to be shown gold; every other stored id is left alone and
- * simply validated.
- */
-const MIGRATE_FROM_V1: Readonly<Record<string, ThemeId>> = { magenta: 'gold' };
+export const SWITCH_TO: ThemeId = 'ultron';
 
 export function isThemeId(value: unknown): value is ThemeId {
   return typeof value === 'string' && (THEME_IDS as readonly string[]).includes(value);
@@ -93,7 +66,22 @@ export type ThemeLoad = {
   migrated: boolean;
   /** Why this value, in words fit for a log line. Always populated. */
   reason: string;
+  was?: string | null;
 };
+
+export function themeFileAllowed(instrumented: boolean, persistFlag: boolean): boolean {
+  return !instrumented || persistFlag;
+}
+
+function storedWas(path: string): string | null {
+  try {
+    const raw = readFileSync(path, 'utf8');
+    const record = JSON.parse(raw.charCodeAt(0) === 0xfeff ? raw.slice(1) : raw) as { was?: unknown } | null;
+    return typeof record?.was === 'string' ? record.was.slice(0, 40) : null;
+  } catch {
+    return null;
+  }
+}
 
 /**
  * Read the saved theme, or fall back to GOLD and say which it was.
@@ -135,20 +123,16 @@ export function loadTheme(): ThemeLoad {
   const value = record?.theme;
   const version = typeof record?.v === 'number' ? record.v : 1;
 
-  /**
-   * THE ONE-SHOT MIGRATION. Before validation, because the whole point is to
-   * rewrite a value that IS currently valid.
-   */
-  if (version < THEME_FILE_VERSION && typeof value === 'string' && MIGRATE_FROM_V1[value]) {
-    const next = MIGRATE_FROM_V1[value] as ThemeId;
-    saveTheme(next);
+  if (version < THEME_FILE_VERSION) {
+    const was = typeof value === 'string' ? value.slice(0, 40) : null;
+    saveTheme(SWITCH_TO, was);
     return {
-      theme: next,
+      theme: SWITCH_TO,
       migrated: true,
+      was,
       reason:
-        `MIGRATED stored theme '${value}' -> '${next}' (file was v${version}, ` +
-        `now v${THEME_FILE_VERSION}). One-shot: '${value}' is still a theme and ` +
-        'choosing it again will now be honoured.',
+        `SWITCHED stored theme ${JSON.stringify(value)} -> '${SWITCH_TO}' once (file was v${version}, ` +
+        `now v${THEME_FILE_VERSION}). The old value is kept in the file as "was"; any theme chosen from now on is honoured.`,
     };
   }
 
@@ -168,25 +152,20 @@ export function loadTheme(): ThemeLoad {
     };
   }
 
-  // A valid id in an unstamped file: honour it and stamp it, so it is never
-  // considered for migration again.
-  if (version < THEME_FILE_VERSION) saveTheme(value);
-
   return { theme: value, migrated: false, reason: `restored ${value} from ${themePath()}` };
 }
 
-export function saveTheme(theme: ThemeId): void {
+export function saveTheme(theme: ThemeId, was?: string | null): void {
   try {
     const path = themePath();
     mkdirSync(dirname(path), { recursive: true });
+    const keep = was === undefined ? storedWas(path) : was;
     // `v` is a SIBLING of `theme`, never a replacement for it. The key and the
     // path are both unchanged; see THEME_FILE_VERSION for why the stamp exists
     // and for the note that Session 1's Console also reads this file.
-    writeFileSync(
-      path,
-      `${JSON.stringify({ theme, v: THEME_FILE_VERSION }, null, 2)}\n`,
-      'utf8',
-    );
+    const body: { theme: ThemeId; v: number; was?: string } = { theme, v: THEME_FILE_VERSION };
+    if (typeof keep === 'string') body.was = keep;
+    writeFileSync(path, `${JSON.stringify(body, null, 2)}\n`, 'utf8');
   } catch (err) {
     // Never fatal, same as the window state. Forgetting a colour preference is
     // not worth taking down an always-on surface.

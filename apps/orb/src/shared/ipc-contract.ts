@@ -47,6 +47,7 @@ export const IPC = {
   machineLoad: 'tessa:machine-load',
   jobs: 'tessa:jobs',
   voiceLevel: 'tessa:voice-level',
+  power: 'tessa:power',
   voiceWords: 'tessa:voice-words',
   transcriptPartial: 'tessa:transcript-partial',
 
@@ -210,6 +211,19 @@ export interface VoiceLevelPush {
   seq: number | null;
   ts: string;
   mainAt: number;
+}
+
+export interface PowerPush {
+  onBattery: boolean;
+  source: string;
+}
+
+export interface SceneBoot {
+  onBattery: boolean;
+  powerSource: string;
+  quality: string | null;
+  cssOverlays: boolean;
+  fixture: string | null;
 }
 
 export const DRAWER_LIST = [
@@ -453,6 +467,7 @@ export interface OrbNotification {
   level: 'info' | 'warn' | 'error';
   title: string;
   body: string;
+  from?: 'daemon';
 }
 
 /* ───────────────────────────────────────────────────── approval (§4.1/§5.1) */
@@ -530,6 +545,8 @@ export interface ApprovalRefusal {
   code: string;
   message: string;
   requestStillPending: boolean;
+  reasked?: boolean;
+  tool?: string;
 }
 
 /* ─────────────────────────────────────────────────── SENTINEL / TRACE data */
@@ -669,6 +686,7 @@ export interface BootstrapInfo {
    * clicked without the Orb ever needing the foreground. See dev-drive.ts.
    */
   devScript: string | null;
+  scene: SceneBoot;
   /**
    * The theme to paint on first frame — restored from disk, or `cyan` when
    * there is nothing valid to restore.
@@ -732,6 +750,7 @@ export interface TessaBridge {
   onMachineLoad(listener: (load: MachineLoad) => void): () => void;
   onJobs(listener: (jobs: JobView[]) => void): () => void;
   onVoiceLevel(listener: (push: VoiceLevelPush) => void): () => void;
+  onPower(listener: (power: PowerPush) => void): () => void;
   onVoiceWords(listener: (words: VoiceWords) => void): () => void;
   onTranscriptPartial(listener: (partial: TranscriptPartial) => void): () => void;
 

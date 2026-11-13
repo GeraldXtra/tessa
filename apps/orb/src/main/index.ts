@@ -17,6 +17,7 @@ import {
   globalShortcut,
   ipcMain,
   Menu,
+  powerMonitor,
   screen,
   session,
   type Session,
@@ -49,12 +50,16 @@ import {
   type PttMode,
   type TrayCommand,
 } from '../shared/ipc-contract.ts';
+import { TYPING_TOOL, isFrozenCard, isReasked } from '../shared/cards.ts';
 import { buildFailureText, buildSummary, checkBuild } from './build-check.ts';
+import { CARD_FIXTURE_KINDS, approvalFixtureDelay, approvalFixtureFlag, argsBytes, cardFixture } from './card-fixtures.ts';
+import { playScene, sceneFixtureFlag } from './scene-fixture.ts';
+import { grantForeground } from './foreground.ts';
 import { gpuFeatureSummary, probeGpu } from './gpu-probe.ts';
 import { JobTable, KEEP_TERMINAL_MS } from './job-table.ts';
 import { MachineLoadSampler } from './machine-load.ts';
 import { PttController } from './ptt-controller.ts';
-import { DEFAULT_THEME, isThemeId, loadTheme, orbThemePath, saveTheme } from './theme-state.ts';
+import { DEFAULT_THEME, isThemeId, loadTheme, orbThemePath, saveTheme, themeFileAllowed } from './theme-state.ts';
 import { setStartAtSignIn, shortcutPlace, startupExists } from './shortcuts.ts';
 import { OrbTray, type TrayActions, type TrayView } from './tray.ts';
 import { createOrbWindow, hardenWebContents, isInstrumentedLaunch, setCompactWindow } from './window.ts';
@@ -84,7 +89,7 @@ const wantsCapture =
   process.argv.some(
     (a) => a.startsWith('--capture-every=') || a === '--dev-noactivate' || (a.startsWith('--dev-drive=') && a.includes('capture:')),
   );
-if (wantsCapture) {
+if (wantsCapture && !process.argv.includes('--dev-occlusion')) {
   app.commandLine.appendSwitch('disable-features', 'CalculateNativeWinOcclusion');
 }
 if (isDev && process.argv.some((a) => a.startsWith('--dev-heap-profile='))) {
@@ -386,7 +391,21 @@ function loadFixture(): Fixture | null {
   };
 }
 
-const fixture = loadFixture();
+const sceneFixture = sceneFixtureFlag(process.argv, isDev, AGENT_STATES);
+const fixture: Fixture | null =
+  loadFixture() ??
+  (sceneFixture
+    ? {
+        label: 'SCENE FIXTURE',
+        daemonVersion: 'fixture',
+        machine: null,
+        disk: null,
+        frames: [],
+        every: [{ type: 'evt.daemon.health', ms: 5000, payload: { uptimeS: 1, cpuPct: 0, memMB: 0, apiReachable: false, budgetSpent: 0, budgetCap: 0 }, inc: { uptimeS: 5 } }],
+        typed: null,
+        pins: [],
+      }
+    : null);
 
 /* ─────────────────────────────────────────────────────────── session policy */
 
@@ -601,7 +620,7 @@ if (!instrumentedDevLaunch && !app.requestSingleInstanceLock()) {
     // instrumented run — which is every capture and every measurement in this
     // project — was rendering a palette no code path would ever choose. It
     // reads DEFAULT_THEME now, so the fallback cannot drift again.
-    const themeLoad = instrumented && !themePersist
+    const themeLoad = !themeFileAllowed(instrumented, themePersist)
       ? {
           theme: DEFAULT_THEME,
           migrated: false,
@@ -677,6 +696,17 @@ if (!instrumentedDevLaunch && !app.requestSingleInstanceLock()) {
       }
       refreshTray();
     };
+    const powerState = (): { onBattery: boolean; source: string } => {
+      const forced = devFlagValue('--dev-battery=');
+      if (forced === 'on' || forced === 'off') return { onBattery: forced === 'on', source: `--dev-battery=${forced}` };
+      try {
+        return { onBattery: powerMonitor.isOnBatteryPower(), source: 'powerMonitor' };
+      } catch {
+        return { onBattery: false, source: 'unknown' };
+      }
+    };
+    const power = powerState();
+    log(`power: ${power.onBattery ? 'on battery' : 'on the charger'} (${power.source})`);
     const bootstrap: BootstrapInfo = {
       surfaceVersion: app.getVersion(),
       isDev,
@@ -720,6 +750,13 @@ if (!instrumentedDevLaunch && !app.requestSingleInstanceLock()) {
         const flag = process.argv.find((a) => a.startsWith('--dev-drive='));
         return flag ? flag.slice('--dev-drive='.length) : null;
       })(),
+      scene: {
+        onBattery: power.onBattery,
+        powerSource: power.source,
+        quality: devFlagValue('--dev-quality='),
+        cssOverlays: isDev && process.argv.includes('--dev-css-overlays'),
+        fixture: sceneFixture ? sceneFixture.steps.map((x) => `${x.state}:${x.ms}`).join(',') : null,
+      },
     };
     if (bootstrap.forcedState || bootstrap.devKeys || bootstrap.forceFallback) {
       log(
@@ -743,6 +780,15 @@ if (!instrumentedDevLaunch && !app.requestSingleInstanceLock()) {
         if (!window.isDestroyed()) window.webContents.send(channel, payload);
       }
     };
+    if (devFlagValue('--dev-battery=') === null) {
+      const onPower = (): void => {
+        const p = powerState();
+        log(`power: ${p.onBattery ? 'on battery' : 'on the charger'} (${p.source}) at wall=${Date.now()}`);
+        broadcast(IPC.power, p);
+      };
+      powerMonitor.on('on-battery', onPower);
+      powerMonitor.on('on-ac', onPower);
+    }
 
     /**
      * Drop every pending approval and tell the renderer why.
@@ -1102,22 +1148,30 @@ if (!instrumentedDevLaunch && !app.requestSingleInstanceLock()) {
        */
       onApprovalRefused: (requestId, code, message) => {
         const stillPending = code === 'protocol.badEnvelope';
-        if (stillPending) {
-          const request = refusableApprovals.get(requestId);
-          if (request) pendingApprovals.set(requestId, request);
-        }
+        const reasked = isReasked(code);
+        const held = refusableApprovals.get(requestId);
+        if (stillPending && held) pendingApprovals.set(requestId, held);
         refusableApprovals.delete(requestId);
         log(
-          `approval REFUSED ${requestId}: ${code} — ${message} ` +
-            `(request ${stillPending ? 'is still pending, card restored' : 'is gone'})`,
+          reasked
+            ? `approval ${requestId} answered ${code}: a NEW card is up for ${held?.tool ?? 'this action'}; this one is resolved and nothing ran from it`
+            : `approval REFUSED ${requestId}: ${code} — ${message} ` +
+                `(request ${stillPending ? 'is still pending, card restored' : 'is gone'})`,
         );
         broadcast(IPC.approvalRefused, {
           requestId,
           code,
           message,
           requestStillPending: stillPending,
+          ...(reasked ? { reasked: true } : {}),
+          ...(held ? { tool: held.tool } : {}),
         });
         cardsChanged('refused');
+      },
+
+      onNotification: (note) => {
+        log(`notification from the daemon: level=${note.level} id=${note.id}`);
+        broadcast(IPC.notify, note);
       },
 
       onApprovalResolved: (requestId, decision, decidedBy) => {
@@ -1227,7 +1281,7 @@ if (!instrumentedDevLaunch && !app.requestSingleInstanceLock()) {
      *     behind them; putting one of those on the wire would be fabricating a
      *     response to something that never happened.
      */
-    ipcMain.on(IPC.approvalRespond, (_event, message: unknown) => {
+    ipcMain.on(IPC.approvalRespond, async (_event, message: unknown) => {
       if (typeof message !== 'object' || message === null) return;
       const { requestId, decision, editedArgs } = message as {
         requestId?: unknown;
@@ -1274,21 +1328,51 @@ if (!instrumentedDevLaunch && !app.requestSingleInstanceLock()) {
         return;
       }
 
+      if (edited && isFrozenCard(request.tool, request.args)) {
+        log(`!! refused editedArgs for ${requestId}: ${request.tool} is a frozen card and nothing on it can be changed`);
+        broadcast(IPC.approvalRefused, {
+          requestId,
+          code: 'frozen',
+          message: 'nothing on this card can be changed, so an edited answer was not sent',
+          requestStillPending: true,
+          tool: request.tool,
+        });
+        return;
+      }
+
       // Delete BEFORE the send. Everything after this point is unreachable for
       // a second message carrying the same id. Kept aside so a refused edit can
       // put the card back — see refusableApprovals.
       pendingApprovals.delete(requestId);
       refusableApprovals.set(requestId, request);
 
+      const typingApproval = decision === 'approve' && request.tool === TYPING_TOOL;
+
       if (request.fixture) {
         log(
           `FIXTURE approval '${decision}'${edited ? ' (EDITED)' : ''} for ${requestId} — ` +
             `NOT sent to the daemon. There is no daemon request behind a fixture card.`,
         );
+        if (typingApproval && isDev && process.argv.includes('--dev-foreground-self')) {
+          void grantForeground(process.pid).then((r) =>
+            log(`FOREGROUND fixture self-grant to this Orb's own pid ${process.pid} (dev only, no daemon): ${r.ok ? 'granted' : 'not granted'} in ${r.ms} ms, exit ${String(r.exitCode)}: ${r.detail}`),
+          );
+        }
         refusableApprovals.delete(requestId);
         broadcast(IPC.approvalCleared, { requestId, reason: 'resolved', decision });
         cardsChanged('answered');
         return;
+      }
+
+      if (typingApproval) {
+        const pid = connection?.daemonPid ?? null;
+        log(`FOREGROUND letting the daemon (pid ${pid ?? 'unknown'}) bring the typing target back, before the approval for ${requestId} leaves`);
+        const grant = await grantForeground(pid);
+        log(`FOREGROUND ${grant.ok ? 'granted' : 'not granted'} in ${grant.ms} ms, exit ${String(grant.exitCode)}: ${grant.detail}`);
+        if (!refusableApprovals.has(requestId)) {
+          log(`!! approval for ${requestId} not sent: the request was resolved or the daemon changed while the grant ran`);
+          return;
+        }
       }
 
       const result = connection?.sendPermissionResponse(requestId, decision, edited) ?? {
@@ -1427,7 +1511,7 @@ if (!instrumentedDevLaunch && !app.requestSingleInstanceLock()) {
       activeTheme = value;
       broadcast(IPC.themeChanged, value);
       refreshTray();
-      if (instrumented && !themePersist) {
+      if (!themeFileAllowed(instrumented, themePersist)) {
         log(`theme ${value} NOT saved — instrumented launch (would overwrite his choice)`);
         return;
       }
@@ -1517,6 +1601,31 @@ if (!instrumentedDevLaunch && !app.requestSingleInstanceLock()) {
                 ptt.chordPressed();
               }, 34);
             }, 511);
+          }
+        }
+        const winHook = /^WIN (minimize|hide|top)(?: (\d{1,6}))?$/.exec(String(line));
+        if (winHook && instrumented) {
+          const win = BrowserWindow.fromWebContents(event.sender);
+          const what = winHook[1] as string;
+          const back = winHook[2] ? Number(winHook[2]) : 0;
+          if (win && !win.isDestroyed()) {
+            if (what === 'top') {
+              win.setAlwaysOnTop(true);
+              setTimeout(() => {
+                if (!win.isDestroyed()) win.setAlwaysOnTop(false);
+              }, 60);
+            } else {
+              if (what === 'minimize') win.minimize();
+              else win.hide();
+              if (back > 0) {
+                setTimeout(() => {
+                  if (win.isDestroyed()) return;
+                  win.showInactive();
+                  log(`WIN-HOOK shown again (inactive) at wall=${Date.now()}`);
+                }, back);
+              }
+            }
+            log(`WIN-HOOK ${what}${back ? ` for ${back} ms` : ''} at wall=${Date.now()}: visible=${win.isVisible()} minimised=${win.isMinimized()} (dev-only hook)`);
           }
         }
         const m = /^CAPTURE ([A-Za-z0-9_-]{1,40})$/.exec(String(line));
@@ -2031,17 +2140,18 @@ if (!instrumentedDevLaunch && !app.requestSingleInstanceLock()) {
      * the point rather than a problem — it proves the replay path cannot
      * duplicate a card.
      */
-    const fixtureApproval = isDev
-      ? process.argv.find((a) => a.startsWith('--fixture-approval='))?.slice('--fixture-approval='.length)
-      : undefined;
-    if (fixtureApproval) {
-      const kinds = fixtureApproval.split(',').map((k) => k.trim()).filter(Boolean);
+    const fixtureKinds = approvalFixtureFlag(process.argv, isDev);
+    const fixtureDelay = approvalFixtureDelay(process.argv, isDev);
+    if (fixtureKinds.length > 0) {
+      const kinds = fixtureKinds;
       const expiresAt = new Date(Date.now() + 30 * 60_000).toISOString();
       let seeded = 0;
+      const late: PermissionRequest[] = [];
       for (const kind of kinds) {
-        const set = APPROVAL_FIXTURES[kind];
+        const builtAt = performance.now();
+        const set = APPROVAL_FIXTURES[kind] ?? cardFixture(kind);
         if (!set) {
-          log(`!! --fixture-approval: unknown kind '${kind}' (have ${Object.keys(APPROVAL_FIXTURES).join(', ')})`);
+          log(`!! --fixture-approval: unknown kind '${kind}' (have ${[...Object.keys(APPROVAL_FIXTURES), ...CARD_FIXTURE_KINDS].join(', ')})`);
           continue;
         }
         for (const base of set) {
@@ -2051,7 +2161,12 @@ if (!instrumentedDevLaunch && !app.requestSingleInstanceLock()) {
             receivedAt: Date.now(),
             fixture: true,
           };
-          pendingApprovals.set(request.requestId, request);
+          log(`FIXTURE-CARD ${request.requestId} kind=${kind} tool=${request.tool} argsBytes=${argsBytes(request.args)} builtMs=${(performance.now() - builtAt).toFixed(1)}`);
+          if (fixtureDelay) {
+            late.push(request);
+          } else {
+            pendingApprovals.set(request.requestId, request);
+          }
           seeded += 1;
         }
       }
@@ -2059,6 +2174,17 @@ if (!instrumentedDevLaunch && !app.requestSingleInstanceLock()) {
         `!! FIXTURE APPROVAL injected: ${seeded} card(s) from [${kinds.join(', ')}] — ` +
           `NOT from the daemon, and no decision on one will ever reach the wire`,
       );
+      if (fixtureDelay) {
+        late.forEach((request, i) => {
+          setTimeout(() => {
+            const arriving: PermissionRequest = { ...request, receivedAt: Date.now() };
+            pendingApprovals.set(arriving.requestId, arriving);
+            log(`FIXTURE-ARRIVE ${arriving.requestId} wall=${arriving.receivedAt}`);
+            broadcast(IPC.approvalRequested, arriving);
+            cardsChanged('arrived');
+          }, fixtureDelay.at + i * fixtureDelay.gap);
+        });
+      }
       onSnapshotHooks.push(() => {
         for (const request of pendingApprovals.values()) {
           if (request.fixture) broadcast(IPC.approvalRequested, request);
@@ -2289,6 +2415,7 @@ if (!instrumentedDevLaunch && !app.requestSingleInstanceLock()) {
           setTimeout(fire, 300);
           setInterval(fire, r.ms);
         }
+        if (sceneFixture) playScene(sceneFixture, (type, payload) => connection?.ingestFixture(type, payload, null), log);
       });
     } else {
       connection.start();

@@ -45,6 +45,7 @@ import {
   type TessaBridge,
   type TrayCommand,
   type VoiceLevelPush,
+  type PowerPush,
   type VoiceWords,
 } from '../shared/ipc-contract.ts';
 
@@ -145,6 +146,7 @@ const bridge: TessaBridge = {
   onMachineLoad: subscribe<MachineLoad>(IPC.machineLoad),
   onJobs: subscribe<JobView[]>(IPC.jobs),
   onVoiceLevel: subscribe<VoiceLevelPush>(IPC.voiceLevel),
+  onPower: subscribe<PowerPush>(IPC.power),
   onVoiceWords: subscribe<VoiceWords>(IPC.voiceWords),
   onTranscriptPartial: subscribe<TranscriptPartial>(IPC.transcriptPartial),
   onAuditAppended: subscribe<AuditEntry>(IPC.auditAppended),

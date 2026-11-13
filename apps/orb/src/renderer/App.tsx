@@ -13,8 +13,11 @@ import {
   approvalsStore,
   approvalsSweepExpired,
 } from './state/approval-store.ts';
+import { reaskedLine } from '../shared/cards.ts';
+import { noteCardArrival } from './ui/Card.tsx';
 import { installChurnProbe } from './ui/churn.ts';
 import { Interface } from './ui/Interface.tsx';
+import { noteFor } from './ui/notes-view.ts';
 import {
   auditLoadedStore,
   diskStore,
@@ -248,9 +251,11 @@ export function App() {
     const offMic = window.tessa.onMicState((state) => micStore.set(state));
     const offNote = window.tessa.onNotification((note) => {
       if (note.id === 'ptt-chord-failed') return;
-      pushNote(note.level === 'info' ? 'ORB' : note.level.toUpperCase(), `${note.title}. ${note.body}`);
+      const view = noteFor(note);
+      pushNote(view.src, view.msg, view.kind, view.sticky);
     });
     const offApproval = window.tessa.onApprovalRequested((request) => {
+      noteCardArrival(request.requestId);
       const fresh = !approvalsStore.get().some((e) => e.request.requestId === request.requestId);
       approvalArrived(request);
       if (fresh) pushNote('APPROVAL', `${request.tool} is waiting on you.`, 'wait');
@@ -269,7 +274,9 @@ export function App() {
     });
     const offApprovalRefused = window.tessa.onApprovalRefused((refusal) => {
       const entry = approvalsStore.get().find((e) => e.request.requestId === refusal.requestId);
-      if (entry && !refusal.requestStillPending) {
+      if (refusal.reasked) {
+        pushNote('APPROVAL', reaskedLine(entry?.request.tool ?? refusal.tool ?? ''), 'wait');
+      } else if (entry && !refusal.requestStillPending) {
         pushNote('APPROVAL', `${entry.request.tool}: the daemon refused (${refusal.code}): ${refusal.message}`);
       }
       approvalRefused(
@@ -687,6 +694,8 @@ export function App() {
             <Sphere
               forceFallback={bootstrap.forceFallback}
               clock={bootstrap.clock}
+              scene={bootstrap.scene}
+              isDev={bootstrap.isDev}
               onEngineReady={onEngineReady}
               onStateRendered={onStateRendered}
               onMark={onMark}

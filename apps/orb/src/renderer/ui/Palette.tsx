@@ -25,6 +25,7 @@ const THEME_LABEL: Readonly<Record<ThemeId, string>> = {
   violet: 'Violet',
   emerald: 'Emerald',
   red: 'Red',
+  ultron: 'Ultron',
 };
 
 const MODES: readonly (readonly [OrbMode, string])[] = [

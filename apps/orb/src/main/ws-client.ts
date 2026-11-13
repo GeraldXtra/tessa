@@ -42,6 +42,7 @@ import type { RawData } from 'ws';
 import {
   AGENT_STATES,
   JOB_STATUSES,
+  NOTIFICATION_LEVELS,
   CLOSE_CODES,
   HANDSHAKE_DEADLINE_MS,
   MAX_FRAME_BYTES,
@@ -67,6 +68,7 @@ import {
   type AuditEntry,
   type ConnectionStatus,
   type DaemonHealth,
+  type OrbNotification,
   type PermissionRequest,
   type PingResult,
   type PtySession,
@@ -94,35 +96,9 @@ export interface FixtureTyped {
   answers: FixtureTurn[];
 }
 import { readRuntimeFile, type RuntimeInfo } from './runtime-file.ts';
+import { TOPICS } from './topics.ts';
 import { TranscriptAssembler, type TranscriptDelta } from './transcript-assembler.ts';
-
-/**
- * Topics subscribed after a successful hello.
- *
- * Prefix globs per CONTRACT §5.1. Verified against the daemon's matcher rather
- * than assumed: `core/server.py::topic_matches` strips the first segment of the
- * type before comparing, so `daemon.*` matches `evt.daemon.health` and
- * `agent.*` matches `evt.agent.state`.
- *
- * Everything here has somewhere to render. `job.*` and `companion.*` are still
- * absent for that reason — subscribing to events with nowhere to draw them
- * would burn frames decoding JSON to drop it.
- */
-const TOPICS = [
-  'daemon.*',
-  'agent.*',
-  'audit.*',
-  'pty.*',
-  'transcript.*',
-  // Without this the approval card can never appear. `evt.permission.request`
-  // goes through the daemon's topic filter like everything else, so a surface
-  // that does not ask for it simply never learns a red action is waiting —
-  // it would see only the pending error, or hear the spoken refusal, and look
-  // like the card was broken.
-  'permission.*',
-  'job.*',
-  'voice.*',
-] as const;
+import { markInvisibleText } from '../shared/cards.ts';
 
 function cleanText(v: unknown, max: number): string {
   if (typeof v !== 'string') return '';
@@ -302,6 +278,7 @@ export interface DaemonConnectionOptions {
    * tell those apart is to know which process is on the other end.
    */
   onDaemonInstance: (instance: string, changed: boolean) => void;
+  onNotification: (note: OrbNotification) => void;
   log: (message: string) => void;
 }
 
@@ -408,6 +385,10 @@ export class DaemonConnection {
 
   get current(): ConnectionStatus {
     return this.status;
+  }
+
+  get daemonPid(): number | null {
+    return this.status.phase === 'connected' && this.openedAgainst ? this.openedAgainst.pid : null;
   }
 
   start(): void {
@@ -1538,6 +1519,21 @@ export class DaemonConnection {
           stages,
         });
       }
+      return;
+    }
+
+    if (parsed.type === 'evt.notification') {
+      const p = parsed.payload as Record<string, unknown>;
+      const rawLevel = p['level'];
+      const level = typeof rawLevel === 'string' && (NOTIFICATION_LEVELS as readonly string[]).includes(rawLevel) ? (rawLevel as OrbNotification['level']) : null;
+      const title = typeof p['title'] === 'string' ? markInvisibleText(p['title'].slice(0, 200)).trim() : '';
+      const body = typeof p['body'] === 'string' ? markInvisibleText(p['body'].slice(0, 1000)).trim() : '';
+      if (!level || (!title && !body)) {
+        this.opts.log(`!! evt.notification dropped: level=${level ?? `not one of ${NOTIFICATION_LEVELS.join('|')}`} title=${title ? 'ok' : 'MISSING'} body=${body ? 'ok' : 'MISSING'}`);
+        return;
+      }
+      this.opts.log(`NOTIFICATION-IN level=${level} title=${title.length} chars body=${body.length} chars`);
+      this.opts.onNotification({ id: `daemon-${parsed.id}`, level, title, body, from: 'daemon' });
       return;
     }
 

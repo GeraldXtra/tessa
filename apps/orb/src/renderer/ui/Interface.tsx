@@ -5,6 +5,7 @@ import type { PlasmaEngine } from '../scene/plasma-engine.ts';
 import { approvalsStore } from '../state/approval-store.ts';
 import { closeQuick, composeStore, requestComposeFocus } from '../state/compose-store.ts';
 import { agentStateStore, connectionStore, RAIL_IDS, railStore, useStore } from '../state/store.ts';
+import { stageStore } from '../state/scene-inputs.ts';
 import { rawStateStore, stopHer, stoppable, turnStore } from '../state/voice.ts';
 import { Band } from './Band.tsx';
 import { Boot } from './Boot.tsx';
@@ -14,7 +15,7 @@ import { QuickLine } from './Chat.tsx';
 import { Drawer } from './Drawers.tsx';
 import { CaptionLine, Chip } from './Followers.tsx';
 import { installKeys, openRail, toggleRail } from './keys.ts';
-import { computeCompact, computeLayout, MARGIN, TOP } from './layout.ts';
+import { CAL_COMPACT, CAL_FULL, computeCompact, computeLayout, MARGIN, RAILS, TOP } from './layout.ts';
 import { Notes, TraceStack } from './LeftColumn.tsx';
 import { closePalette, modeStore, paletteStore, setMode } from './modes.ts';
 import { Palette } from './Palette.tsx';
@@ -87,6 +88,17 @@ export function Interface({ bootstrap, engine, sphere }: { bootstrap: BootstrapI
   useEffect(() => {
     engine?.setFollowers({ chip: chipRef.current, caption: capRef.current, quick: quickRef.current });
   }, [engine]);
+
+  useEffect(() => {
+    if (compact) {
+      stageStore.set(null);
+      return;
+    }
+    const colRight = layout.colShown ? MARGIN + layout.lcW + 14 : MARGIN + 8;
+    const calRight = layout.cal === 'full' ? MARGIN + CAL_FULL.w + 14 : layout.cal === 'compact' ? MARGIN + CAL_COMPACT.w + 14 : 0;
+    const x1 = layout.bandW > 0 ? layout.bandX - 12 : layout.W - RAILS - layout.dw - 12;
+    stageStore.set({ x0: Math.max(colRight, calRight), y0: TOP + 10, x1, y1: layout.cy + layout.R * 0.9 });
+  }, [layout, compact]);
 
   const canStop = stoppable(connection.phase === 'connected', cardUp);
   useEffect(() => {
